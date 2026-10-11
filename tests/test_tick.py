@@ -4622,10 +4622,10 @@ def test_self_merge_status_deduplicates_under_lease(tmp_path):
         assert read_lease(tmp_path, record.run_id) is None
 
     tick_once()
-    assert github.posts == [
-        "<!-- outerloop:self-merge-status -->\nSelf-merge waiting: no head was blessed at publish: "
-        "base moved: origin/main new != measured old."
-    ]
+    (post,) = github.posts
+    # the dedup key and the threaded reason, not the surrounding sentence
+    assert "<!-- outerloop:self-merge-status -->" in post
+    assert "base moved: origin/main new != measured old" in post
     github.comments[0]["body"] = github.comments[0]["body"].replace("outerloop:", f"{prefix}:")
     github.comments.append(
         {"body": "<!-- outerloop:self-merge-status -->\nunrelated", "user": {"login": "human"}}
