@@ -6,6 +6,14 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Documentation
+
+- Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
+  files (`OUTERLOOP_STEWARD_KEY_FILE`, `OUTERLOOP_PANEL_KEY_FILE`,
+  `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
+  install guide, and mark the verification-loop and dispatcher design notes
+  as built (#337).
+
 ### Changed
 
 - A review round refused because the pinned harness is too old for the model,
@@ -17,6 +25,9 @@ Versions follow [SemVer](https://semver.org).
 - A session that ends in error while an out-of-memory kill happens in the job
   ended its run with only the session's symptom; the ending now notes when an
   out-of-memory kill was observed in the job during the session (#483).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note

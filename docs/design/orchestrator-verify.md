@@ -1,7 +1,12 @@
 # The pre-PR verification loop
 
-**Status: proposal (2026-08-15).** The mechanics of verification as a step of
-the climb transaction. `judge-placement.md` argues *where* the verifier
+**Status: built — the tick passes `--panel verify,review` to every climb job
+by default (the off-switch is `OUTERLOOP_PANEL=""`; local mode without an
+image also turns the panel off unless `OUTERLOOP_PANEL_UNCONTAINED=1`);
+sequencing stages 1–4 below are live, the retriever egress (5) is still to
+come.** The mechanics
+of verification as a step of the climb transaction. `judge-placement.md`
+argues *where* the verifier
 belongs (inside the orchestrator) and why the reviewer stays external — this
 note does not repeat that argument. It specifies the loop that runs there:
 what happens between "the candidate measured improved" and "a PR exists",
@@ -11,9 +16,10 @@ result-policies), `reviewer-infra.md` (threat model), and `consolidation.md`
 
 ## Why pre-PR
 
-Today the verifier reads bot PRs after they open. Moving it before the PR
-changes what a PR *is*: the output of verification rather than the input to
-it. A maintainer never sees half-baked work — the recurring cost of watching
+Before this loop, the verifier read bot PRs after they opened. Moving it
+before the PR changes what a PR *is*: the output of verification rather
+than the input to it. A maintainer never sees half-baked work — the
+recurring cost of watching
 early drafts was named the day the notes-vs-PR question first came up. Three
 more things fall out of the same move:
 
@@ -25,7 +31,7 @@ more things fall out of the same move:
 - **Event-driven, not clock-driven.** The verify step fires when the
   candidate measures improved, inside the climb job — no second event plane.
 - **The strong jail.** Judge sessions adopt the climb's apptainer
-  containment when this step lands; today's GitHub-side judges run in the
+  containment; the GitHub-side judges run in the
   runner sandbox instead. Backend eligibility above rests on the token
   point, not on the jail.
 
@@ -140,7 +146,7 @@ bless a head. See [lifecycle.md](lifecycle.md).
 ## What changes on GitHub
 
 - `verify.yml` on targets thins to defense-in-depth (a re-check of the
-  posted PR) or retires once the pre-PR loop is live; the choice can be
+  posted PR) or retires; the choice can be
   per-target.
 - The **advisory reviewer for human PRs is untouched** — it is an external
   service with standalone value, and none of this note applies to it.
