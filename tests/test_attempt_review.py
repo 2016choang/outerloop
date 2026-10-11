@@ -97,21 +97,21 @@ class FakeGitHub(LedgerGitHub):
         return True
 
 
-def review_github(bare: Path):
-    """A FakeGitHub whose branch tips and PR ancestry come from the bare
-    remote — the review client that answers preflight from real git history."""
+@dataclass
+class ReviewGitHub(FakeGitHub):
+    """Answers branch tips and PR ancestry from the bare remote — the review
+    client that answers preflight from real git history."""
 
-    class ReviewGitHub(FakeGitHub):
-        def branch_sha(self, repo, branch):
-            return _git(bare, "rev-parse", f"refs/heads/{branch}").strip()
+    bare: Path = field(default_factory=Path)
 
-        def head_contains(self, repo, base, head):
-            return _git(bare, "merge-base", base, head).strip() == base
+    def branch_sha(self, repo, branch):
+        return _git(self.bare, "rev-parse", f"refs/heads/{branch}").strip()
 
-        def disable_auto_merge(self, *args):
-            return True
+    def head_contains(self, repo, base, head):
+        return _git(self.bare, "merge-base", base, head).strip() == base
 
-    return ReviewGitHub
+    def disable_auto_merge(self, *args):
+        return True
 
 
 @dataclass
@@ -1012,7 +1012,8 @@ def test_review_submit_parks_and_delivers_verdict(review_run, monkeypatch, credi
     record = load_record(root, "tsp-r1")
     save_record(root, replace(record, stage={"base_sha": head}), NOW)
 
-    github = review_github(_bare)(
+    github = ReviewGitHub(
+        bare=_bare,
         pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}, "base": {"ref": "main"}},
         comments=[member(101, "submit this")],
     )
@@ -1190,7 +1191,8 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
 
     monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
 
-    github = review_github(bare)(
+    github = ReviewGitHub(
+        bare=bare,
         pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
         comments=[member(101, "submit with the fresh ruler")],
     )
@@ -1286,11 +1288,12 @@ def test_review_submit_scope_includes_existing_pr_changes(
     monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
     monkeypatch.setattr("outerloop.attempt.publish", capture_publish)
 
-    class NoArmedMerge(review_github(bare)):
+    class NoArmedMerge(ReviewGitHub):
         def enable_auto_merge(self, *args, **kwargs):
             pytest.fail("skipped panel armed auto-merge")
 
     github = NoArmedMerge(
+        bare=bare,
         pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
         comments=[member(101, "submit")],
     )
