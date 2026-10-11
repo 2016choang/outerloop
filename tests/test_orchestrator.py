@@ -1071,7 +1071,10 @@ def test_pr_body_does_not_mark_zero_turn_backends_as_carried_forward(tmp_path: P
 
 
 def test_report_covers_failure_outcomes(tmp_path: Path) -> None:
+    # 14.5 against 13.876 is a minimize-direction regression: a bare negative
     result, _, _ = run_climb(tmp_path, [13.876, 14.5])
+    assert result.outcome == "no-improvement"
+    assert "negative result" in result.note
     report = result.report(CONFIG)
     assert "no-improvement" in report
     assert "13.876" in report
@@ -1584,6 +1587,18 @@ FLOOR_CONTRACT = CONTRACT.replace(
     1,
 )
 
+DECIMAL_FLOOR_CONTRACT = CONTRACT.replace(
+    "    direction: min\n",
+    "    direction: min\n    min_delta: 0.1\n",
+    1,
+)
+
+INF_FLOOR_CONTRACT = CONTRACT.replace(
+    "    direction: min\n",
+    "    direction: min\n    min_delta: .inf\n",
+    1,
+)
+
 
 def test_gate_enforces_the_contracts_declared_floor(tmp_path: Path) -> None:
     """The yolo#16 class: a delta that clears the relative default but sits
@@ -1603,13 +1618,31 @@ def test_gate_publishes_a_floor_clearing_delta(tmp_path: Path) -> None:
     assert result.outcome == "improved"
 
 
-def test_gate_credits_an_exact_floor_delta_and_rejects_below_it(tmp_path: Path) -> None:
-    # boundary matches clears_min_delta: the floor is INCLUSIVE — the
-    # contract's floor is the smallest movement it calls real, so a delta
-    # equal to it publishes; anything below it is the noise the floor models
-    result, _, _ = run_climb(tmp_path, [13.876, 13.376], contract=FLOOR_CONTRACT)
-    assert result.outcome == "improved"
-    result, _, _ = run_climb(tmp_path, [13.876, 13.4], contract=FLOOR_CONTRACT)
+@pytest.mark.parametrize(
+    ("contract", "at_the_floor", "below_the_floor"),
+    [
+        # boundary matches clears_min_delta: the floor is INCLUSIVE — the
+        # contract's floor is the smallest movement it calls real, so a delta
+        # equal to it publishes; anything below it is the noise the floor models
+        (FLOOR_CONTRACT, [13.876, 13.376], [13.876, 13.4]),
+        # 0.3 - 0.2 is 0.09999999999999998 in binary; the contract said 0.1 and
+        # the candidate moved 0.1, so the gate must credit it
+        (DECIMAL_FLOOR_CONTRACT, [0.3, 0.2], [0.3, 0.2001]),
+        # an infinite floor has no at-the-floor case: it rejects even a huge
+        # movement instead of crashing on it
+        (INF_FLOOR_CONTRACT, None, [13.876, 1.0]),
+    ],
+)
+def test_gate_credits_an_exact_floor_delta_and_rejects_below_it(
+    tmp_path: Path,
+    contract: str,
+    at_the_floor: list[float] | None,
+    below_the_floor: list[float],
+) -> None:
+    if at_the_floor is not None:
+        result, _, _ = run_climb(tmp_path, at_the_floor, contract=contract)
+        assert result.outcome == "improved"
+    result, _, _ = run_climb(tmp_path, below_the_floor, contract=contract)
     assert result.outcome == "no-improvement"
     assert "inside the contract's significance floor" in (result.note or "")
 
