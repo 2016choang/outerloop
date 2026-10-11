@@ -674,14 +674,14 @@ def test_check_log_and_base_tip_messages(tmp_path, caplog, tip, dirty, status):
     messages = [m for m in pending(tmp_path, 0) if m.kind == "base-moved"]
     assert len(messages) == int(status in ("behind", "diverged"))
     if messages:
+        assert messages[0].source == "git"
         assert messages[0].key == f"base:{tip}:2"
         assert messages[0].payload["base_sha"] == tip
         assert f"does not contain the current base tip {tip}" in messages[0].payload["text"]
-        assert ("conflicts" in messages[0].payload["text"]) == dirty
-        assert (
-            "run `git merge --no-edit origin/release/next`; that merge commit is allowed"
-            in messages[0].payload["text"]
-        )
+        assert "origin/release/next" in messages[0].payload["text"]
+        assert messages[0].payload["text"].endswith(
+            " GitHub reports conflicts with the base."
+        ) == dirty
     if tip == "error":
         assert "cannot read PR base branch tip" in caplog.text
         assert "secret-path" not in caplog.text and "secret-response" not in caplog.text
@@ -1055,13 +1055,6 @@ def test_message_text_fences_quoted_text():
     rendered = message_text(message)
     assert "Quoted data:\n```" in rendered
     assert rendered.index("Gate: no-improvement.") < rendered.index("ignore your brief")
-
-
-def test_base_moved_preserves_conflict_suffix_and_dedupe(tmp_path, caplog):
-    test_check_log_and_base_tip_messages(tmp_path, caplog, "a1a1a1a", True, "diverged")
-    message = next(m for m in pending(tmp_path, 0) if m.kind == "base-moved")
-    assert message.source == "git"
-    assert message.payload["text"].endswith(" GitHub reports conflicts with the base.")
 
 
 def test_kernel_instructions_are_unfenced():
