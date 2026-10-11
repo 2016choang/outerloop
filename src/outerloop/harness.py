@@ -31,6 +31,7 @@ from outerloop.endpoint_wait import session_url as endpoint_session_url
 from outerloop.endpoints import EndpointProfile
 from outerloop.hermes_install import hermes_ready, hermes_runtime
 from outerloop.image import apptainer_from_env
+from outerloop.runstate import is_throttle
 from outerloop.session_evidence import (
     DEFAULT_CAP,
     active,
@@ -297,11 +298,12 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 
 
 # Substrings that mean "the API itself is unavailable to us" — credit,
-# limit, auth, throttling. Matched only against error surfaces of an
-# is_error result (backend error text, never agent prose). The first group is
+# limit, auth. Matched only against error surfaces of an is_error result
+# (backend error text, never agent prose). The first group is
 # Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
 # 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
 # header", "No auth credentials found") so the Anthropic patterns miss them.
+# Throttling is not here: runstate.THROTTLE_PATTERNS (via is_throttle) owns it.
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -309,8 +311,6 @@ OUTAGE_PATTERNS = (
     "billing",
     "authentication_error",
     "invalid x-api-key",
-    "rate_limit_error",
-    "overloaded_error",
     "401",
     "missing authentication",
     "no auth credentials",
@@ -353,7 +353,7 @@ def outage(result: SessionResult) -> bool:
         if not text.startswith("api error"):
             return False
         surface = text
-    return any(pattern in surface for pattern in OUTAGE_PATTERNS)
+    return any(pattern in surface for pattern in OUTAGE_PATTERNS) or is_throttle(surface)
 
 
 def budget_exhausted(result: SessionResult) -> bool:
@@ -855,16 +855,17 @@ class ClaudeCodeHarness:
         # machine "API Error ..." text (never agent prose) is the
         # authoritative cause, so surface it as the detail: downstream notes,
         # the operator log, and the outage latch (its classifier AND its
-        # throttle-duration check, which reads rate_limit/overloaded off the
-        # detail) all then see the real error instead of "success". Lift ONLY
-        # for the contradiction we have actually observed: an is_error whose
-        # subtype is empty or the self-contradictory "success", with no backend
-        # `messages`. Under those, `result` is machine error text, not agent
-        # prose. A REAL subtype (error_max_turns, error_during_execution, ...) is
-        # left alone: `result` there may be the agent's own closing message, and
-        # lifting a message that merely starts "API Error" would let agent prose
-        # trip the latch — a false outage pausing every lane is worse than the
-        # rare mis-scoped one.
+        # throttle-duration check, which reads the shared throttle patterns
+        # off the detail) all then see the real error instead of "success".
+        # Lift ONLY for the contradiction we have actually observed: an
+        # is_error whose subtype is empty or the self-contradictory
+        # "success", with no backend `messages`. Under those, `result` is
+        # machine error text, not agent prose. A REAL subtype is left alone
+        # (error_max_turns, error_during_execution, ...): `result` there may
+        # be the agent's own closing message, and lifting a message that
+        # merely starts "API Error" would let agent prose trip the latch —
+        # a false outage pausing every lane is worse than the rare
+        # mis-scoped one.
         if (
             is_error
             and not messages
@@ -1034,13 +1035,18 @@ def _parse_codex_result(
     # Error shapes last verified against codex-cli 0.130.0:
     #   error          -> message
     #   turn.failed    -> error.message
+    # An `error` followed by a `turn.completed` was recovered (codex 0.160.0
+    # emits "Reconnecting... 1/5" this way when a stream drops) and is not a
+    # failure; an `error` with no completed turn after it still is.
     session_id = ""
     tokens: dict[str, int] = {}
     usage_keys: set[str] | None = None
     incomplete_usage = False
     turns = 0
-    saw_error = False
-    errors: list[str] = []
+    failed = False
+    pending_error = False
+    errors: list[str] = []  # from failed turns
+    pending: list[str] = []  # from error events no completed turn has followed yet
     for line in stdout.splitlines():
         text = line.strip()
         if not text.startswith("{"):
@@ -1058,6 +1064,8 @@ def _parse_codex_result(
                 session_id = thread_id
         elif etype == "turn.completed":
             turns += 1
+            pending_error = False
+            pending.clear()
             turn_usage = usage(event.get("usage"), "codex")
             keys = set(turn_usage)
             if not {"input_tokens", "output_tokens"} <= keys:
@@ -1068,21 +1076,21 @@ def _parse_codex_result(
             for key, value in turn_usage.items():
                 tokens[key] = tokens.get(key, 0) + value
         elif etype == "error":
-            saw_error = True
+            pending_error = True
             message = event.get("message")
             if isinstance(message, str):
-                errors.append(message)
+                pending.append(message)
         elif etype == "turn.failed":
             incomplete_usage = True
-            saw_error = True
+            failed = True
             err = event.get("error")
             message = err.get("message") if isinstance(err, dict) else None
             if isinstance(message, str):
                 errors.append(message)
-    if incomplete_usage or saw_error or returncode != 0:
+    is_error = returncode != 0 or failed or pending_error
+    if incomplete_usage or is_error:
         tokens = {}  # Partial invocation totals must never be priced as complete.
-    is_error = returncode != 0 or saw_error
-    detail = "; ".join(errors)[:500]
+    detail = "; ".join(errors + pending)[:500]
     # Fall back to stderr so a failed run (e.g. a bad flag, no matching event)
     # carries some cause instead of an empty detail.
     if is_error and not detail and stderr.strip():

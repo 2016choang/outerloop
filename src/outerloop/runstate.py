@@ -57,7 +57,22 @@ LEASE_NAME = "lease.json"
 # the orchestrator for most of an hour (review finding).
 OUTAGE_COOLDOWN_S = 45 * 60
 THROTTLE_COOLDOWN_S = 5 * 60
-_THROTTLE_HINTS = ("rate_limit", "overloaded")
+# How each backend words throttling (refusal over rate, never credit/auth);
+# shared by harness.outage and the short cooldown below.
+THROTTLE_PATTERNS = (
+    "rate_limit",
+    "rate limit",
+    "overloaded",
+    "too many requests",
+)
+
+
+def is_throttle(detail: str) -> bool:
+    """True when backend error text `detail` says we were refused over rate."""
+    text = detail.casefold()
+    return any(pattern in text for pattern in THROTTLE_PATTERNS)
+
+
 # Stamps are written on compute nodes and read on other hosts: a stamp a
 # few seconds "in the future" is NTP skew and must count as active, while
 # a far-future timestamp is corruption and must not pause forever.
@@ -84,11 +99,7 @@ def stamp_outage(root: Path, detail: str, now: float, role: str = "solver") -> N
     # which is exactly the failure the latch exists to prevent
     path = _outage_path(root, role)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    cooldown = (
-        THROTTLE_COOLDOWN_S
-        if any(hint in detail.casefold() for hint in _THROTTLE_HINTS)
-        else OUTAGE_COOLDOWN_S
-    )
+    cooldown = THROTTLE_COOLDOWN_S if is_throttle(detail) else OUTAGE_COOLDOWN_S
     tmp.write_text(json.dumps({"detail": detail[:300], "time": now, "cooldown_s": cooldown}))
     os.replace(tmp, path)
 
