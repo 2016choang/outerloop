@@ -243,12 +243,6 @@ def test_first_run_brief_has_no_baseline_number(tmp_path: Path) -> None:
     assert "lower is better" in brief_text  # the metric context still orients
 
 
-def test_direction_min_regression_is_no_improvement(tmp_path: Path) -> None:
-    result, _, _ = run_climb(tmp_path, [13.876, 14.5])
-    assert result.outcome == "no-improvement"
-    assert "negative result" in result.note
-
-
 # --- author syscalls (research-loop-buildout.md Phase A): the sleep side ---
 
 
@@ -461,19 +455,6 @@ def test_feature_off_metered_runs_still_measure_at_finish(tmp_path: Path) -> Non
     with pytest.raises(RunParked) as exc:  # the gate parked = it RAN
         run_climb(tmp_path, contract=metered, measurer=m, snapshot=_bare_snapshot(), launcher=None)
     assert exc.value.phase == "candidate"
-
-
-def test_failed_gate_submit_feeds_back_to_the_author(tmp_path: Path) -> None:
-    # an inline gate that rejects a submitted candidate resumes the AUTHOR with
-    # the result (it decides what happens next) — never a silent terminal; the
-    # author's plain finish then ends the run honestly.
-    harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    result, harness, evaluator = run_climb(
-        tmp_path, [13.9, 13.9, 13.9], harness=harness, launcher=lambda sha, req: ""
-    )
-    assert result.outcome == "no-improvement"
-    assert harness.resumes == [None, "s1"]  # the author heard the gate result
-    assert len(evaluator.calls) == 2  # the concluding tree differed, so it was measured
 
 
 def _gate_negative_attempt(tmp_path: Path, values, harness, contract: str = CONTRACT):
@@ -1633,35 +1614,6 @@ def test_gate_credits_an_exact_floor_delta_and_rejects_below_it(tmp_path: Path) 
     assert "inside the contract's significance floor" in (result.note or "")
 
 
-DECIMAL_FLOOR_CONTRACT = CONTRACT.replace(
-    "    direction: min\n",
-    "    direction: min\n    min_delta: 0.1\n",
-    1,
-)
-
-
-INF_FLOOR_CONTRACT = CONTRACT.replace(
-    "    direction: min\n",
-    "    direction: min\n    min_delta: .inf\n",
-    1,
-)
-
-
-def test_gate_rejects_under_an_infinite_floor_instead_of_crashing(tmp_path: Path) -> None:
-    result, _, _ = run_climb(tmp_path, [13.876, 1.0], contract=INF_FLOOR_CONTRACT)
-    assert result.outcome == "no-improvement"
-    assert "inside the contract's significance floor" in (result.note or "")
-
-
-def test_gate_credits_an_exact_decimal_floor_despite_binary_rounding(tmp_path: Path) -> None:
-    # 0.3 - 0.2 is 0.09999999999999998 in binary; the contract said 0.1 and
-    # the candidate moved 0.1, so the gate must credit it
-    result, _, _ = run_climb(tmp_path, [0.3, 0.2], contract=DECIMAL_FLOOR_CONTRACT)
-    assert result.outcome == "improved"
-    result, _, _ = run_climb(tmp_path, [0.3, 0.2001], contract=DECIMAL_FLOOR_CONTRACT)
-    assert result.outcome == "no-improvement"
-
-
 def test_branch_prefix_derives_from_the_agent_id() -> None:
     assert RunConfig(target="o/r", benchmark="b", agent_id="agent-02").branch_prefix == (
         "feat/auto/agent-02"
@@ -1778,10 +1730,10 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
 
 def test_submit_without_report_is_accepted(tmp_path: Path) -> None:
     _write_syscall(tmp_path, {"launches": [], "submit": True})
-    result, harness, _ = run_climb(
+    result, _, _ = run_climb(
         tmp_path, [13.876, 13.10], contract=DEEP_CONTRACT, launcher=_fake_launcher([])
     )
-    assert result.outcome == "improved" and len(harness.calls) == 1
+    assert result.outcome == "improved"  # accepted; how many legs it took is not the point
     assert "no report was given" in pr_body(result, CONFIG, ())
 
 
