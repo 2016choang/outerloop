@@ -442,13 +442,16 @@ def test_post_from_file_publishes_the_skip_stub(tmp_path: Path) -> None:
         tmp_path,
         kind="skip-stub",
         detail="rate_limit_error: slow down",
-        reviewed_by="evil\n# forged",
+        reviewed_by="*evil* [x](http://e)\n# forged",
     )
     label = post_from_file(client, "org/repo", 7, "autoresearch-bot", path)  # type: ignore[arg-type]
     assert label == "skip-stub"
     assert client.reviews == []
     assert len(client.comments) == 1 and "could not run" in client.comments[0]
     assert "\n# forged" not in client.comments[0]  # reviewed_by sanitized, not raw
+    # the attribution renders in a code span: surviving markdown cannot
+    # close the stub's emphasis and forge content
+    assert "`*evil* [x](http://e) # forged`" in client.comments[0]
 
 
 def test_post_from_file_stub_is_skip_checked_and_sanitized(tmp_path: Path) -> None:

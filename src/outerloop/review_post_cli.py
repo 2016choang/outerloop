@@ -72,10 +72,14 @@ def post_from_file(
             detail = sanitize(str(envelope.get("detail", "")), 300)
             # name WHOSE round failed: with two standing reviewers, an
             # unattributed stub is ambiguous exactly when a key dies.
-            # reviewed_by is untrusted here too: same sanitizer as the stamp
-            who = " ".join(opinion_label.split())[:MAX_OPINION_LABEL] or sanitize_attribution(
-                str(envelope.get("reviewed_by", ""))
-            )
+            # reviewed_by is untrusted here too: same sanitizer as the stamp,
+            # then a code span like the stamp's "reviewer `X`" — the role
+            # renders inside the stub's emphasis, and surviving markdown
+            # must not close it (the sanitizer strips backticks, so it
+            # cannot break out of the span). The opinion label is trusted
+            # operator config and renders bare.
+            label = " ".join(opinion_label.split())[:MAX_OPINION_LABEL]
+            who = label or f"`{sanitize_attribution(str(envelope.get('reviewed_by', '')))}`"
             role = f"advisory review ({who})" if who else "advisory review"
             post_skip_stub(client, repo, number, role, RuntimeError(detail))
             return "skip-stub"
