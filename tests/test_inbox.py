@@ -32,6 +32,13 @@ class FakeGitHub:
         return list(self.review_comments)
 
 
+def pr_record(run_id="run", **fields):
+    """A parked run with a PR thread: the shape every gather scenario starts from."""
+    return RunRecord(
+        run_id, "org/repo", "task", PARKED, pr_url="https://github.com/org/repo/pull/9", **fields
+    )
+
+
 def test_append_numbers_and_deduplicates_atomically(tmp_path, monkeypatch):
     import outerloop.inbox as inbox
 
@@ -238,13 +245,7 @@ def test_a_legacy_record_migrates_findings_to_inbox(tmp_path):
     converts them; a load never writes anything, inbox included."""
     import json
 
-    record = RunRecord(
-        "run",
-        "org/repo",
-        "task",
-        PARKED,
-        pr_url="https://github.com/org/repo/pull/9",
-    )
+    record = pr_record()
     save_record(tmp_path, record, 10)
     path = run_dir(tmp_path, "run") / "state.json"
     raw = json.loads(path.read_text())
@@ -381,9 +382,7 @@ def test_inbox_writers_refuse_symlinks(tmp_path, destination):
 def test_github_positions_follow_durable_messages_per_collection(tmp_path, monkeypatch, crash):
     import outerloop.inbox as inbox
 
-    record = RunRecord(
-        "run", "org/repo", "task", PARKED, pr_url="https://github.com/org/repo/pull/9"
-    )
+    record = pr_record()
 
     def comment(cid):
         return {
@@ -490,14 +489,7 @@ def test_reply_destination_survives_thread_change_and_legacy_entry(tmp_path):
 def test_checks_are_deduplicated_messages_with_context_rules(tmp_path, conclusion):
     from outerloop.inbox import gather_github_messages, wake_pending
 
-    record = RunRecord(
-        "run",
-        "org/repo",
-        "task",
-        PARKED,
-        pr_url="https://github.com/org/repo/pull/9",
-        stage={"base_sha": "base"},
-    )
+    record = pr_record(stage={"base_sha": "base"})
     pr = {"head": {"sha": "f4eb413abc"}, "base": {"sha": "base"}}
 
     class GitHub(FakeGitHub):
@@ -624,14 +616,7 @@ def test_check_log_and_base_tip_messages(tmp_path, caplog, tip, dirty, status):
     caplog.set_level("DEBUG", logger="outerloop.inbox")
     from outerloop.inbox import gather_github_messages
 
-    record = RunRecord(
-        "run",
-        "org/repo",
-        "task",
-        PARKED,
-        pr_url="https://github.com/org/repo/pull/9",
-        stage={"base_sha": "base"},
-    )
+    record = pr_record(stage={"base_sha": "base"})
     pr = {
         "head": {"sha": "abc"},
         "base": {"sha": "base", "ref": "release/next"},
@@ -954,13 +939,7 @@ def test_github_comment_association_reaches_wake_header(tmp_path):
         ),
     )
 
-    record = RunRecord(
-        tmp_path.name,
-        "org/repo",
-        "task",
-        PARKED,
-        pr_url="https://github.com/org/repo/pull/9",
-    )
+    record = pr_record(tmp_path.name)
     gather_github_messages(tmp_path, record, github, "bot", 1, {})
     assert wake_pending(tmp_path, record)
     messages = pending(tmp_path, record.inbox_seq)
