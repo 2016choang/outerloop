@@ -891,6 +891,66 @@ def end(args: argparse.Namespace) -> int:
     return 0
 
 
+def message(args: argparse.Namespace) -> int:
+    """Deliver one operator note to a run's inbox for its next wake."""
+    import fcntl
+    import time
+    import uuid
+
+    from outerloop.brief import MAX_COMMENT_CHARS, cap
+    from outerloop.inbox import Message, append
+    from outerloop.runstate import RECORD_NAME, load_record, run_dir
+
+    try:
+        values = env_file_values(keys=("OUTERLOOP_ROOT",))
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        if not args.run_id or args.run_id in (".", "..") or Path(args.run_id).name != args.run_id:
+            raise ValueError(f"unknown run id: {args.run_id}")
+        directory = run_dir(root, args.run_id)
+        if not (directory / RECORD_NAME).is_file():
+            raise ValueError(f"unknown run id: {args.run_id}")
+        if args.file and args.text is not None:
+            raise ValueError("give the message text directly or with --file, not both")
+        text = (args.file.read_text() if args.file else args.text) or ""
+        if not text.strip():
+            raise ValueError("no message text")
+        with (directory / ".record-lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            record = load_record(root, args.run_id)
+            if record.ended():
+                raise ValueError(f"run {args.run_id} already ended ({record.ending})")
+            stored = append(
+                directory,
+                Message(
+                    0,
+                    "note",
+                    "kernel",
+                    "",
+                    time.time(),
+                    f"operator:{uuid.uuid4().hex}",
+                    {
+                        "text": f"Message from the operator:\n\n"
+                        f"{cap(text.strip(), MAX_COMMENT_CHARS)}"
+                    },
+                    origin="operator",
+                ),
+            )
+    except (ValueError, OSError) as exc:
+        print(f"outerloop message: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"Run {args.run_id}: message {stored.seq} queued in its inbox. It is delivered at "
+        "the run's next wake — a run sleeping on jobs sees it when they finish; a paused "
+        "loop delivers when it resumes."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     from outerloop import __version__
 
@@ -969,6 +1029,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("run_id")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p.add_argument("--note", default="", help="reason for ending the run")
+    p = sub.add_parser(
+        "message",
+        help="leave a note in a run's inbox, delivered at its next wake",
+        description="Append one message to a run's inbox from the operator. The run sees "
+        "it at its next wake or resumed leg — a run sleeping on jobs sees it when they "
+        "finish; a paused loop delivers when it resumes. No new wake is scheduled.",
+    )
+    p.add_argument("run_id")
+    p.add_argument("text", nargs="?", help="the message text")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p.add_argument("--file", type=Path, help="read the message text from this path")
     p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p = sub.add_parser("status", help="show local runs and endpoint outages (read-only)")
@@ -1043,6 +1114,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "end":
         return end(args)
+    if args.command == "message":
+        return message(args)
     if args.command == "permissions":
         return permissions(args)
     if args.command == "upgrade":
