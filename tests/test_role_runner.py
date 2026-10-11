@@ -71,6 +71,28 @@ def test_session_error_propagates(tmp_path: Path) -> None:
     assert result.error == "boom"
 
 
+def test_session_error_names_an_oom_kill_during_the_session(tmp_path: Path, monkeypatch) -> None:
+    # the cgroup's oom_kill counter rises across the session; the error
+    # detail names the cause ahead of the symptom
+    events = tmp_path / "memory.events"
+    events.write_text("oom_kill 3\n")
+
+    @dataclass
+    class OomHarness:
+        def run(
+            self, brief_text: str, workspace: Path, resume_session_id: str | None = None
+        ) -> SessionResult:
+            events.write_text("oom_kill 4\n")  # the job's memory limit killed the bridge
+            return _session(is_error=True, error_detail="codex bridge unavailable or interrupted")
+
+    monkeypatch.setattr("outerloop.role_runner._MEMORY_EVENTS", events)
+    result = run_role(reviewer_spec(), OomHarness(), "brief", tmp_path)
+    assert result.error == (
+        "out of memory: the job's memory limit killed a session process "
+        "(oom_kill +1); codex bridge unavailable or interrupted"
+    )
+
+
 def test_editing_role_needs_no_schema() -> None:
     result = run_role(author_spec(), _SeqHarness([_session("done")]), "brief", _WORKSPACE)
     assert result.ok is True

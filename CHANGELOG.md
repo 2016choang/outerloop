@@ -14,6 +14,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A session process killed by the job's memory limit (a Slurm OOM kill) ended
+  its run with only the session's symptom; the ending now names the cause
+  (#483).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
