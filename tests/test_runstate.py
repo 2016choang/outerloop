@@ -205,12 +205,7 @@ def test_outage_latch_pauses_then_expires(tmp_path) -> None:
 
 
 def test_throttling_stamps_a_short_pause(tmp_path) -> None:
-    """A 429/529 is transient: the stamp carries its own short cooldown,
-    so one throttled session never idles the lanes for most of an hour.
-    Codex's 429 wording (#481) takes this path too — the SAME shared
-    patterns make harness.outage call it an outage (the run parks, never
-    ends aborted) and make the latch pause briefly. A number that merely
-    contains "429" is not throttling."""
+    """Throttling is an outage that takes the latch's short cooldown, never the long one."""
     from outerloop.harness import SessionResult, outage
 
     detail = "exceeded retry limit, last status: 429 Too Many Requests"
@@ -232,7 +227,8 @@ def test_throttling_stamps_a_short_pause(tmp_path) -> None:
     stamp_outage(tmp_path, "rate_limit_error: Number of requests exceeded", now=1000.0)
     assert "rate_limit" in outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S - 1)
     assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S) == ""
-    assert not is_throttle("failed after 1429 of 34297 tokens")
+    assert not is_throttle("context length exceeded: 429 tokens requested, limit is 200000")
+    assert not is_throttle("exceeded retry limit, last status: 500")
 
 
 def test_corrupt_outage_stamp_reads_inactive(tmp_path) -> None:

@@ -14,13 +14,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
-- A model-API rate limit (HTTP 429) is now recognized as an outage in the
-  wording each backend reports it — Codex's "exceeded retry limit, last
-  status: 429 Too Many Requests" and the OpenAI-compatible/hermes "rate
-  limit" / "too many requests" shapes — so throttled runs park instead of
-  ending aborted (#481).
-- Throttling now always takes the outage latch's short 5-minute cooldown,
-  decided by the same shared patterns that classify it as an outage (#481).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note

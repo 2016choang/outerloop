@@ -19,7 +19,6 @@ import fcntl
 import json
 import logging
 import os
-import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -58,29 +57,20 @@ LEASE_NAME = "lease.json"
 # the orchestrator for most of an hour (review finding).
 OUTAGE_COOLDOWN_S = 45 * 60
 THROTTLE_COOLDOWN_S = 5 * 60
-# The ONE notion of throttling: the wording each backend reports when the
-# API refuses us over RATE (a per-minute quota, a momentary overload) —
-# never over credit or auth. Both decisions read this same tuple, so they
-# cannot disagree (#481): harness.outage folds it into its outage
-# classification (a throttled run parks, it never ends aborted), and
-# stamp_outage gives any of it the SHORT cooldown above. Matched as one
-# casefolded regex against backend error text only; the 429 is word-shaped
-# so a bare number inside another number (a token count, a line number)
-# cannot trip it.
+# How each backend words throttling (refusal over rate, never credit/auth);
+# shared by harness.outage and the short cooldown below.
 THROTTLE_PATTERNS = (
-    "rate_limit",  # Anthropic "rate_limit_error"
-    "rate limit",  # OpenAI-compatible / hermes wording
-    "overloaded",  # Anthropic "overloaded_error" (529)
-    "too many requests",  # "429 Too Many Requests" (codex, OpenAI-compatible)
-    "exceeded retry limit",  # codex gave up retrying a throttled stream
-    r"\b429\b",
+    "rate_limit",
+    "rate limit",
+    "overloaded",
+    "too many requests",
 )
-_THROTTLE_RE = re.compile("|".join(THROTTLE_PATTERNS))
 
 
 def is_throttle(detail: str) -> bool:
     """True when backend error text `detail` says we were refused over rate."""
-    return _THROTTLE_RE.search(detail.casefold()) is not None
+    text = detail.casefold()
+    return any(pattern in text for pattern in THROTTLE_PATTERNS)
 
 
 # Stamps are written on compute nodes and read on other hosts: a stamp a

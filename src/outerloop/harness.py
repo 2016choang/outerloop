@@ -303,9 +303,7 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 # Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
 # 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
 # header", "No auth credentials found") so the Anthropic patterns miss them.
-# Throttling is NOT here: runstate.THROTTLE_PATTERNS (via is_throttle) owns
-# that wording so the outage classification and the latch's short cooldown
-# come from one shared list (#481).
+# Throttling is not here: runstate.THROTTLE_PATTERNS (via is_throttle) owns it.
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -859,15 +857,15 @@ class ClaudeCodeHarness:
         # the operator log, and the outage latch (its classifier AND its
         # throttle-duration check, which reads the shared throttle patterns
         # off the detail) all then see the real error instead of "success".
-        # Lift ONLY
-        # for the contradiction we have actually observed: an is_error whose
-        # subtype is empty or the self-contradictory "success", with no backend
-        # `messages`. Under those, `result` is machine error text, not agent
-        # prose. A REAL subtype (error_max_turns, error_during_execution, ...) is
-        # left alone: `result` there may be the agent's own closing message, and
-        # lifting a message that merely starts "API Error" would let agent prose
-        # trip the latch — a false outage pausing every lane is worse than the
-        # rare mis-scoped one.
+        # Lift ONLY for the contradiction we have actually observed: an
+        # is_error whose subtype is empty or the self-contradictory
+        # "success", with no backend `messages`. Under those, `result` is
+        # machine error text, not agent prose. A REAL subtype is left alone
+        # (error_max_turns, error_during_execution, ...): `result` there may
+        # be the agent's own closing message, and lifting a message that
+        # merely starts "API Error" would let agent prose trip the latch —
+        # a false outage pausing every lane is worse than the rare
+        # mis-scoped one.
         if (
             is_error
             and not messages
