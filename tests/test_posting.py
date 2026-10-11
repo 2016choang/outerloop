@@ -224,6 +224,47 @@ def test_rounds_count_per_reviewer() -> None:
     assert "**Round 2**" in label and "(re-run on the same head)" in label
 
 
+def test_summarizer_and_single_reviewer_share_one_count() -> None:
+    # the summarizer posts as "summarizer:<backend> over lens+lens" while a
+    # label-triggered round posts as plain "<backend>": the SAME underlying
+    # reviewer must keep counting (regression: two "Round 1" verdicts minutes
+    # apart on one PR)
+    who = "hermes/gpt-5.6-terra"
+    summarizer = f"summarizer:{who} over coverage+credentials+deployment"
+
+    class _C:
+        def __init__(self, prior_stamp: str) -> None:
+            self.prior_stamp = prior_stamp
+
+        def list_comments(self, repo, number):
+            return [{"body": f"<!-- m -->\n{self.prior_stamp}\nx"}]
+
+        def list_pr_reviews(self, repo, number):
+            return []
+
+    pr_data = {"head": {"sha": "bbbb2222cccc"}}
+    # a single-reviewer round after a summarizer round is Round 2, not Round 1
+    _stamp, label = posting._round_stamp(
+        _C(f"**Round 1** — reviewed head `aaaa1111` — reviewer `{summarizer}`."),  # type: ignore[arg-type]
+        "o/r",
+        1,
+        "<!-- m -->",
+        pr_data,
+        who,
+    )
+    assert label == "**Round 2**"
+    # and the reverse: a summarizer round after a single-reviewer round
+    _stamp, label = posting._round_stamp(
+        _C(f"**Round 1** — reviewed head `aaaa1111` — reviewer `{who}`."),  # type: ignore[arg-type]
+        "o/r",
+        1,
+        "<!-- m -->",
+        pr_data,
+        summarizer,
+    )
+    assert label == "**Round 2**"
+
+
 def test_round_stamp_fits_a_panel_attribution_without_mid_word_cut() -> None:
     # the summarizer's reviewed_by names every lens: it must render whole,
     # not truncate mid-word (regression: a 60-char cap cut '...+de')

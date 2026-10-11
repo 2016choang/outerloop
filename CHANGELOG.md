@@ -22,6 +22,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note

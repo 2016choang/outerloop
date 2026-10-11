@@ -50,6 +50,21 @@ def post_round(
     return round_label
 
 
+# every attribution a round stamp carries — one capture per "reviewer `...`"
+# clause; the attribution itself is backtick-free (sanitized below)
+_REVIEWER_ATTR = re.compile(r"reviewer `([^`]*)`")
+
+
+def _reviewer_key(by: str) -> str:
+    """The stable reviewer id behind an attribution: the summarizer posts
+    as `summarizer:<backend> over lens+lens` while a single-reviewer round
+    posts as plain `<backend>` — the same underlying reviewer, one count,
+    so a label-triggered round never restarts at Round 1."""
+    if by.startswith("summarizer:"):
+        return by.removeprefix("summarizer:").split(" over ", 1)[0]
+    return by
+
+
 def _round_stamp(
     client: GitHubClient,
     repo: str,
@@ -83,10 +98,15 @@ def _round_stamp(
         prior = [b for b in bodies if b.lstrip().startswith(marker)]
         # Rounds count PER REVIEWER: with several standing opinions on one
         # PR, a shared counter reads as re-reviews that never happened
-        # (terra "Round 1", claude "Round 2"). Unattributed rounds keep the
-        # shared count.
+        # (terra "Round 1", claude "Round 2"). The key strips the summarizer
+        # decoration, so the summarizer path and the single-reviewer path
+        # for the SAME reviewer share one count; unattributed rounds keep
+        # the shared count.
         if by:
-            prior = [b for b in prior if f"reviewer `{by}`" in b]
+            key = _reviewer_key(by)
+            prior = [
+                b for b in prior if key in {_reviewer_key(a) for a in _REVIEWER_ATTR.findall(b)}
+            ]
         round_label = f"**Round {len(prior) + 1}**"
         if head_sha and any(f"reviewed head `{head_sha}`" in b for b in prior):
             round_label += " (re-run on the same head)"
