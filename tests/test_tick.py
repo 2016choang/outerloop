@@ -442,22 +442,20 @@ def test_pending_past_deadline_on_a_queue_wait_extends_instead(tmp_path: Path) -
     by one slack window (Torch 2026-09-06, four launches on QOSMaxGRESPerUser)."""
     from outerloop.tick import BLIND_PARK_SLACK_MIN
 
-    for reason in ("QOSMaxGRESPerUser", "Priority", "Resources", "AssocGrpGRES"):
+    # one wait and one never reason: the reason strings only branch through
+    # is_queue_wait, classified exhaustively in test_is_queue_wait_classifies
+    for reason, waits in (("QOSMaxGRESPerUser", True), ("DependencyNeverSatisfied", False)):
         root = tmp_path / reason  # one root per case: ticks on one root coalesce
         waiting_run(root, deadline=NOW - 1)
         slurm = FakeSlurm(states={"100": "PENDING"}, reasons={"100": reason})
         report, dispatcher = run_tick(root, slurm)
-        assert slurm.cancelled == [], reason
-        assert report.woken == () and dispatcher.dispatched == [], reason
-        assert load_record(root, "r1").deadline == NOW + BLIND_PARK_SLACK_MIN * 60, reason
-    # reasons that never clear on their own still cancel and wake
-    for reason in ("DependencyNeverSatisfied", "QOSMaxWallDurationPerJobLimit", "InvalidAccount"):
-        root = tmp_path / reason
-        waiting_run(root, deadline=NOW - 1)
-        slurm = FakeSlurm(states={"100": "PENDING"}, reasons={"100": reason})
-        report, _dispatcher = run_tick(root, slurm)
-        assert slurm.cancelled == ["100"], reason
-        assert report.woken == (("r1", "unschedulable"),), reason
+        if waits:
+            assert slurm.cancelled == [], reason
+            assert report.woken == () and dispatcher.dispatched == [], reason
+            assert load_record(root, "r1").deadline == NOW + BLIND_PARK_SLACK_MIN * 60, reason
+        else:
+            assert slurm.cancelled == ["100"], reason
+            assert report.woken == (("r1", "unschedulable"),), reason
 
 
 def test_pending_past_deadline_reason_query_failure_defers(tmp_path: Path) -> None:
@@ -805,6 +803,14 @@ roadmap: docs/roadmap.md
     )
 
 
+def _panel_key(root: Path, name: str = "vkey") -> Path:
+    """A usable 0600 panel key, as the preflight demands."""
+    key = root / name
+    key.write_text("k")
+    key.chmod(0o600)
+    return key
+
+
 def _run(run_id, benchmark, created, state=ENDED, ending="negative-result", target="org/pilot"):
     return RunRecord(
         run_id=run_id,
@@ -875,9 +881,7 @@ def test_self_initiated_pending_marker_blocks_duplicates(tmp_path: Path) -> None
     )
 
     contract = _self_contract()
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")  # preflight: no usable key, no launch
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
     spec = ServiceSpec(
         qos="priority",
         target="org/pilot",
@@ -965,9 +969,8 @@ def test_disk_preflight_gates_launch_lanes(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("lane", ["intake", "steward", "self_initiated"])
 @pytest.mark.parametrize("dry_run", [False, True])
-@pytest.mark.parametrize("service_dry_run", [False, True])
 def test_hold_launches_preserves_servicing_and_resumes(
-    tmp_path, monkeypatch, caplog, lane, dry_run, service_dry_run
+    tmp_path, monkeypatch, caplog, lane, dry_run
 ):
     import logging
     from unittest.mock import Mock
@@ -1014,7 +1017,9 @@ def test_hold_launches_preserves_servicing_and_resumes(
             github=github,
             service_spec=spec,
             dry_run=dry_run,
-            service_dry_run=service_dry_run,
+            # deliberately inverted so the lane assertions below fail if the
+            # lanes ever receive dry_run instead of service_dry_run
+            service_dry_run=not dry_run,
             min_free_bytes=1,
             min_tick_s=0,
         )
@@ -1039,7 +1044,7 @@ def test_hold_launches_preserves_servicing_and_resumes(
     resumed = step(NOW + GRACE + 3)
     assert not resumed.launch_blocked
     assert getattr(resumed, lane) == ("work", "123")
-    assert lanes[lane].call_args.kwargs["dry_run"] is service_dry_run
+    assert lanes[lane].call_args.kwargs["dry_run"] is (not dry_run)
 
 
 def test_hold_launches_reports_without_services(tmp_path):
@@ -1322,9 +1327,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")  # preflight: no usable key, no launch
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -1695,6 +1698,31 @@ roadmap: docs/roadmap.md
     assert min(operator_minutes, limits.followup_job_minutes) == 30
 
 
+class StewardIssueGitHub:
+    """One owner-labelled outerloop:steward issue, open for claiming; the
+    steward lane's standard scenario."""
+
+    def __init__(self, number: int = 21, title: str = "re-base the tsp pool"):
+        self.issue = {
+            "number": number,
+            "title": title,
+            "body": "",
+            "user": {"login": "renmengye"},
+            "author_association": "OWNER",
+            "labels": [{"name": "outerloop:steward"}],
+        }
+        self.comments_posted: list[tuple[int, str]] = []
+
+    def list_open_issues(self, repo, max_pages: int = 3):
+        return [self.issue]
+
+    def list_comments(self, repo, number, max_pages: int = 20):
+        return []
+
+    def comment(self, repo, number, body):
+        self.comments_posted.append((number, body))
+
+
 def test_steward_lane_gates_on_key_and_contract_scope(tmp_path: Path) -> None:
     """Off without the steward's own key; off without a contract steward
     section; claims + submits when both exist."""
@@ -1715,28 +1743,6 @@ roadmap: docs/roadmap.md
     )
     without_steward = load_contract(base_contract % "", "org/pilot")
     limits = effective_limits(with_steward.budgets)
-
-    class G:
-        def __init__(self):
-            self.comments_posted = []
-
-        def list_open_issues(self, repo, max_pages: int = 3):
-            return [
-                {
-                    "number": 21,
-                    "title": "re-base the tsp pool",
-                    "body": "",
-                    "user": {"login": "renmengye"},
-                    "author_association": "OWNER",
-                    "labels": [{"name": "outerloop:steward"}],
-                }
-            ]
-
-        def list_comments(self, repo, number, max_pages: int = 20):
-            return []
-
-        def comment(self, repo, number, body):
-            self.comments_posted.append((number, body))
 
     submitted: list[list[str]] = []
 
@@ -1760,9 +1766,19 @@ roadmap: docs/roadmap.md
 
     compute = SlurmCompute(runner=runner)
     # no key -> lane off, not even an issue scan
-    assert service_steward(tmp_path, G(), compute, spec(""), NOW, with_steward, limits) is None
+    assert (
+        service_steward(
+            tmp_path, StewardIssueGitHub(), compute, spec(""), NOW, with_steward, limits
+        )
+        is None
+    )
     # no steward section -> lane off
-    assert service_steward(tmp_path, G(), compute, spec("/k"), NOW, without_steward, limits) is None
+    assert (
+        service_steward(
+            tmp_path, StewardIssueGitHub(), compute, spec("/k"), NOW, without_steward, limits
+        )
+        is None
+    )
     assert submitted == []
     # an ACTIVE run for the target serializes the lane
     save_record(
@@ -1775,7 +1791,12 @@ roadmap: docs/roadmap.md
         ),
         now=NOW - 5000,
     )
-    assert service_steward(tmp_path, G(), compute, spec("/k"), NOW, with_steward, limits) is None
+    assert (
+        service_steward(
+            tmp_path, StewardIssueGitHub(), compute, spec("/k"), NOW, with_steward, limits
+        )
+        is None
+    )
     save_record(
         tmp_path,
         RunRecord(
@@ -1788,7 +1809,7 @@ roadmap: docs/roadmap.md
         now=NOW - 5000,
     )
     # both present -> claim BEFORE submit, job carries the steward module + key
-    github = G()
+    github = StewardIssueGitHub()
     out = service_steward(tmp_path, github, compute, spec("/k"), NOW, with_steward, limits)
     assert out == ("steward-issue-21", "321")
     # the queue window is bridged: pending marker written, second pass no-ops
@@ -1797,7 +1818,10 @@ roadmap: docs/roadmap.md
     [(_, marker)] = list_pendings(tmp_path, "org/pilot")  # steward lane: legacy marker
     assert marker is not None and marker["benchmark"] == "steward:tsp"
     assert (
-        service_steward(tmp_path, G(), compute, spec("/k"), NOW + 60, with_steward, limits) is None
+        service_steward(
+            tmp_path, StewardIssueGitHub(), compute, spec("/k"), NOW + 60, with_steward, limits
+        )
+        is None
     )
     assert github.comments_posted and "Claimed by the steward" in github.comments_posted[0][1]
     wrap = submitted[0][-1]
@@ -1895,9 +1919,7 @@ def test_author_config_preflight_blocks_before_side_effects(
 
     # a VALID panel key, so the panel preflight passes and the AUTHOR gate is what
     # blocks below (else "submits nothing" could be the panel preflight, not us)
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
 
     def make(**kw: Any) -> ServiceSpec:
         return ServiceSpec(
@@ -2668,9 +2690,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -2763,9 +2783,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -2852,28 +2870,6 @@ roadmap: docs/roadmap.md
     )
     limits = effective_limits(contract.budgets)
 
-    class G:
-        def __init__(self):
-            self.comments_posted = []
-
-        def list_open_issues(self, repo, max_pages: int = 3):
-            return [
-                {
-                    "number": 21,
-                    "title": "re-base the tsp pool",
-                    "body": "",
-                    "user": {"login": "renmengye"},
-                    "author_association": "OWNER",
-                    "labels": [{"name": "outerloop:steward"}],
-                }
-            ]
-
-        def list_comments(self, repo, number, max_pages: int = 20):
-            return []
-
-        def comment(self, repo, number, body):
-            self.comments_posted.append((number, body))
-
     spec = ServiceSpec(
         target="org/pilot",
         account="a",
@@ -2885,7 +2881,7 @@ roadmap: docs/roadmap.md
     )
     write_pending(tmp_path, "org/pilot", "tsp", "777", NOW, agent="agent-02")
     compute = SlurmCompute(runner=lambda argv, timeout_s: CommandResult(0, "RUNNING\n", ""))
-    github = G()
+    github = StewardIssueGitHub()
     assert service_steward(tmp_path, github, compute, spec, NOW + 60, contract, limits) is None
     assert github.comments_posted == []
 
@@ -2910,9 +2906,7 @@ roadmap: docs/roadmap.md
 """,
         "org/speedrun",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
 
     def spec(gpu_partition: str) -> ServiceSpec:
         return ServiceSpec(
@@ -2962,28 +2956,7 @@ roadmap: docs/roadmap.md
         "org/speedrun",
     )
     limits = effective_limits(contract.budgets)
-
-    class G:
-        def __init__(self):
-            self.comments_posted = []
-
-        def list_open_issues(self, repo, max_pages: int = 3):
-            return [
-                {
-                    "number": 7,
-                    "title": "re-cut the val shard",
-                    "body": "",
-                    "user": {"login": "renmengye"},
-                    "author_association": "OWNER",
-                    "labels": [{"name": "outerloop:steward"}],
-                }
-            ]
-
-        def list_comments(self, repo, number, max_pages: int = 20):
-            return []
-
-        def comment(self, repo, number, body):
-            self.comments_posted.append((number, body))
+    github = StewardIssueGitHub(number=7, title="re-cut the val shard")
 
     spec = ServiceSpec(
         target="org/speedrun",
@@ -3002,7 +2975,6 @@ roadmap: docs/roadmap.md
         return CommandResult(0, "9\n", "")
 
     compute = SlurmCompute(runner=runner)
-    github = G()
     assert service_steward(tmp_path, github, compute, spec, NOW, contract, limits) is None
     assert submitted == [] and github.comments_posted == []
 
@@ -3898,20 +3870,56 @@ roadmap: docs/roadmap.md
     assert load_record(tmp_path, record.run_id).stage["launches_cancelled"] is True
 
 
+class QuietPRGitHub:
+    """A quiet open PR on org/repo based on 'base': empty discussion, green
+    checks, head containing the base tip. Sweep tests subclass and vary what
+    their behaviour needs."""
+
+    def __init__(self):
+        self.pr = {
+            "state": "open",
+            "head": {"sha": "head"},
+            "base": {"sha": "base", "ref": "main"},
+        }
+
+    def head_contains(self, repo, base, head):
+        return True
+
+    def branch_sha(self, repo, branch):
+        assert (repo, branch) == ("org/repo", "main")
+        return "base"
+
+    def get_pull_request(self, *args):
+        return self.pr
+
+    def list_comments(self, *args):
+        return []
+
+    def list_pr_reviews(self, *args):
+        return []
+
+    def list_pr_review_comments(self, *args):
+        return []
+
+    def list_check_runs(self, *args):
+        return []
+
+
 @pytest.mark.parametrize("event", ["comment", "base", "merged", "closed"])
-@pytest.mark.parametrize("agent", ["agent-01", "steward"])
-def test_sweep_pr_events_use_one_wake(tmp_path, event, agent):
+def test_sweep_pr_events_use_one_wake(tmp_path, event):
     from ledger_fake import LedgerGitHub
     from outerloop.inbox import pending
     from outerloop.runstate import run_dir
     from outerloop.tick import sweep
 
+    # agent_id is fixed: the steward/agent split only names a merge-refusal
+    # reason (never asserted here) and this PR is unblessed anyway
     record = waiting_run(
         tmp_path,
         experiment_job_id="",
         deadline=0,
         pr_url="https://github.com/org/repo/pull/9",
-        agent_id=agent,
+        agent_id="agent-01",
         stage={"base_sha": "old"},
     )
 
@@ -4266,27 +4274,7 @@ def test_check_message_wakes_only_on_failure(tmp_path, conclusion):
         stage={"base_sha": "base"},
     )
 
-    class GitHub:
-        def head_contains(self, repo, base, head):
-            return True
-
-        def branch_sha(self, repo, branch):
-            assert (repo, branch) == ("org/repo", "main")
-            return "base"
-
-        def get_pull_request(self, *args):
-            return {
-                "state": "open",
-                "head": {"sha": "head"},
-                "base": {"sha": "base", "ref": "main"},
-            }
-
-        def list_comments(self, *args):
-            return []
-
-        list_pr_reviews = list_comments
-        list_pr_review_comments = list_comments
-
+    class GitHub(QuietPRGitHub):
         def list_check_runs(self, *args):
             return [
                 {
@@ -4314,9 +4302,16 @@ def test_check_message_wakes_only_on_failure(tmp_path, conclusion):
     assert bool(report.woken) == (conclusion == "failure")
 
 
-@pytest.mark.parametrize("state", ["parked", "running"])
-@pytest.mark.parametrize("armer", ["bot", "former-bot", "human"])
-@pytest.mark.parametrize("blessed", ["blessed", ""])
+@pytest.mark.parametrize(
+    "state,armer,blessed",
+    [
+        ("parked", "bot", "blessed"),  # withdrawal + both head reports
+        ("parked", "human", "blessed"),  # a human's arm is left alone, heads reported
+        ("parked", "former-bot", "blessed"),  # a former alias's arm is still withdrawn
+        ("running", "bot", "blessed"),  # withdrawal, but a live run gets no report
+        ("parked", "bot", ""),  # unblessed: reports are for the measured head only
+    ],
+)
 def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
     tmp_path, state, armer, blessed, caplog, monkeypatch
 ):
@@ -4334,26 +4329,18 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
         stage={"base_sha": "base"},
     )
 
-    class GitHub:
-        def head_contains(self, repo, base, head):
-            return True
-
-        def branch_sha(self, repo, branch):
-            assert (repo, branch) == ("org/repo", "main")
-            return "base"
-
-        head = "human-1"
+    class GitHub(QuietPRGitHub):
         armed = True
         disarms = 0
 
+        def __init__(self):
+            super().__init__()
+            self.head = "human-1"
+
         def get_pull_request(self, *args):
-            return {
-                "state": "open",
-                "head": {"sha": self.head},
-                "base": {"sha": "base", "ref": "main"},
-                "auto_merge": {"enabled_by": {"login": armer}} if self.armed else None,
-                "mergeable_state": "clean",
-            }
+            pr = dict(self.pr, auto_merge={"enabled_by": {"login": armer}} if self.armed else None)
+            pr["head"] = {"sha": self.head}
+            return pr
 
         def get_file_content(self, *args, **kwargs):
             return (
@@ -4361,13 +4348,6 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
                 "budgets: {gpu_hours_per_run: 1, runs_per_week: 3}\n"
                 "scope: {allowed: [src/]}\nroadmap: docs/roadmap.md\nmerge: auto"
             )
-
-        def list_comments(self, *args):
-            return []
-
-        list_pr_reviews = list_comments
-        list_pr_review_comments = list_comments
-        list_check_runs = list_comments
 
         def disable_auto_merge(self, *args):
             self.disarms += 1
@@ -4377,6 +4357,7 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
         def merge_pull(self, *args, **kwargs):
             raise AssertionError("unblessed head must never merge")
 
+    # the alias path through withdrawal; the rest is the plain login test
     monkeypatch.setenv("OUTERLOOP_BOT_ALIASES", "former-bot")
     github = GitHub()
     caplog.set_level("INFO")
@@ -4601,25 +4582,15 @@ def test_self_merge_status_deduplicates_under_lease(tmp_path):
         pr_url="https://github.com/org/repo/pull/9",
         auto_bless_reason="base moved: origin/main new != measured old",
     )
-    pr = {"state": "open", "head": {"sha": "head"}, "base": {"sha": "base", "ref": "main"}}
 
-    class GitHub:
-        def head_contains(self, repo, base, head):
-            return True
-
-        def branch_sha(self, repo, branch):
-            assert (repo, branch) == ("org/repo", "main")
-            return "base"
-
+    class GitHub(QuietPRGitHub):
         def __init__(self):
+            super().__init__()
             self.comments = []
             self.posts = []
             self.fail_lookup = False
             self.dial = "auto"
             self.lookups = 0
-
-        def get_pull_request(self, *args):
-            return pr
 
         def get_file_content(self, *args, **kwargs):
             return (
@@ -4643,10 +4614,11 @@ def test_self_merge_status_deduplicates_under_lease(tmp_path):
     github = GitHub()
 
     def tick_once():
-        _merge_blessed_pr(tmp_path, record, github, pr, "tick", NOW, "bot")
+        _merge_blessed_pr(tmp_path, record, github, github.pr, "tick", NOW, "bot")
         assert read_lease(tmp_path, record.run_id) is None
 
     tick_once()
+    # the only check of the user-facing status sentence in the suite
     assert github.posts == [
         "<!-- outerloop:self-merge-status -->\nSelf-merge waiting: no head was blessed at publish: "
         "base moved: origin/main new != measured old."
