@@ -12,11 +12,12 @@ agent reads the ruler from base/ and follows the change through pr-head/.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
-from outerloop.contract import find_contract
+from outerloop.contract import find_contract, load_contract, read_guidance
 from outerloop.github import GitHubClient
 from outerloop.harness import Harness, backend_id, budget_exhausted, outage
 from outerloop.posting import EXPECTED_FAILURES, post_round, post_skip_stub
@@ -46,6 +47,29 @@ def _base_contract(client: GitHubClient, repo: str, pr_data: dict) -> str:
         return found[1] if found else ""
     except EXPECTED_FAILURES as exc:
         log.warning("verifying without the contract: %s", exc)
+        return ""
+
+
+def _base_guidance(client: GitHubClient, repo: str, pr_data: dict, contract_text: str) -> str:
+    """The panel guidance from the BASE branch — the same ref the contract was
+    read at. Best-effort like the contract: a failure degrades to no guidance
+    (advisory text, never a lost round). A contract that cannot be parsed
+    keeps the default pack, as every contract without the key does."""
+    base = pr_data.get("base")
+    base_ref = str(base.get("ref", "")) if isinstance(base, dict) else ""
+    mode = "default"
+    if contract_text:
+        # any parse failure keeps the default pack: guidance is advisory and
+        # must never cost the round (ContractError and pydantic's ValidationError
+        # are both ValueErrors)
+        with contextlib.suppress(ValueError):
+            mode = load_contract(contract_text, repo).guidance
+    try:
+        return read_guidance(
+            lambda name: client.get_file_content(repo, name, base_ref or "HEAD"), mode
+        )[1]
+    except EXPECTED_FAILURES as exc:
+        log.warning("verifying without the lab guidance: %s", exc)
         return ""
 
 
@@ -108,7 +132,12 @@ def run_agent_verify(
         from outerloop.syscall import tool_command
 
         brief = build_verify_agent_brief(
-            pr, contract_text, today=today, thread=thread, syscall_cmd=tool_command(workspace)
+            pr,
+            contract_text,
+            today=today,
+            thread=thread,
+            syscall_cmd=tool_command(workspace),
+            guidance=_base_guidance(client, repo, pr_data, contract_text),
         )
         role_result = run_role(spec, harness, brief, workspace)
         result = verify_result_from_role(role_result)
