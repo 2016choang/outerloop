@@ -4825,8 +4825,7 @@ def test_wake_terminal_pushes_the_line_notebook(tmp_path, monkeypatch, cruft, ca
 
 
 def _brief_capture():
-    """A ScriptedHarness that records every brief it was given, for tests whose
-    subject is what the brief carries."""
+    """A ScriptedHarness that records every brief it was given."""
     seen: list[str] = []
 
     class _Capture(ScriptedHarness):
@@ -4991,8 +4990,7 @@ def test_wake_refreshes_origin_refs(tmp_path, monkeypatch) -> None:
 
 
 def _decoy_origin(tmp_path: Path, bare: Path) -> Path:
-    """A second remote cloned from `bare` whose main rewrites the canonical
-    file: a url rewrite pointing at it must never feed the wake's origin refs."""
+    """A second remote whose main rewrites the canonical file."""
     decoy = tmp_path / "decoy.git"
     _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
     work = tmp_path / "decoy-work"
@@ -6160,10 +6158,7 @@ def test_auto_publish_saves_blessing_without_github_merge_calls(tmp_path, monkey
     assert record.auto_publish_head == _git(target, "rev-parse", github.prs[0]["head"]).strip()
 
 
-# dry_run only dries WAKE delivery (tick.sweep passes _sweep_running the
-# live path on purpose), so the deadline ending needs one dry case to pin
-# that invariant; the stuck+dry path writes nothing at all, so auth is a
-# dead axis there and runs once.
+# dry_run only dries wake delivery; stuck+dry writes nothing, so auth is dead there.
 @pytest.mark.parametrize(
     ("has_auth", "ending", "dry_run"),
     [
@@ -7209,10 +7204,7 @@ def test_missing_scope_history_refuses_publish(tmp_path, target_repo, monkeypatc
     assert "fetch the base and fold it, then submit again." in record.ending_note
 
 
-# The park's phase (candidate vs author-sleep) is dead here: both refusals
-# fire before the wake's phase dispatch — the unfetched base refuses at the
-# policy clone, the unrelated tree at submission_paths — so only the failure
-# shape is parametrized.
+# The park's phase is dead here: both refusals fire before the wake's phase dispatch.
 @pytest.mark.parametrize("history", ["unrelated", "unfetched"])
 def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatch, history):
     from dataclasses import replace
@@ -7278,10 +7270,7 @@ def test_scope_merge_base_counts_rename_source_and_preserves_memory_filter(tmp_p
     assert submission_paths(ws, "main", exclude_memory=True) == ["code", "protected"]
 
 
-# One row per GitError shape; `_scope_revision` classifies both its git
-# operations through the same except block (merge-base and quiet rev-parse
-# only differ in the argv built beforehand), so each shape runs once through
-# submission_paths' merge-base — plus one rev-parse row for that argv branch.
+# One row per GitError shape, plus one rev-parse row for the argv branch.
 @pytest.mark.parametrize(
     "operation,returncode,stderr,stdout,refused",
     [
@@ -7440,9 +7429,7 @@ def test_contains_tip_falls_back_for_missing_objects(tmp_path, answer):
     assert not _contains_tip(ws, "tip", "measured")
 
 
-# A PR suppresses the silent-stop resumes, and so does a sleep: with
-# sleep_again on, pr changes no assertion outcome (the parked pr_url is
-# covered by pr=True alone), so the (True, True) corner is dropped.
+# pr and sleep_again each suppress the resumes; (True, True) would repeat pr=True alone.
 @pytest.mark.parametrize(("pr", "sleep_again"), [(False, False), (True, False), (False, True)])
 def test_hermes_resume_configuration_block_preserves_park(
     tmp_path, monkeypatch, caplog, pr, sleep_again
@@ -7566,12 +7553,7 @@ def test_hermes_resume_configuration_block_preserves_park(
         assert not woke
 
 
-# Every failure mode runs on the wake entry: each names a distinct way
-# session_url turns into EndpointUnavailable (a missing URL file, a refused
-# connection, a SIGTERM, a Ctrl-C, plus the operator retirement). On a fresh
-# run the same EndpointUnavailable parks through the capacity branch instead
-# (attempt.py's fresh except), so one representative ("dead") covers it; the
-# exception class is invisible past session_url's shared except clause.
+# All failure modes on the wake entry; fresh parks via the capacity branch, so "dead" covers it.
 @pytest.mark.parametrize(
     ("wake", "failure"),
     [
@@ -7701,11 +7683,7 @@ def test_endpoint_unavailable_parks_and_recovers(
     assert "endpoint_wait" not in load_record(root, "tsp-1").stage
 
 
-# Every ending runs on the fresh entry: the endings only vary the second
-# author call's result, which one shared handler classifies for both entries
-# (orchestrator._resume). The wake entry re-enters that same loop through
-# run_author_leg, so one ending ("end") covers its distinct part — the
-# refused tree flowing through the wake's own finish tail.
+# Endings only vary the shared resume handler; wake adds only its own finish tail ("end").
 @pytest.mark.parametrize(
     ("entry", "ending"),
     [
@@ -8144,10 +8122,7 @@ def test_v021_line_snapshot_upgrade_retry(tmp_path, monkeypatch, interrupt):
     assert (ws.root / "protected.txt").read_text() == "new forbidden change\n"
 
 
-# The interrupt fires at the same save_record call whatever the record's
-# shape (the session only parameterizes branchless stage values in
-# _park_run), so the sessionless resume and the interrupted park each run
-# once — the (sessionless, interrupt) corner would repeat one of them.
+# The interrupt hits the same save_record either way, so the corner would repeat a case.
 @pytest.mark.parametrize(
     ("sessionless", "interrupt"), [(False, False), (True, False), (False, True)]
 )
@@ -8266,8 +8241,7 @@ def test_v021_capacity_refusal_park_resume(tmp_path, monkeypatch, sessionless, i
     assert not pending(directory, second.inbox_seq)
 
 
-# An outstanding launch ends the wake before the interrupt branch is ever
-# reached, so (outstanding, interrupt) would rerun the outstanding case.
+# An outstanding launch ends before the interrupt branch, so the corner would repeat it.
 @pytest.mark.parametrize(
     ("outstanding", "interrupt"), [(False, False), (False, True), (True, False)]
 )
