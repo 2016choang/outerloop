@@ -34,6 +34,13 @@ NATIVE_MAX_SECONDS = 0.25
 # Fixed kernel index outside the workspace and HOME container mounts.
 SESSION_INDEX = "session-index.json"
 
+# A resumed codex thread reports the whole thread's usage as each leg's.
+# Claude Code reports cumulative resume totals only since 2.1.277 and the
+# CLI version that ran a session is not recorded (an override can pin an
+# older CLI), so its legs are summed instead: an overstatement on a
+# current CLI never undercounts a leg on an older one.
+CUMULATIVE_BACKENDS = frozenset({"codex"})
+
 
 class NativeLookupLimit(OSError):
     """Discovery could not establish a unique source within its budget."""
@@ -416,6 +423,8 @@ def read_index(directory: Path) -> dict[str, Any]:
             or not isinstance(entry.get("verified"), bool)
             or "cost_usd" not in entry
             or (entry["cost_usd"] is not None and number(entry["cost_usd"]) is None)
+            or not isinstance(entry.get("backend", ""), str)
+            or not isinstance(entry.get("session_id", ""), str)
             for entry in data["sessions"].values()
         )
     ):
@@ -442,6 +451,9 @@ def index_session(
             "record_path": record_path,
             "cost_usd": number(record["cost_usd"]),
             "verified": record["verified"],
+            # The session id groups a cumulative backend's legs; older entries omit both.
+            "backend": record.get("backend") or "",
+            "session_id": record.get("session_id") or "",
         }
         temporary = _write_private(
             directory,
@@ -460,22 +472,35 @@ def index_session(
 
 
 def session_totals(directory: Path) -> dict[str, Any]:
-    """Persisted totals; containment supplies authority, not file permissions."""
+    """Persisted totals; containment supplies authority, not file permissions.
+
+    A resumed session of a cumulative backend reports the whole session's
+    usage as its leg's usage, so only the newest leg of each such session is
+    priced. Entries without a session id keep their recorded cost.
+    """
     try:
-        entries = tuple(read_index(directory).values())
+        sessions = read_index(directory)
     except (OSError, ValueError):
         log.warning("could not read session index in %s", directory, exc_info=True)
-        entries = ()
-    costs = tuple(number(entry["cost_usd"]) for entry in entries)
+        sessions = {}
+    latest: dict[tuple[str, str], str] = {}
+    for invocation, entry in sessions.items():
+        if entry.get("backend") in CUMULATIVE_BACKENDS and entry.get("session_id"):
+            latest[(entry["backend"], entry["session_id"])] = invocation
+    costs = tuple(
+        number(entry["cost_usd"])
+        for invocation, entry in sessions.items()
+        # the default keeps untracked entries; tracked legs keep only their newest
+        if latest.get((entry.get("backend"), entry.get("session_id")), invocation) == invocation
+    )
     known = sum(cost for cost in costs if cost is not None)
     unknown = sum(cost is None for cost in costs)
-    count = len(costs)
     return {
-        "session_cost_usd": known if count and not unknown else None,
+        "session_cost_usd": known if costs and not unknown else None,
         "known_session_cost_usd": known,
         "unpriced_sessions": unknown,
-        "captured_sessions": count,
-        "verified": bool(entries) and all(entry["verified"] for entry in entries),
+        "captured_sessions": len(sessions),
+        "verified": bool(sessions) and all(entry["verified"] for entry in sessions.values()),
     }
 
 
