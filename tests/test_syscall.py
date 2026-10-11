@@ -3,26 +3,63 @@ and the launch-job artifact copy-out."""
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from outerloop.compute import parse_elapsed
+from outerloop.dispatch import write_eval_job
 from outerloop.syscall import (
+    MAX_EVAL_MINUTES,
+    MAX_LAUNCH_ARRAY,
+    MAX_OUTPUT_CHARS,
+    MAX_REPORT_CHARS,
+    MAX_REQUEST_BYTES,
+    MAX_VERDICT_BYTES,
+    MAX_WHY_CHARS,
     SYSCALL_DIR,
     SYSCALL_FILE,
+    Launch,
     LaunchResult,
     SyscallError,
     SyscallRequest,
     VerdictError,
     annotate_launch_states,
+    array_spec,
     budget_error,
+    clamp_concurrency,
     ensure_excluded,
+    evals_gpu_hours,
+    gather_results,
+    gpu_hours_cost,
     install_tool,
+    launch_hours_refund,
+    launch_jobs,
+    launch_task_ids,
+    launches_gpu_hours,
+    mark_done,
+    mark_synced,
+    marker_requested,
     read_request,
+    read_results,
     read_verdict,
+    refresh_tool,
+    shipped_channel,
+    sync_requested,
+    tool_update_note,
+    write_budget,
+    write_channel_json,
+    write_siblings,
 )
+from outerloop.syscall_cli import cmd_siblings, cmd_sync
+from outerloop.syscall_cli import main as cli_main
 
 
 def write_req(tmp_path: Path, payload, *, typed: bool = True) -> Path:
@@ -140,8 +177,6 @@ def test_read_request_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
 def test_oversized_request_file_is_refused_before_parsing(tmp_path: Path) -> None:
     # the file is agent-controlled: a giant request must be refused by SIZE
     # before any parse work (and still consumed).
-    from outerloop.syscall import MAX_REQUEST_BYTES
-
     f = write_req(tmp_path, "x" * (MAX_REQUEST_BYTES + 1))
     with pytest.raises(SyscallError, match="exceeds"):
         read_request(tmp_path)
@@ -157,9 +192,6 @@ def test_minutes_are_clamped_to_the_ceiling(tmp_path: Path) -> None:
 def test_siblings_command_reads_the_fleet_snapshot(tmp_path: Path) -> None:
     """`siblings` is author-PULLED: the kernel writes the snapshot at session
     start and the command renders it; absent or malformed means none known."""
-    from outerloop.syscall import write_siblings
-    from outerloop.syscall_cli import main as cli_main
-
     assert cli_main(["siblings"], root=tmp_path) == 0  # missing file: no crash
     write_siblings(
         tmp_path,
@@ -173,8 +205,6 @@ def test_siblings_command_reads_the_fleet_snapshot(tmp_path: Path) -> None:
             {"agent": "agent-03", "state": "running", "phase": "", "direction": ""},
         ],
     )
-    from outerloop.syscall_cli import cmd_siblings
-
     out = cmd_siblings(tmp_path, None)
     assert "agent-02 (parked/candidate): compose embedding decay" in out
     assert "agent-03 (running)" in out
@@ -238,8 +268,6 @@ def test_submit_needs_no_prior_launch() -> None:
 
 
 def _launch(name: str):
-    from outerloop.syscall import Launch
-
     return Launch(name=name, command="run", minutes=5)
 
 
@@ -429,8 +457,6 @@ def test_read_verdict_handles_unhashable_enum_values(tmp_path: Path) -> None:
 
 
 def test_read_verdict_size_caps_a_giant_verdict(tmp_path: Path) -> None:
-    from outerloop.syscall import MAX_VERDICT_BYTES
-
     d = tmp_path / SYSCALL_DIR
     d.mkdir()
     (d / SYSCALL_FILE).write_text("x" * (MAX_VERDICT_BYTES + 1))
@@ -467,8 +493,6 @@ def test_install_tool_clears_a_pre_planted_abi(tmp_path: Path) -> None:
 def test_gather_results_reads_output_and_delivers_artifacts(tmp_path) -> None:
     # the wake side: read each launch's exit/stdout/stderr + skips, and copy
     # delivered artifacts into the excluded channel dir the author reads.
-    from outerloop.syscall import Launch, gather_results
-
     run_dir = tmp_path / "run"
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -509,8 +533,6 @@ def test_gather_results_refuses_symlinked_destination_channel(tmp_path) -> None:
     # the author controls .outerloop in its sandbox: a symlinked results dir
     # (or a planted output symlink) must not make delivery write through it to a
     # host path (terra #135 r2).
-    from outerloop.syscall import Launch, gather_results
-
     run_dir = tmp_path / "run"
     ws = tmp_path / "ws"
     ev = run_dir / "eval-launch-probe"
@@ -535,8 +557,6 @@ def test_gather_results_reads_only_the_tail_of_huge_output(tmp_path) -> None:
     # launch output is agent-controlled and can be arbitrarily large: the wake
     # must read only the trailing window, never load the whole file
     # (terra #135 r1).
-    from outerloop.syscall import MAX_OUTPUT_CHARS, Launch, gather_results
-
     run_dir = tmp_path / "run"
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -556,8 +576,6 @@ def test_launch_job_script_copies_declared_artifacts(tmp_path: Path) -> None:
     and missing ones recorded in artifacts.log; a shell-metacharacter name is
     INERT (never runs as code — terra #132 r1); a symlink pointing outside the
     tree is refused, not dereferenced (terra #132 r1)."""
-    from outerloop.dispatch import write_eval_job
-
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -621,8 +639,6 @@ def test_submit_carries_a_declared_eval_walltime(tmp_path: Path) -> None:
     """`eval_minutes` is the author's walltime for the submit's paired gate
     evals: positive, clamped to the backstop, and meaningless without a
     submit (refused loudly rather than silently ignored)."""
-    from outerloop.syscall import MAX_EVAL_MINUTES
-
     write_req(
         tmp_path,
         {"launches": [], "submit": True, "report": "H: the change helps", "eval_minutes": 420},
@@ -652,8 +668,6 @@ def test_gpu_hours_are_metered_against_the_run_budget() -> None:
     submit's two gate evals (at the declared, else default, walltime) draw on
     gpu_hours_per_run; an over-budget request is refused with the numbers.
     CPU benchmarks meter nothing."""
-    from outerloop.syscall import evals_gpu_hours, gpu_hours_cost, launches_gpu_hours
-
     launches = (_launch("a"), _launch("b"))  # 5 min each
     plain = SyscallRequest(launches=launches)
     assert gpu_hours_cost(plain, gpus=1, eval_minutes_default=240) == 10 / 60
@@ -716,8 +730,6 @@ def test_gpu_hours_are_metered_against_the_run_budget() -> None:
 def test_cached_gate_is_charged_one_main_eval() -> None:
     """A `baseline: cached` submit with a warm cache runs only the candidate:
     the gate charges one main eval, not two (terra #178); siblings stay paired."""
-    from outerloop.syscall import evals_gpu_hours
-
     sub = SyscallRequest(launches=(), submit=True, eval_minutes=240)
     assert evals_gpu_hours(sub, gpus=1, eval_minutes_default=0, main_evals=2) == 8.0
     assert evals_gpu_hours(sub, gpus=1, eval_minutes_default=0, main_evals=1) == 4.0
@@ -732,14 +744,6 @@ def test_array_launch_fans_out_and_gathers_per_index(tmp_path: Path) -> None:
     results/<name>/<i>/; it costs K times the GPU-hours but one launch. The
     width is clamped; zero is refused. The dot is outside the name alphabet,
     so a plain launch can never share a job name with an array member."""
-    from outerloop.syscall import (
-        MAX_LAUNCH_ARRAY,
-        Launch,
-        gather_results,
-        launch_jobs,
-        launches_gpu_hours,
-    )
-
     write_req(
         tmp_path, {"launches": [{"name": "sweep", "command": "x", "minutes": 10, "array": 3}]}
     )
@@ -780,9 +784,7 @@ def test_array_launch_fans_out_and_gathers_per_index(tmp_path: Path) -> None:
     assert first.read_text() == "[0]"
     # whatever the author left at the group path — a plain file here — is
     # replaced, not written through or tripped over (terra #181 round 2)
-    import shutil as _shutil
-
-    _shutil.rmtree(ws / ".outerloop" / "results" / "sweep")
+    shutil.rmtree(ws / ".outerloop" / "results" / "sweep")
     (ws / ".outerloop" / "results" / "sweep").write_text("not a dir")
     again = gather_results(run_dir, ws, (Launch(name="sweep", command="x", minutes=10, array=2),))
     assert again[0].delivered == (".outerloop/results/sweep/0/out/curve.json",)
@@ -793,8 +795,6 @@ def test_launch_hours_refund_hands_back_unused_declared_walltime() -> None:
     """A sweep charged 8 x 240 min at dispatch that died after 5 minutes per
     job is refunded almost all of it; a job that ran its full walltime is
     refunded nothing; an unknown elapsed time refunds nothing at all."""
-    from outerloop.syscall import Launch, launch_hours_refund
-
     sweep = (Launch(name="sweep", command="x", minutes=240, array=8),)
     assert launch_hours_refund(sweep, [300] * 8, gpus=1) == 32.0 - 8 * 300 / 3600
     assert launch_hours_refund(sweep, [240 * 60] * 8, gpus=1) == 0.0
@@ -807,8 +807,6 @@ def test_launch_hours_refund_hands_back_unused_declared_walltime() -> None:
 
 
 def test_parse_elapsed_reads_sacct_fields() -> None:
-    from outerloop.compute import parse_elapsed
-
     assert parse_elapsed("00:05:00") == 300
     assert parse_elapsed("04:10:05") == 4 * 3600 + 605
     assert parse_elapsed("1-02:00:00") == 86400 + 7200
@@ -820,12 +818,6 @@ def test_parse_elapsed_reads_sacct_fields() -> None:
 def test_sync_cli_waits_for_the_done_marker(tmp_path, monkeypatch) -> None:
     """The verb touches the request, then blocks until the kernel stamps
     done — the wait is the session's own time, never a new leg."""
-    import threading
-    import time as _time
-
-    from outerloop.syscall import SYSCALL_DIR, mark_synced
-    from outerloop.syscall_cli import cmd_sync
-
     (tmp_path / SYSCALL_DIR).mkdir()
     monkeypatch.setattr("outerloop.syscall_cli.SYNC_POLL_S", 0.01)
 
@@ -833,13 +825,13 @@ def test_sync_cli_waits_for_the_done_marker(tmp_path, monkeypatch) -> None:
         minutes = 1
 
     def stamp_soon():
-        _time.sleep(0.3)
-        mark_synced(tmp_path, _time.time())
+        time.sleep(0.3)
+        mark_synced(tmp_path, time.time())
 
     threading.Thread(target=stamp_soon, daemon=True).start()
-    started = _time.monotonic()
+    started = time.monotonic()
     out = cmd_sync(tmp_path, A())
-    elapsed = _time.monotonic() - started
+    elapsed = time.monotonic() - started
     assert "refreshed" in out
     # the poll interval was honored: the default 15 s would block far longer
     # than the marker's 0.3 s arrival, so this bounds it well under one interval
@@ -847,9 +839,6 @@ def test_sync_cli_waits_for_the_done_marker(tmp_path, monkeypatch) -> None:
 
 
 def test_sync_cli_times_out_gracefully(tmp_path, monkeypatch) -> None:
-    from outerloop.syscall import SYSCALL_DIR
-    from outerloop.syscall_cli import cmd_sync
-
     (tmp_path / SYSCALL_DIR).mkdir()
     monkeypatch.setattr("time.sleep", lambda s: None)
 
@@ -861,10 +850,6 @@ def test_sync_cli_times_out_gracefully(tmp_path, monkeypatch) -> None:
 
 
 def test_sync_request_tracking(tmp_path) -> None:
-    import os
-
-    from outerloop.syscall import SYSCALL_DIR, mark_synced, sync_requested
-
     ws = tmp_path
     (ws / SYSCALL_DIR).mkdir()
     assert sync_requested(ws) is None
@@ -890,10 +875,6 @@ def test_sync_request_tracking(tmp_path) -> None:
 
 
 def test_mark_synced_never_touches_a_hardlinked_marker(tmp_path) -> None:
-    import os
-
-    from outerloop.syscall import SYSCALL_DIR, mark_synced
-
     ws = tmp_path
     (ws / SYSCALL_DIR).mkdir()
     (ws / SYSCALL_DIR / "sync-request").touch()
@@ -911,10 +892,6 @@ def test_mark_synced_never_touches_a_hardlinked_marker(tmp_path) -> None:
 def test_mark_synced_refuses_a_hardlinked_temp(tmp_path, monkeypatch) -> None:
     """The temp inode is O_EXCL: a hard link planted at the temp name is not
     truncated (open fails); the victim survives."""
-    import os as _os
-
-    from outerloop.syscall import SYSCALL_DIR, mark_synced
-
     ws = tmp_path
     (ws / SYSCALL_DIR).mkdir()
     (ws / SYSCALL_DIR / "sync-request").touch()
@@ -922,32 +899,24 @@ def test_mark_synced_refuses_a_hardlinked_temp(tmp_path, monkeypatch) -> None:
     victim.write_text("precious")
     # force a predictable temp name and pre-plant a hard link to the victim
     monkeypatch.setattr("os.urandom", lambda n: b"\x00" * n)
-    _os.link(victim, ws / SYSCALL_DIR / f".sync-done.{(b'\x00' * 8).hex()}")
-    import contextlib
-
+    os.link(victim, ws / SYSCALL_DIR / f".sync-done.{(b'\x00' * 8).hex()}")
     with contextlib.suppress(FileExistsError):
         mark_synced(ws, 1.0)  # O_EXCL refuses the planted link
     assert victim.read_text() == "precious"  # never truncated
 
 
 def test_sync_refuses_a_symlinked_channel(tmp_path) -> None:
-    from outerloop.syscall import mark_synced, sync_requested
-
     ws = tmp_path
     outside = ws / "outside"
     outside.mkdir()
     (ws / ".outerloop").symlink_to(outside)  # channel is a symlink
     assert sync_requested(ws) is None
-    import contextlib
-
     with contextlib.suppress(OSError):
         mark_synced(ws, 1.0)  # refused
     assert not (outside / "sync-done").exists()  # nothing written outside
 
 
 def test_read_request_carries_a_one_line_why(tmp_path: Path) -> None:
-    from outerloop.syscall import MAX_WHY_CHARS, SYSCALL_FILE, SyscallError
-
     channel = tmp_path / ".outerloop"
     channel.mkdir()
     (channel / SYSCALL_FILE).write_text(
@@ -980,8 +949,6 @@ def test_read_request_carries_a_one_line_why(tmp_path: Path) -> None:
 def test_channel_markers_generalize_to_any_verb(tmp_path: Path) -> None:
     """The watcher's verbs ride the sync marker protocol: a request newer than
     the done marker is pending; the answer is written with a marker's care."""
-    from outerloop.syscall import mark_done, marker_requested, write_channel_json
-
     channel = tmp_path / ".outerloop"
     channel.mkdir()
     assert marker_requested(tmp_path, "queue-request", "queue-done") is None
@@ -1005,11 +972,6 @@ def test_channel_markers_generalize_to_any_verb(tmp_path: Path) -> None:
 def test_a_fifo_in_the_done_markers_place_never_blocks_the_kernel(tmp_path: Path) -> None:
     """A session can replace `<verb>-done` with a FIFO; a blocking open would
     hang the watcher thread (and the tick's sync service) for good."""
-    import os
-    import threading
-
-    from outerloop.syscall import marker_requested
-
     channel = tmp_path / ".outerloop"
     channel.mkdir()
     os.mkfifo(channel / "queue-done")
@@ -1026,15 +988,6 @@ def test_a_fifo_in_the_done_markers_place_never_blocks_the_kernel(tmp_path: Path
 
 
 def test_sweep_pace_is_validated_clamped_and_expanded(tmp_path: Path) -> None:
-    from outerloop.syscall import (
-        Launch,
-        SyscallError,
-        SyscallRequest,
-        array_spec,
-        clamp_concurrency,
-        launch_task_ids,
-    )
-
     write_req(
         tmp_path,
         {
@@ -1077,8 +1030,6 @@ def test_sweep_pace_is_validated_clamped_and_expanded(tmp_path: Path) -> None:
 
 
 def test_submit_report_is_optional_and_bounded(tmp_path: Path) -> None:
-    from outerloop.syscall import MAX_REPORT_CHARS, SyscallError
-
     # A submit without a report is accepted.
     write_req(tmp_path, {"launches": [], "submit": True})
     req = read_request(tmp_path)
@@ -1099,8 +1050,6 @@ def test_submit_report_is_optional_and_bounded(tmp_path: Path) -> None:
 
 
 def test_read_results_reads_without_delivering(tmp_path: Path) -> None:
-    from outerloop.syscall import Launch, read_results
-
     ev = tmp_path / "eval-launch-a"
     ev.mkdir()
     (ev / "exit-code").write_text("0\n")
@@ -1118,8 +1067,6 @@ def test_read_results_reads_without_delivering(tmp_path: Path) -> None:
 
 
 def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_path: Path) -> None:
-    from outerloop.syscall import install_tool, refresh_tool
-
     install_tool(tmp_path)
     channel = tmp_path / ".outerloop"
     (channel / "budget.json").write_text("{}")
@@ -1128,8 +1075,6 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     tool.write_text("# stale tool\n")
     assert refresh_tool(tmp_path) is True  # an older tool was replaced: the wake says what is new
     tool.write_text("# stale tool\n")
-    import os
-
     before = os.umask(0o177)  # an execute-masking umask must not strip the tool's x bits
     try:
         refresh_tool(tmp_path)
@@ -1146,8 +1091,6 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     # a directory planted in the tool's place is replaced by the tool, removed
     # relative to the channel fd (no path re-resolution a swapped symlink
     # could redirect)
-    import shutil
-
     assert shutil.rmtree.avoids_symlink_attacks
     tool.unlink()
     tool.mkdir()
@@ -1161,8 +1104,6 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     assert (tool.stat().st_mode & 0o777) == 0o755 and "def main(" in tool.read_text()
     # a FIFO in the tool's place never blocks the wake: the comparison opens
     # non-blocking and checks what it opened, then the tool is rewritten
-    import threading
-
     tool.unlink()
     os.mkfifo(tool)
     seen: list[bool] = []
@@ -1172,8 +1113,6 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     assert not t.is_alive(), "refresh_tool blocked on a FIFO"
     assert seen == [True] and tool.is_file() and "def main(" in tool.read_text()
     # The notice names this workspace's channel.
-    from outerloop.syscall import tool_update_note
-
     assert "python .outerloop/syscall <verb> --help" in tool_update_note(".outerloop")
     assert "`--report <file>`" in tool_update_note(".outerloop")
 
@@ -1189,10 +1128,6 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     ],
 )
 def test_kernel_rejects_forged_messages(tmp_path, messages) -> None:
-    import json
-
-    from outerloop.syscall import SyscallError, read_request
-
     channel = tmp_path / ".outerloop"
     channel.mkdir()
     (channel / "syscall.json").write_text(json.dumps({"type": "message", "messages": messages}))
@@ -1204,8 +1139,6 @@ def test_kernel_rejects_forged_messages(tmp_path, messages) -> None:
 def test_budget_is_never_written_through_a_symlinked_budget_file(tmp_path):
     """A `budget.json` that is a symlink to a file outside the tree is never
     followed: the write replaces the link under a directory handle."""
-    from outerloop.syscall import write_budget
-
     outside = tmp_path / "outside.txt"
     outside.write_text("untouched")
     ws = tmp_path / "ws"
@@ -1221,10 +1154,6 @@ def test_budget_is_never_written_through_a_symlinked_budget_file(tmp_path):
 def test_budget_is_never_written_into_a_channel_the_target_tracks(tmp_path, caplog):
     """A regular `.outerloop/` directory the target committed is the target's,
     not the kernel's: nothing is written into it."""
-    import subprocess
-
-    from outerloop.syscall import shipped_channel, write_budget
-
     ws = tmp_path / "ws"
     (ws / ".outerloop").mkdir(parents=True)
     (ws / ".outerloop" / "budget.json").write_text("theirs")
@@ -1272,10 +1201,6 @@ def test_budget_is_never_written_into_a_channel_the_target_tracks(tmp_path, capl
     ],
 )
 def test_invalid_withdraw_request(tmp_path, payload):
-    import json
-
-    from outerloop.syscall import SyscallError, read_request
-
     (tmp_path / ".outerloop").mkdir()
     (tmp_path / ".outerloop/syscall.json").write_text(json.dumps(payload))
     with pytest.raises(SyscallError):
@@ -1283,8 +1208,6 @@ def test_invalid_withdraw_request(tmp_path, payload):
 
 
 def test_legacy_end_request_remains_valid(tmp_path):
-    from outerloop.syscall import read_request
-
     (tmp_path / ".outerloop").mkdir()
     path = tmp_path / ".outerloop/syscall.json"
     # Pre-withdrawal ABI fixture; absent optional fields retain their meaning.
