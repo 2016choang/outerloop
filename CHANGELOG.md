@@ -6,6 +6,13 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
+  note to a run's inbox, delivered at the run's next wake — no PR needed.
+  Reuses the existing `note`/`kernel` message shape, so older kernels read it
+  without a compatibility change.
+
 ### Documentation
 
 - Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
