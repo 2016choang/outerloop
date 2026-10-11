@@ -22,6 +22,8 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
 - A session that ends in error while an out-of-memory kill happens in the job
   ended its run with only the session's symptom; the ending now notes when an
   out-of-memory kill was observed in the job during the session (#483).
