@@ -601,6 +601,7 @@ def test_reply_waits_for_first_thread(tmp_path, caplog):
     "tip,dirty,status",
     [
         ("b2b2b2b", False, "identical"),  # head contains the tip: no message
+        ("b2b2b2b", True, "ahead"),  # a dirty mergeable_state alone is not stale
         ("a1a1a1a", False, "behind"),
         ("a1a1a1a", True, "diverged"),
         ("error", True, "ahead"),  # the base tip read fails
