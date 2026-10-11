@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from outerloop.contract import CONTRACT_NAME, find_contract
+from outerloop.contract import CONTRACT_NAME, find_contract, read_guidance
 from outerloop.markers import marker
 
 
@@ -1777,3 +1777,17 @@ def contract_at(ws: Any, sha: str) -> str:
     if found is None:
         raise GitError(f"no contract at {sha} ({CONTRACT_NAME})")
     return found[1]
+
+
+def guidance_at(ws: Any, sha: str, mode: str) -> tuple[str, str]:
+    """The target's guidance texts at `sha` via Workspace.git — the same git
+    objects `contract_at` reads the contract from (a wake reads guidance at
+    the pinned base sha, never the session's working tree)."""
+
+    def read(name: str) -> str | None:
+        try:
+            return ws.git("show", f"{sha}:{name}")
+        except GitError:
+            return None
+
+    return read_guidance(read, mode)

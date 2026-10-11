@@ -21,12 +21,20 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from outerloop import guidance_pack
+
 SELF_REPO = "outerloop-science/outerloop"
 # The contract file in the target repo; never a writable path for the agent.
 CONTRACT_NAME = ".outerloop.yaml"
 ALWAYS_FORBIDDEN: tuple[str, ...] = (".github", CONTRACT_NAME)
 MAX_CONTRACT_BYTES = 64 * 1024
 _GLOB_CHARS = set("*?[]!")
+
+# Guidance texts are advisory and base-reviewed (same trust as the contract),
+# so they are not fenced — but they are capped like every brief input.
+MAX_GUIDANCE_CHARS = 8_000
+# The two files a directory-mode contract reads under its guidance directory.
+GUIDANCE_FILES = ("author.md", "panel.md")
 
 
 def find_contract(read: Callable[[str], str | None]) -> tuple[str, str] | None:
@@ -47,6 +55,65 @@ def contract_text_in_tree(tree: Path) -> str:
     if found is None:
         raise FileNotFoundError(f"no contract in {tree} ({CONTRACT_NAME})")
     return found[1]
+
+
+def _guidance_dir(mode: str) -> PurePosixPath:
+    """The repo-relative guidance directory a contract's `guidance` names —
+    `default` and `none` never reach here (they need no files). The path
+    normalizer rejects escapes, globs and the git dir; `.outerloop/` is
+    refused on top because it is the workspace syscall channel, which
+    nothing may ever read guidance from."""
+    path = normalize_path(mode)
+    if path.parts[0].casefold() == ".outerloop":
+        raise ScopeError(
+            f"guidance must not point into .outerloop/ (the workspace syscall channel): {mode!r}"
+        )
+    return path
+
+
+def _capped(text: str) -> str:
+    if len(text) <= MAX_GUIDANCE_CHARS:
+        return text
+    return text[:MAX_GUIDANCE_CHARS].rstrip() + "\n[truncated to the guidance budget]"
+
+
+def read_guidance(read: Callable[[str], str | None], mode: str) -> tuple[str, str]:
+    """The (author, panel) guidance texts for a contract's `guidance` mode.
+
+    `read` fetches a repo-relative file from the SAME ref the contract was
+    read at — guidance is base-reviewed text with the contract's trust,
+    never workspace state, so an agent cannot influence it. `default` is the
+    in-kernel pack (guidance_pack); `none` is empty; a directory mode reads
+    `<dir>/author.md` and `<dir>/panel.md`, where a missing file is empty
+    guidance — advisory, never a contract error. Each text is capped at
+    MAX_GUIDANCE_CHARS."""
+    if mode == "none":
+        return ("", "")
+    if mode == "default":
+        return (guidance_pack.AUTHOR, guidance_pack.PANEL)
+    base = _guidance_dir(mode)
+    texts = [
+        raw if raw is None else _capped(raw)
+        for raw in (read(f"{base}/{name}") for name in GUIDANCE_FILES)
+    ]
+    return (texts[0] or "", texts[1] or "")
+
+
+def guidance_in_tree(tree: Path, mode: str) -> tuple[str, str]:
+    """Guidance from a checked-out tree — the same tree `contract_in_tree`
+    reads the contract from. A file that cannot be read is empty guidance,
+    like a missing one: advisory text, never a run-ending error."""
+
+    def read(name: str) -> str | None:
+        path = tree / name
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text()
+        except (OSError, ValueError):  # unreadable or undecodable
+            return None
+
+    return read_guidance(read, mode)
 
 
 class ContractError(ValueError):
@@ -414,9 +481,25 @@ class Contract(_StrictModel):
     #     freshness check and a direct merge: GitHub itself refuses a
     #     stale-base merge); NO required review. The gate is the whole
     #     conscience in auto mode — the floor (min_delta), the suite
-    #     no-regression phase, and the panel's taste rubric all bind
-    #     BEFORE publish.
+    #     no-regression phase, and the panel's VALIDITY findings all bind
+    #     BEFORE publish; the panel's taste findings are advisory guidance
+    #     and never block.
     merge: Literal["manual", "auto"] = "manual"
+    # GUIDANCE (docs/design/agent-environment.md): which research-taste pack
+    # the author brief and the panel claim carry, as advisory text labelled
+    # and placed last. `default` (the in-kernel pack), `none`, or a
+    # repo-relative directory holding author.md and panel.md — recommended
+    # location `.github/outerloop/guidance/`, which agents can never write.
+    # Read from the same ref as the contract; a missing file is empty
+    # guidance, never a contract error. Never into `.outerloop/`.
+    guidance: str = "default"
+
+    @field_validator("guidance")
+    @classmethod
+    def _guidance_mode(cls, value: str) -> str:
+        if value not in ("default", "none"):
+            _guidance_dir(value)  # raises ScopeError on anything unsafe
+        return value
 
     def benchmark(self, name: str) -> Benchmark:
         for bench in self.benchmarks:
