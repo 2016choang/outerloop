@@ -292,6 +292,22 @@ def _blackout(gh: _BoardGitHub, *paths: str) -> set[str]:
     return dead
 
 
+class _NoPublishedCurves:
+    """get_file 404s: no curves on the branch yet."""
+
+    def get_file(self, repo, path, ref):
+        raise _GitHubError(404)
+
+
+def _remembered_benchmark(gh: _BoardGitHub) -> None:
+    """A benchmark published long ago, its local records reaped since: the
+    branch index is the board's only memory of it."""
+    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
+    gh.files["climb/data/old-bench.json"] = json.dumps(
+        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
+    )
+
+
 def test_service_publishes_once_per_change(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
@@ -319,10 +335,7 @@ def test_board_remembers_benchmarks_whose_local_records_are_gone(tmp_path: Path)
     long ago (records reaped since) keeps its place in every view when a
     different benchmark publishes."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    gh.files["climb/data/old-bench.json"] = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
+    _remembered_benchmark(gh)
     _terminal_run(tmp_path, "speedrun-1")
     assert service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"}) >= 3
     md = gh.files["CLIMB.md"]
@@ -337,11 +350,7 @@ def test_transient_json_read_failure_never_orphans_an_indexed_benchmark(tmp_path
     index (its history is still on the branch), and the views render it
     again once a later read succeeds."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    old_rows = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
-    gh.files["climb/data/old-bench.json"] = old_rows
+    _remembered_benchmark(gh)
     blackout = _blackout(gh, "climb/data/old-bench.json")
     _terminal_run(tmp_path, "speedrun-1")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
@@ -629,15 +638,13 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 def test_merge_curves_caps_five_per_agent(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)  # no published curves yet
-
     rows = [{"run_id": f"a{i}", "agent": "agent-01"} for i in range(8)] + [
         {"run_id": f"b{i}", "agent": "agent-02"} for i in range(3)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, [])
+    )
     assert merged is not None
     kept = merged["data"]
     a_kept = [k for k in kept if k.startswith("a")]
@@ -652,16 +659,14 @@ def test_curveless_rows_do_not_consume_the_per_agent_quota(tmp_path: Path) -> No
     the fifth CURVE should still be kept even behind curveless newer rows."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     # newest four rows have no curve; the five older rows do
     rows = [{"run_id": f"c{i}", "agent": "agent-01"} for i in range(5)] + [
         {"run_id": f"n{i}", "agent": "agent-01"} for i in range(4)
     ]
     have = {f"c{i}": [[1, 1.0]] for i in range(5)}  # only the c-rows have curves
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: have.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: have.get(rid, [])
+    )
     assert merged is not None
     assert set(merged["data"]) == {"c0", "c1", "c2", "c3", "c4"}  # all five curves kept
 
@@ -671,15 +676,11 @@ def test_quiet_agent_curve_survives_a_busy_agent(tmp_path: Path) -> None:
     curve — the per-agent cap is applied across ALL rows, not a global slice."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [{"run_id": "quiet", "agent": "agent-09"}] + [
         {"run_id": f"busy{i}", "agent": "agent-01"} for i in range(300)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     assert "quiet" in merged["data"]  # not buried by 300 busy rows
 
@@ -689,17 +690,13 @@ def test_every_agent_is_kept_beyond_any_total_ceiling(tmp_path: Path) -> None:
     all kept (the per-agent cap is the only bound)."""
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [
         {"run_id": f"a{a}-r{i}", "agent": f"agent-{a:02d}"}
         for a in range(40)
         for i in range(6)  # six each; the cap keeps five
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     agents_kept = {k.split("-r")[0] for k in merged["data"]}
     assert len(agents_kept) == 40  # every agent represented
