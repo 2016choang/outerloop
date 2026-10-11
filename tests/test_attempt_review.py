@@ -582,19 +582,30 @@ def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatc
     assert "submit addendum failed" in caplog.text
 
 
-@pytest.mark.parametrize("candidate,expected", [(11.4, 11.4), (11.8, 12.0), (12.5, 12.0)])
-@pytest.mark.parametrize("unchanged", [False, True])
-@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
+HYPOTHESIS = "Hypothesis: " + ("Improve the solver. " * 80).strip()
+
+
 @pytest.mark.parametrize(
-    "submit_report",
-    ["", "Hypothesis: " + ("Improve the solver. " * 80).strip()],
-    ids=["no-report", "hypothesis"],
+    "candidate,unchanged,panel_skip,submit_report",
+    [
+        # one case per distinct path: a clearing improvement is pushed; a
+        # within-floor improvement names the unchanged row; a worse number
+        # names it too; a reportless publish survives a crash after the push;
+        # a report-only publish never pushes; a skipped panel read withholds
+        # the blessing
+        (11.4, False, "", HYPOTHESIS),
+        (11.8, False, "", HYPOTHESIS),
+        (12.5, False, "", HYPOTHESIS),
+        (11.4, False, "", ""),
+        (11.4, True, "", HYPOTHESIS),
+        (11.4, False, "insufficient panel time", HYPOTHESIS),
+    ],
+    ids=["improved", "floor", "worse", "no-report", "report-only", "panel-skip"],
 )
 def test_publish_review_fast_forwards_and_applies_floor(
     review_run,
     monkeypatch,
     candidate,
-    expected,
     unchanged,
     submit_report,
     panel_skip,
@@ -791,6 +802,10 @@ def test_publish_review_fast_forwards_and_applies_floor(
     assert github.row_updates and set(github.row_updates) == {candidate}
     if candidate > 12:
         assert "Worse" in github.posted[0]
+    elif candidate > 11.4:
+        # inside the cross-seed floor (best 12.0, min_delta 0.5): the
+        # addendum names the unchanged ledger row rather than crediting it
+        assert "the ledger row is unchanged" in github.body_addenda[0]
     assert "## Pre-PR verification\n\nLatest panel verdict" in github.body_addenda[0]
     assert (submit_report or "no report was given") in github.body_addenda[0]
     assert bool(ready_calls) == (draft and not (panel_skip or blocking or degraded))
@@ -1858,7 +1873,6 @@ def test_steward_followup_publishes_pending_reset(review_run, monkeypatch):
         review_run,
         monkeypatch,
         candidate=11.8,
-        expected=12.0,
         unchanged=False,
         submit_report="",
         panel_skip="",
@@ -1956,12 +1970,13 @@ def test_review_withdraw_parks_then_sweep_closes_with_one_redacted_comment(
 @pytest.mark.parametrize(
     "draft,blocking,degraded,ready_fails",
     [
+        # one case per distinct path: the PR is marked ready; marking fails;
+        # a blocking or degraded panel withholds both the marking and the
+        # blessing. A non-draft PR takes the same withheld path.
         (True, False, False, False),
         (True, False, False, True),
         (True, True, False, False),
         (True, False, True, False),
-        (False, True, False, False),
-        (False, False, True, False),
     ],
 )
 def test_report_only_panel_updates_draft(
@@ -1970,11 +1985,10 @@ def test_report_only_panel_updates_draft(
     test_publish_review_fast_forwards_and_applies_floor(
         review_run,
         monkeypatch,
-        11.4,
-        11.4,
-        True,
-        "Revised report",
-        "",
+        candidate=11.4,
+        unchanged=True,
+        submit_report="Revised report",
+        panel_skip="",
         draft=draft,
         blocking=blocking,
         degraded=degraded,
