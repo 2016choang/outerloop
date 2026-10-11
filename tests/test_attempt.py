@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import cast
 
 import pytest
 
@@ -4824,31 +4824,38 @@ def test_wake_terminal_pushes_the_line_notebook(tmp_path, monkeypatch, cruft, ca
         assert "eval-cache.tmp" in logs[0]
 
 
+def _brief_capture():
+    """A ScriptedHarness that records every brief it was given, for tests whose
+    subject is what the brief carries."""
+    seen: list[str] = []
+
+    class _Capture(ScriptedHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            seen.append(brief_text)
+            return super().run(brief_text, workspace, resume_session_id)
+
+    return _Capture, seen
+
+
 def test_line_memory_reaches_the_next_session_brief(tmp_path: Path, target_repo_lines) -> None:
     """End to end: an index committed on the line is rendered into the next
     session's brief, data-fenced."""
     _push_line(tmp_path, target_repo_lines, {"AGENT_MEMORY.md": "- depth pays, width unclear\n"})
 
-    class BriefCapture(ScriptedHarness):
-        seen: ClassVar[dict] = {}
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture.seen["brief"] = brief_text
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     github = FakeGitHub()
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp", agent_id="agent-07"),
             run_root=tmp_path / "state",
             run_id="tsp-mem-brief",
-            harness=BriefCapture(edits={}),
+            harness=capture(edits={}),
             github=github,  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    brief = str(BriefCapture.seen["brief"])
+    brief = str(seen[0])
     assert "# Your memory (AGENT_MEMORY.md" in brief
     assert "- depth pays, width unclear" in brief
     assert "A session ends whenever" in brief
@@ -4867,26 +4874,19 @@ def test_panel_claim_carries_the_one_idea_mandate() -> None:
 def test_line_divergence_reaches_the_brief(tmp_path: Path, target_repo_lines) -> None:
     _push_line(tmp_path, target_repo_lines, {"docs/line-note.md": "belief\n"})
 
-    class BriefCapture2(ScriptedHarness):
-        seen: ClassVar[dict] = {}
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture2.seen["brief"] = brief_text
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp", agent_id="agent-07"),
             run_root=tmp_path / "state",
             run_id="tsp-div-1",
-            harness=BriefCapture2(edits={}),
+            harness=capture(edits={}),
             github=FakeGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    brief = str(BriefCapture2.seen["brief"])
-    assert "differs from the base branch by: 1 file changed" in brief
+    assert "differs from the base branch by: 1 file changed" in str(seen[0])
 
 
 def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_repo) -> None:
@@ -4895,26 +4895,20 @@ def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_re
     launch. The brief now renders the contract's per-run pool and the real
     weekly remainder."""
 
-    class BriefCapture3(ScriptedHarness):
-        seen: ClassVar[list] = []
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture3.seen.append(brief_text)
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     for run_id in ("tsp-bud-1", "tsp-bud-2"):
         with _queued_local([13.876, 14.5]):
             live_attempt(
                 config=RunConfig(target="org/pilot", benchmark="tsp"),
                 run_root=tmp_path / "state",
                 run_id=run_id,
-                harness=BriefCapture3(edits={}),
+                harness=capture(edits={}),
                 github=FakeGitHub(),  # type: ignore[arg-type]
                 bot_auth=NoAuth(),
                 now=1_000_000.0,
                 created="2026-08-06T00:00:00Z",
             )
-    first, second = BriefCapture3.seen
+    first, second = seen
     # CONTRACT: runs_per_week 10; the run's own record exists before the
     # brief renders, so the first run sees 9 left. tsp is a CPU benchmark
     # (gpus 0), so its GPU pool honestly reads 0.0 — the per-run pool
@@ -4926,26 +4920,20 @@ def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_re
 
 def test_gpu_benchmark_brief_shows_the_per_run_pool(tmp_path, monkeypatch) -> None:
     _seed_target(tmp_path, monkeypatch, CONTRACT_GPU)
-
-    class BriefCapture4(ScriptedHarness):
-        seen: ClassVar[list] = []
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture4.seen.append(brief_text)
-            return super().run(brief_text, workspace, resume_session_id)
+    capture, seen = _brief_capture()
 
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp"),
             run_root=tmp_path / "state",
             run_id="tsp-gpu-1",
-            harness=BriefCapture4(edits={}),
+            harness=capture(edits={}),
             github=FakeGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    assert "GPU-hours remaining: 1.0" in BriefCapture4.seen[0]
+    assert "GPU-hours remaining: 1.0" in seen[0]
 
 
 def test_cli_rejects_ref_shaping_agent_ids(capsys, monkeypatch) -> None:
@@ -5002,6 +4990,20 @@ def test_wake_refreshes_origin_refs(tmp_path, monkeypatch) -> None:
     assert _git(ws, "show", "origin/main:docs/news.md").strip() == "landed while parked"
 
 
+def _decoy_origin(tmp_path: Path, bare: Path) -> Path:
+    """A second remote cloned from `bare` whose main rewrites the canonical
+    file: a url rewrite pointing at it must never feed the wake's origin refs."""
+    decoy = tmp_path / "decoy.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
+    work = tmp_path / "decoy-work"
+    _git(tmp_path, "clone", "-q", str(decoy), str(work))
+    (work / "docs" / "news.md").write_text("ATTACKER\n")
+    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
+    _git(work, "push", "-q", "origin", "main")
+    return decoy
+
+
 def test_wake_fetch_ignores_session_url_rewrites(tmp_path, monkeypatch) -> None:
     """A session can write url.<x>.insteadOf into .git/config; the wake
     fetch strips those rewrites so origin/* comes from the canonical repo,
@@ -5012,15 +5014,7 @@ def test_wake_fetch_ignores_session_url_rewrites(tmp_path, monkeypatch) -> None:
     ws = state / "runs" / run_id / "ws"
     bare = tmp_path / f"origin-{run_id}.git"
     _advance_main(tmp_path, bare, {"docs/news.md": "canonical\n"})
-    # a decoy repo the rewrite would point at, with DIFFERENT content
-    decoy = tmp_path / "decoy.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
-    work = tmp_path / "decoy-work"
-    _git(tmp_path, "clone", "-q", str(decoy), str(work))
-    (work / "docs" / "news.md").write_text("ATTACKER\n")
-    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
-    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
-    _git(work, "push", "-q", "origin", "main")
+    decoy = _decoy_origin(tmp_path, bare)
     # the session plants the rewrite via an INCLUDED file (a --local scan
     # would miss it; the clean-config window neutralizes the whole class)
     inc = ws / ".git" / "evil.inc"
@@ -5078,14 +5072,7 @@ def test_wake_fetch_ignores_worktree_config_rewrite(tmp_path, monkeypatch) -> No
     ws = state / "runs" / run_id / "ws"
     bare = tmp_path / f"origin-{run_id}.git"
     _advance_main(tmp_path, bare, {"docs/news.md": "canonical\n"})
-    decoy = tmp_path / "decoy.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
-    dwork = tmp_path / "dwork"
-    _git(tmp_path, "clone", "-q", str(decoy), str(dwork))
-    (dwork / "docs" / "news.md").write_text("ATTACKER\n")
-    _git(dwork, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
-    _git(dwork, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
-    _git(dwork, "push", "-q", "origin", "main")
+    decoy = _decoy_origin(tmp_path, bare)
     _git(ws, "config", "--local", "extensions.worktreeConfig", "true")
     (ws / ".git" / "config.worktree").write_text(f'[url "{decoy}"]\n\tinsteadOf = {bare}\n')
     resume_run(
@@ -7460,9 +7447,7 @@ def test_contains_tip_falls_back_for_missing_objects(tmp_path, answer):
 # A PR suppresses the silent-stop resumes, and so does a sleep: with
 # sleep_again on, pr changes no assertion outcome (the parked pr_url is
 # covered by pr=True alone), so the (True, True) corner is dropped.
-@pytest.mark.parametrize(
-    ("pr", "sleep_again"), [(False, False), (True, False), (False, True)]
-)
+@pytest.mark.parametrize(("pr", "sleep_again"), [(False, False), (True, False), (False, True)])
 def test_hermes_resume_configuration_block_preserves_park(
     tmp_path, monkeypatch, caplog, pr, sleep_again
 ):
@@ -7730,7 +7715,16 @@ def test_endpoint_unavailable_parks_and_recovers(
     [
         *[
             ("fresh", ending)
-            for ending in ["end", "explicit-end", "outage", "timeout", "budget", "error", "repeat", "crash"]
+            for ending in [
+                "end",
+                "explicit-end",
+                "outage",
+                "timeout",
+                "budget",
+                "error",
+                "repeat",
+                "crash",
+            ]
         ],
         ("wake", "end"),
     ],
