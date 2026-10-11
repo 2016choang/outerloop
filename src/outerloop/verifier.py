@@ -341,10 +341,12 @@ def build_verify_agent_brief(
     parts = [VERIFY_SYSTEM_PROMPT, _agent_verify_investigation(syscall_cmd)]
     parts.append(build_verify_prompt(pr, contract_text, today=today, thread=thread))
     if guidance:
+        # outside every untrusted fence: the judges' own prompt, after the
+        # kernel rubric — this repository's advisory standards, never data
         parts.append(
-            "## Lab guidance\n\n*(This repository's research preferences — "
-            "advisory; the judges may raise them only as advisory findings.)*"
-            f"\n\n{guidance}"
+            "## Lab guidance\n\n*(This repository's advisory research "
+            "standards — the judges may raise them only as advisory "
+            f"findings.)*\n\n{guidance}"
         )
     return "\n\n".join(parts)
 

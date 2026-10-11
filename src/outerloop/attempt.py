@@ -3667,29 +3667,20 @@ def _panel_lenses_from_args(
     return tuple(lenses), tuple(dict.fromkeys(secrets))
 
 
-def _panel_claim_body(
-    benchmark: str, baseline: float, candidate: float, report: str, *, guidance: str = ""
-) -> str:
+def _panel_claim_body(benchmark: str, baseline: float, candidate: float, report: str) -> str:
     """The synthetic claim the panel judges: the kernel's measured claim plus
-    the author's report, with this repository's guidance appended after both —
-    advisory text the judges may raise only as advisory findings. The report
-    budget shrinks by the guidance's so the claim never outgrows the cap the
-    verify prompt fences it under."""
-    tail = (
-        f"\n\n## Lab guidance\n\n*(This repository's research preferences — "
-        f"advisory; the judges may raise them only as advisory findings.)*"
-        f"\n\n{guidance}"
-        if guidance
-        else ""
-    )
-    report_budget = max(1_000, MAX_CLAIM_CHARS - len(guidance))
-    return (
+    the author's report and nothing else — this repository's guidance travels
+    in the judges' own prompt (run_panel's `guidance`), never inside this
+    body, which every judge prompt fences as untrusted data. The report
+    budget subtracts the actual header so the body never outgrows the cap
+    the verify prompt fences it under."""
+    header = (
         f"Automated improvement claim (pre-PR): {benchmark} "
         f"{baseline} -> {candidate}, measured by the orchestrator.\n\n"
         f"## Research report\n\n*Session prose, written before "
-        f"the orchestrator measured.*\n\n{report[:report_budget]}"
-        f"{tail}"
+        f"the orchestrator measured.*\n\n"
     )
+    return f"{header}{report[: MAX_CLAIM_CHARS - len(header)]}"
 
 
 def build_panel_runner(
@@ -3720,13 +3711,14 @@ def build_panel_runner(
     `claim_body` renders the claim the panel judges from (baseline,
     candidate, report); the default is the credited improvement claim.
     `guidance` is this repository's panel guidance, read from the same ref
-    as `contract_text`, appended to that claim as advisory text."""
+    as `contract_text` — carried in the judges' prompt as advisory text,
+    never inside the claim body."""
     from outerloop.review_agent import sanitize_checkout
 
     reads = {"n": start_round}
     render_claim = claim_body or (
         lambda baseline, candidate, report: _panel_claim_body(
-            benchmark, baseline, candidate, report, guidance=guidance
+            benchmark, baseline, candidate, report
         )
     )
 
@@ -3788,7 +3780,9 @@ def build_panel_runner(
                 ),
                 author=bot_login,
             )
-            return run_panel(lenses, panel_ws, claim, contract_text, today, reads["n"])
+            return run_panel(
+                lenses, panel_ws, claim, contract_text, today, reads["n"], guidance=guidance
+            )
         finally:
             for name in ("base", "pr-head"):
                 _best_effort(

@@ -2895,7 +2895,7 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
                 "findings": [
                     {
                         "summary": "Missing ablation",
-                        "category": "aggregation",
+                        "category": "other",
                         "blocking": True,
                         "confidence": "high",
                     }
@@ -2903,10 +2903,10 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
                 "notes": "",
             }
         )
-        assert judgment.findings[0].category == "aggregation"
+        assert judgment.findings[0].category == "other"
         judgments.append(brief)
         return PanelVerdict(
-            blocking=tuple(judgment.findings), transcript="current rubric: aggregation"
+            blocking=tuple(judgment.findings), transcript="current rubric: taste advisory"
         )
 
     author = Author()
