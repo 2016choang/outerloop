@@ -416,6 +416,8 @@ def read_index(directory: Path) -> dict[str, Any]:
             or not isinstance(entry.get("verified"), bool)
             or "cost_usd" not in entry
             or (entry["cost_usd"] is not None and number(entry["cost_usd"]) is None)
+            or not isinstance(entry.get("backend", ""), str)
+            or not isinstance(entry.get("session_id", ""), str)
             for entry in data["sessions"].values()
         )
     ):
@@ -442,6 +444,11 @@ def index_session(
             "record_path": record_path,
             "cost_usd": number(record["cost_usd"]),
             "verified": record["verified"],
+            # A codex resume reports the thread's cumulative usage as this
+            # leg's usage; the session id groups a thread's legs so its totals
+            # price it once (#479). Absent for entries written before this.
+            "backend": record.get("backend") or "",
+            "session_id": record.get("session_id") or "",
         }
         temporary = _write_private(
             directory,
@@ -460,22 +467,40 @@ def index_session(
 
 
 def session_totals(directory: Path) -> dict[str, Any]:
-    """Persisted totals; containment supplies authority, not file permissions."""
+    """Persisted totals; containment supplies authority, not file permissions.
+
+    A codex resume reports the thread's cumulative usage as the leg's usage
+    (#479), so legs of one codex session_id are never summed over the same
+    tokens: only the newest leg of each thread is priced. Entries written
+    before session ids were indexed (and every non-codex leg, whose usage is
+    per invocation) carry no grouping and keep their recorded cost.
+    """
     try:
-        entries = tuple(read_index(directory).values())
+        sessions = read_index(directory)
     except (OSError, ValueError):
         log.warning("could not read session index in %s", directory, exc_info=True)
-        entries = ()
-    costs = tuple(number(entry["cost_usd"]) for entry in entries)
+        sessions = {}
+    latest: dict[str, str] = {}
+    for invocation, entry in sessions.items():
+        if entry.get("backend") == "codex" and entry.get("session_id"):
+            latest[entry["session_id"]] = invocation
+    costs = tuple(
+        number(entry["cost_usd"])
+        for invocation, entry in sessions.items()
+        if not (
+            entry.get("backend") == "codex"
+            and entry.get("session_id")
+            and latest[entry["session_id"]] != invocation
+        )
+    )
     known = sum(cost for cost in costs if cost is not None)
     unknown = sum(cost is None for cost in costs)
-    count = len(costs)
     return {
-        "session_cost_usd": known if count and not unknown else None,
+        "session_cost_usd": known if costs and not unknown else None,
         "known_session_cost_usd": known,
         "unpriced_sessions": unknown,
-        "captured_sessions": count,
-        "verified": bool(entries) and all(entry["verified"] for entry in entries),
+        "captured_sessions": len(sessions),
+        "verified": bool(sessions) and all(entry["verified"] for entry in sessions.values()),
     }
 
 

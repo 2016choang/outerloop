@@ -22,6 +22,15 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A codex run that slept and resumed was priced once per leg: `exec resume`
+  reports the thread's cumulative token usage as each leg's usage, so
+  `outerloop status` overstated a resumed session's cost by roughly the
+  number of legs (#479). Session totals now price a codex thread once, at
+  its newest leg.
+  Upgrading: index entries written before this change carry no session id
+  and keep contributing their recorded cost, so resumed codex sessions
+  captured before the upgrade still overstate; totals are accurate for
+  sessions captured after upgrading.
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
   so throttled runs park briefly instead of ending aborted (#481).
