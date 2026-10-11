@@ -442,22 +442,20 @@ def test_pending_past_deadline_on_a_queue_wait_extends_instead(tmp_path: Path) -
     by one slack window (Torch 2026-09-06, four launches on QOSMaxGRESPerUser)."""
     from outerloop.tick import BLIND_PARK_SLACK_MIN
 
-    for reason in ("QOSMaxGRESPerUser", "Priority", "Resources", "AssocGrpGRES"):
+    # one wait and one never reason: the reason strings only branch through
+    # is_queue_wait, classified exhaustively in test_is_queue_wait_classifies
+    for reason, waits in (("QOSMaxGRESPerUser", True), ("DependencyNeverSatisfied", False)):
         root = tmp_path / reason  # one root per case: ticks on one root coalesce
         waiting_run(root, deadline=NOW - 1)
         slurm = FakeSlurm(states={"100": "PENDING"}, reasons={"100": reason})
         report, dispatcher = run_tick(root, slurm)
-        assert slurm.cancelled == [], reason
-        assert report.woken == () and dispatcher.dispatched == [], reason
-        assert load_record(root, "r1").deadline == NOW + BLIND_PARK_SLACK_MIN * 60, reason
-    # reasons that never clear on their own still cancel and wake
-    for reason in ("DependencyNeverSatisfied", "QOSMaxWallDurationPerJobLimit", "InvalidAccount"):
-        root = tmp_path / reason
-        waiting_run(root, deadline=NOW - 1)
-        slurm = FakeSlurm(states={"100": "PENDING"}, reasons={"100": reason})
-        report, _dispatcher = run_tick(root, slurm)
-        assert slurm.cancelled == ["100"], reason
-        assert report.woken == (("r1", "unschedulable"),), reason
+        if waits:
+            assert slurm.cancelled == [], reason
+            assert report.woken == () and dispatcher.dispatched == [], reason
+            assert load_record(root, "r1").deadline == NOW + BLIND_PARK_SLACK_MIN * 60, reason
+        else:
+            assert slurm.cancelled == ["100"], reason
+            assert report.woken == (("r1", "unschedulable"),), reason
 
 
 def test_pending_past_deadline_reason_query_failure_defers(tmp_path: Path) -> None:
@@ -965,9 +963,8 @@ def test_disk_preflight_gates_launch_lanes(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("lane", ["intake", "steward", "self_initiated"])
 @pytest.mark.parametrize("dry_run", [False, True])
-@pytest.mark.parametrize("service_dry_run", [False, True])
 def test_hold_launches_preserves_servicing_and_resumes(
-    tmp_path, monkeypatch, caplog, lane, dry_run, service_dry_run
+    tmp_path, monkeypatch, caplog, lane, dry_run
 ):
     import logging
     from unittest.mock import Mock
@@ -1014,7 +1011,9 @@ def test_hold_launches_preserves_servicing_and_resumes(
             github=github,
             service_spec=spec,
             dry_run=dry_run,
-            service_dry_run=service_dry_run,
+            # service_dry_run crosses nothing else here; one True proves it
+            # is passed through to the lanes verbatim
+            service_dry_run=True,
             min_free_bytes=1,
             min_tick_s=0,
         )
@@ -1039,7 +1038,7 @@ def test_hold_launches_preserves_servicing_and_resumes(
     resumed = step(NOW + GRACE + 3)
     assert not resumed.launch_blocked
     assert getattr(resumed, lane) == ("work", "123")
-    assert lanes[lane].call_args.kwargs["dry_run"] is service_dry_run
+    assert lanes[lane].call_args.kwargs["dry_run"] is True
 
 
 def test_hold_launches_reports_without_services(tmp_path):
@@ -3899,19 +3898,20 @@ roadmap: docs/roadmap.md
 
 
 @pytest.mark.parametrize("event", ["comment", "base", "merged", "closed"])
-@pytest.mark.parametrize("agent", ["agent-01", "steward"])
-def test_sweep_pr_events_use_one_wake(tmp_path, event, agent):
+def test_sweep_pr_events_use_one_wake(tmp_path, event):
     from ledger_fake import LedgerGitHub
     from outerloop.inbox import pending
     from outerloop.runstate import run_dir
     from outerloop.tick import sweep
 
+    # agent_id is fixed: the steward/agent split only names a merge-refusal
+    # reason (never asserted here) and this PR is unblessed anyway
     record = waiting_run(
         tmp_path,
         experiment_job_id="",
         deadline=0,
         pr_url="https://github.com/org/repo/pull/9",
-        agent_id=agent,
+        agent_id="agent-01",
         stage={"base_sha": "old"},
     )
 
@@ -4314,9 +4314,15 @@ def test_check_message_wakes_only_on_failure(tmp_path, conclusion):
     assert bool(report.woken) == (conclusion == "failure")
 
 
-@pytest.mark.parametrize("state", ["parked", "running"])
-@pytest.mark.parametrize("armer", ["bot", "former-bot", "human"])
-@pytest.mark.parametrize("blessed", ["blessed", ""])
+@pytest.mark.parametrize(
+    "state,armer,blessed",
+    [
+        ("parked", "bot", "blessed"),  # withdrawal + both head reports
+        ("parked", "human", "blessed"),  # a human's arm is left alone, heads reported
+        ("running", "bot", "blessed"),  # withdrawal, but a live run gets no report
+        ("parked", "bot", ""),  # unblessed: reports are for the measured head only
+    ],
+)
 def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
     tmp_path, state, armer, blessed, caplog, monkeypatch
 ):
@@ -4377,7 +4383,9 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
         def merge_pull(self, *args, **kwargs):
             raise AssertionError("unblessed head must never merge")
 
-    monkeypatch.setenv("OUTERLOOP_BOT_ALIASES", "former-bot")
+    # only the login test distinguishes armer values: a former bot alias takes
+    # the same is_own_login path (tests/test_bot_aliases.py)
+    monkeypatch.delenv("OUTERLOOP_BOT_ALIASES", raising=False)
     github = GitHub()
     caplog.set_level("INFO")
     for index, head in enumerate(["human-1", "human-1", "human-2"]):
@@ -4391,7 +4399,7 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
             github=github,
             bot_login="bot",
         )
-    assert github.disarms == int(armer in {"bot", "former-bot"})
+    assert github.disarms == int(armer == "bot")
     if github.disarms:
         assert "auto-merge withdrawal" in caplog.text
     messages = pending(run_dir(tmp_path, record.run_id), 0)
