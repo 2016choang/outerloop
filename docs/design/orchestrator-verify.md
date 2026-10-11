@@ -1,8 +1,10 @@
 # The pre-PR verification loop
 
 **Status: built — the tick passes `--panel verify,review` to every climb job
-by default (the off-switch is `OUTERLOOP_PANEL=""`); sequencing stages 1–4
-below are live, the retriever egress (5) is still to come.** The mechanics
+by default (the off-switch is `OUTERLOOP_PANEL=""`; local mode without an
+image also turns the panel off unless `OUTERLOOP_PANEL_UNCONTAINED=1`);
+sequencing stages 1–4 below are live, the retriever egress (5) is still to
+come.** The mechanics
 of verification as a step of the climb transaction. `judge-placement.md`
 argues *where* the verifier
 belongs (inside the orchestrator) and why the reviewer stays external — this

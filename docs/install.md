@@ -693,11 +693,13 @@ stays off until it is set and the target's contract declares a steward
 scope.
 
 `OUTERLOOP_CODEX_WEB_SEARCH` governs Codex's built-in web search in every
-Codex session (author, judges, reviewers). The default `auto` keeps Codex's
-own setting on native provider sessions and turns it off on endpoint
-sessions, where the provider-side tool cannot run; `off` (or any other
-value) turns it off everywhere. A role searches the web only where its spec
-grants the web tools.
+Codex session (author, judges, reviewers). `auto` (the default, also when
+the value is empty) keeps Codex's own setting on native provider sessions
+and turns it off on endpoint sessions, where the provider-side tool cannot
+run; anything else means `off` everywhere (`auto` is matched
+case-insensitively, whitespace trimmed). A role whose spec grants WebSearch
+gets search force-enabled; a spec without it never disables search, so a
+native `auto` session keeps Codex's own setting.
 
 On a cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
