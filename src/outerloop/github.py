@@ -1248,9 +1248,11 @@ def ensure_regular_git_dir(root: Path | None) -> None:
     sha = _head_commit_sha(git_dir) or _any_ref_sha(git_dir)
     if sha is not None:
         try:
+            # No root, so no filter-override listing: `cat-file -e` never
+            # converts working-tree files, so no filter driver can run in it.
             _run_git(
                 ["git", "-C", str(root), *SAFE_GIT_FLAGS, "cat-file", "-e", f"{sha}^{{commit}}"],
-                _git_env(None, Path(root)),
+                _git_env(None),
                 timeout=GUARD_GIT_TIMEOUT_S,  # a stalled read is refused, not waited on
             )
         except GitError as exc:

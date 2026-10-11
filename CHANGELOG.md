@@ -23,6 +23,10 @@ Versions follow [SemVer](https://semver.org).
 - The review and verify posting CLIs now share one gate for the untrusted
   emitted envelope, so a security fix to the decode/identity/kind checks lands
   in both (#337).
+- The `.git` guard's object read no longer derives filter-driver overrides
+  (`cat-file -e` never converts working-tree files), dropping one
+  `git config --get-regexp` subprocess from every guarded kernel git call
+  with no change to what is refused or neutralized (#512).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).
