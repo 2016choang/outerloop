@@ -1248,9 +1248,16 @@ def ensure_regular_git_dir(root: Path | None) -> None:
     sha = _head_commit_sha(git_dir) or _any_ref_sha(git_dir)
     if sha is not None:
         try:
+            # The read carries no filter overrides (pairs=[]): `cat-file -e`
+            # only resolves an object in the store, never converts
+            # working-tree files, so no filter driver can run in it — and
+            # every other child-spawning setting is already neutralized on
+            # the argv above (SAFE_GIT_FLAGS) or stripped from the config by
+            # _ensure_regular_config. Skipping the override listing keeps the
+            # guard to ONE git subprocess per call.
             _run_git(
                 ["git", "-C", str(root), *SAFE_GIT_FLAGS, "cat-file", "-e", f"{sha}^{{commit}}"],
-                _git_env(None, Path(root)),
+                _git_env(None, pairs=[]),
                 timeout=GUARD_GIT_TIMEOUT_S,  # a stalled read is refused, not waited on
             )
         except GitError as exc:
@@ -1487,12 +1494,17 @@ def _run_git_with_credential(
         raise GitError(message) from None
 
 
-def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
+def _git_env(
+    token: str | None, root: Path | None = None, pairs: list[tuple[str, str]] | None = None
+) -> dict[str, str]:
     """Environment for a git invocation: host global/system config never
     loads (a host-configured filter driver must not be selectable by a
     session-written .gitattributes), repo-defined filter drivers are
     overridden to passthrough, and the token — present only for network
-    subcommands — rides an env-injected header."""
+    subcommands — rides an env-injected header. `pairs` supplies the filter
+    overrides already derived for this call, skipping the config-listing
+    subprocess (the guard's object read passes [] — `cat-file -e` never
+    converts working-tree files, so no filter driver can run in it)."""
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -1503,11 +1515,13 @@ def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
     # for a real one during post-session verification. The kernel never
     # uses replace refs; disable them on every invocation.
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    pairs = _filter_override_pairs(root)
+    if pairs is None:
+        pairs = _filter_override_pairs(root)
     if token is not None:
-        pairs.append(
-            ("http.https://github.com/.extraheader", f"Authorization: Basic {_basic(token)}")
-        )
+        pairs = [
+            *pairs,
+            ("http.https://github.com/.extraheader", f"Authorization: Basic {_basic(token)}"),
+        ]
     env["GIT_CONFIG_COUNT"] = str(len(pairs))
     for i, (k, v) in enumerate(pairs):
         env[f"GIT_CONFIG_KEY_{i}"] = k
