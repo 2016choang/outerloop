@@ -914,9 +914,9 @@ def message(args: argparse.Namespace) -> int:
         directory = run_dir(root, args.run_id)
         if not (directory / RECORD_NAME).is_file():
             raise ValueError(f"unknown run id: {args.run_id}")
-        if args.file and args.text is not None:
+        if args.file and args.text:
             raise ValueError("give the message text directly or with --file, not both")
-        text = (args.file.read_text() if args.file else args.text) or ""
+        text = args.file.read_text() if args.file else " ".join(args.text)
         if not text.strip():
             raise ValueError("no message text")
         with (directory / ".record-lock").open("a") as lock:
@@ -1037,7 +1037,9 @@ def main(argv: list[str] | None = None) -> int:
         "finish; a paused loop delivers when it resumes. No new wake is scheduled.",
     )
     p.add_argument("run_id")
-    p.add_argument("text", nargs="?", help="the message text")
+    # nargs="*", not "?": an optional positional before an option is parsed
+    # differently across Python versions; words after --root must still count
+    p.add_argument("text", nargs="*", help="the message text")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p.add_argument("--file", type=Path, help="read the message text from this path")
     p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
