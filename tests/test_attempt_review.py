@@ -598,16 +598,26 @@ HYPOTHESIS = "Hypothesis: " + ("Improve the solver. " * 80).strip()
         # one case per distinct path: a clearing improvement is pushed; a
         # within-floor improvement names the unchanged row; a worse number
         # names it too; a reportless publish survives a crash after the push;
-        # a report-only publish never pushes; a skipped panel read withholds
-        # the blessing
+        # a report-only publish never pushes; a reportless report-only publish
+        # recovers from an interruption before the blessing is recorded; a
+        # skipped panel read withholds the blessing
         (11.4, False, "", HYPOTHESIS),
         (11.8, False, "", HYPOTHESIS),
         (12.5, False, "", HYPOTHESIS),
         (11.4, False, "", ""),
         (11.4, True, "", HYPOTHESIS),
+        (11.4, True, "", ""),
         (11.4, False, "insufficient panel time", HYPOTHESIS),
     ],
-    ids=["improved", "floor", "worse", "no-report", "report-only", "panel-skip"],
+    ids=[
+        "improved",
+        "floor",
+        "worse",
+        "no-report",
+        "report-only",
+        "report-only-no-report",
+        "panel-skip",
+    ],
 )
 def test_publish_review_fast_forwards_and_applies_floor(
     review_run,
@@ -976,18 +986,22 @@ def test_unsubmitted_review_edit_is_not_measured_or_pushed(review_run, monkeypat
 
 
 @pytest.mark.parametrize(
-    "credited,panel_skip",
+    "credited,panel_skip,gpus",
     [
         # one case per distinct path: the gate credits the change (publish,
         # bless, both verdicts delivered), it does not, the gate itself
-        # fails, and a skipped panel read rides the credited path
-        (True, ""),
-        (False, ""),
-        (None, ""),
-        (True, "insufficient panel time"),
+        # fails, and a skipped panel read rides the credited path. A CPU
+        # submit keeps the charge at zero — the GPU axis moves the accounting
+        (True, "", 1),
+        (False, "", 1),
+        (None, "", 1),
+        (True, "insufficient panel time", 1),
+        (True, "", 0),
     ],
 )
-def test_review_submit_parks_and_delivers_verdict(review_run, monkeypatch, credited, panel_skip):
+def test_review_submit_parks_and_delivers_verdict(
+    review_run, monkeypatch, credited, panel_skip, gpus
+):
     import json
 
     from outerloop.attempt import resume_attempt, resume_run
@@ -1001,7 +1015,7 @@ def test_review_submit_parks_and_delivers_verdict(review_run, monkeypatch, credi
     ws = run_dir(root, "tsp-r1") / "ws"
     text = CONTRACT.replace(
         "    direction: min\n",
-        "    direction: min\n    gpus: 1\n    eval_minutes: 30\n    seed_env: PRIVATE_SEED\n",
+        f"    direction: min\n    gpus: {gpus}\n    eval_minutes: 30\n    seed_env: PRIVATE_SEED\n",
     )
     (ws / ".outerloop.yaml").write_text(text)
     commit(ws, "meter")
@@ -1082,7 +1096,7 @@ def test_review_submit_parks_and_delivers_verdict(review_run, monkeypatch, credi
     assert parked.stage["review_topup"] is True
     assert "Review top-up added when the PR opened" in author.calls[0][0]
     assert parked.stage["submitted"] and parked.stage["launches_used"] == 0
-    assert parked.stage["gpu_hours_used"] == 1
+    assert parked.stage["gpu_hours_used"] == gpus
     assert int(str(parked.stage["seed"])) > 0
     sealed = str(parked.stage["candidate_sha"])
     _git(ws, "merge-base", "--is-ancestor", head, sealed)
@@ -1774,9 +1788,20 @@ def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeyp
 
 
 @pytest.mark.parametrize(
-    "history", ["equal", "ancestor", "divergent", "old-pin", "rewound", "unknown-pin"]
+    "base,history",
+    [
+        # one case per distinct history path; one non-main base proves the
+        # preflight reads the configured branch's tip, not a hardcoded main
+        ("main", "equal"),
+        ("main", "ancestor"),
+        ("main", "divergent"),
+        ("main", "old-pin"),
+        ("main", "rewound"),
+        ("main", "unknown-pin"),
+        ("release", "equal"),
+    ],
 )
-def test_submit_fetch_detects_move_during_author_leg(review_run, history):
+def test_submit_fetch_detects_move_during_author_leg(review_run, base, history):
     from outerloop.attempt import _submit_preflight
     from outerloop.github import Workspace
 
@@ -1801,7 +1826,7 @@ def test_submit_fetch_detects_move_during_author_leg(review_run, history):
         ).strip()
 
     tip = commit(old, "new base")
-    _git(wsroot, "push", str(bare), f"{tip}:refs/heads/main")
+    _git(wsroot, "push", str(bare), f"{tip}:refs/heads/{base}")
     # The workspace's remote-tracking ref has not seen this move.
     head = old if history == "divergent" else tip
     if history == "divergent":
@@ -1814,15 +1839,15 @@ def test_submit_fetch_detects_move_during_author_leg(review_run, history):
         pin = commit(tip, "former base tip")
     if history == "unknown-pin":
         pin = ""
-    result = _submit_preflight(Workspace(root=wsroot, url=str(bare)), "main", pin)
+    result = _submit_preflight(Workspace(root=wsroot, url=str(bare)), base, pin)
     expected = {
         "divergent": "stale",
         "old-pin": "outdated-pin",
         "rewound": "outdated-pin",
         "unknown-pin": "unknown",
     }.get(history, "ready")
-    assert result.status == expected and result.tip == tip and result.base_branch == "main"
-    assert _git(wsroot, "rev-parse", "origin/main").strip() == tip
+    assert result.status == expected and result.tip == tip and result.base_branch == base
+    assert _git(wsroot, "rev-parse", f"origin/{base}").strip() == tip
 
 
 @pytest.mark.parametrize("operation", ["fetch", "resolve", "merge-base"])
