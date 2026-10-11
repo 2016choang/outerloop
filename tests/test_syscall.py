@@ -89,9 +89,10 @@ def _job(
     name: str,
     *,
     code: str | None = "0",
-    stdout: str = "",
-    stderr: str = "",
+    stdout: str | None = None,
+    stderr: str | None = None,
     log: str = "",
+    artifacts: bool = True,
 ) -> Path:
     """One job's dir under `run_dir`, as the job wrapper leaves it: exit-code,
     output tails and the copy-out log. `code=None` is a job that died before
@@ -100,10 +101,11 @@ def _job(
     ev.mkdir(parents=True, exist_ok=True)
     if code is not None:
         (ev / "exit-code").write_text(code)
+    if code is not None and artifacts:
         (ev / "artifacts").mkdir()
-    if stdout:
+    if stdout is not None:
         (ev / "stdout").write_text(stdout)
-    if stderr:
+    if stderr is not None:
         (ev / "stderr").write_text(stderr)
     if log:
         (ev / "artifacts.log").write_text(log)
@@ -520,7 +522,12 @@ def test_gather_results_reads_output_and_delivers_artifacts(tmp_path) -> None:
     ws.mkdir()
     # a normal launch with a delivered artifact + a skip log
     ev = _job(
-        run_dir, "train", stdout="loss: 0.4\n", log="skipped (over 5000000 bytes): big.ckpt\n"
+        run_dir,
+        "train",
+        code="0\n",
+        stdout="loss: 0.4\n",
+        stderr="",
+        log="skipped (over 5000000 bytes): big.ckpt\n",
     )
     (ev / "artifacts" / "sub").mkdir()
     (ev / "artifacts" / "curve.json").write_text("{}")
@@ -579,6 +586,7 @@ def test_gather_results_reads_only_the_tail_of_huge_output(tmp_path) -> None:
     _job(
         run_dir,
         "big",
+        artifacts=False,
         stdout="x" * (MAX_OUTPUT_CHARS * 50) + "\nFINAL: 0.42\n",  # far past the window
     )
     (results,) = gather_results(run_dir, ws, (Launch("big", "c", 30),))
