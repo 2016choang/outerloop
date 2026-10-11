@@ -34,6 +34,12 @@ Versions follow [SemVer](https://semver.org).
   experiments against the final eval, running the repo's checks before a
   submit) and deleted the divergence-debt aside from the research-line
   section; under `guidance: none` the brief now states mechanics only.
+### Added
+
+- Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
+  note to a run's inbox, delivered at the run's next wake — no PR needed.
+  Reuses the existing `note`/`kernel` message shape, so older kernels read it
+  without a compatibility change.
 
 ### Documentation
 
