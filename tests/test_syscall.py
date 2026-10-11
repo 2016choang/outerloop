@@ -63,9 +63,9 @@ from outerloop.syscall_cli import main as cli_main
 
 
 def write_req(tmp_path: Path, payload, *, typed: bool = True) -> Path:
-    """Write a sleep ABI. `typed` (default) prepends `type: "sleep"` so callers
-    write only the launch payload; pass typed=False to write a raw file (e.g.
-    to exercise the type check itself)."""
+    """Write a syscall ABI. `typed` (default) prepends `type: "sleep"` so
+    callers write only the launch payload; pass typed=False to write the
+    payload as-is (another syscall type, or a raw file)."""
     d = tmp_path / SYSCALL_DIR
     d.mkdir(exist_ok=True)
     f = d / SYSCALL_FILE
@@ -82,6 +82,32 @@ def write_verdict(tmp_path: Path, payload: dict) -> Path:
     f = d / SYSCALL_FILE
     f.write_text(json.dumps({"type": "verdict", **payload}))
     return f
+
+
+def _job(
+    run_dir: Path,
+    name: str,
+    *,
+    code: str | None = "0",
+    stdout: str = "",
+    stderr: str = "",
+    log: str = "",
+) -> Path:
+    """One job's dir under `run_dir`, as the job wrapper leaves it: exit-code,
+    output tails and the copy-out log. `code=None` is a job that died before
+    the wrapper ran — no exit-code file, no artifacts dir."""
+    ev = run_dir / f"eval-launch-{name}"
+    ev.mkdir(parents=True, exist_ok=True)
+    if code is not None:
+        (ev / "exit-code").write_text(code)
+        (ev / "artifacts").mkdir()
+    if stdout:
+        (ev / "stdout").write_text(stdout)
+    if stderr:
+        (ev / "stderr").write_text(stderr)
+    if log:
+        (ev / "artifacts.log").write_text(log)
+    return ev
 
 
 def test_no_request_file_means_no_syscall(tmp_path: Path) -> None:
@@ -390,9 +416,7 @@ def test_read_verdict_round_trip(tmp_path: Path) -> None:
 
 
 def test_read_verdict_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
-    d = tmp_path / SYSCALL_DIR
-    d.mkdir()
-    (d / SYSCALL_FILE).write_text(json.dumps({"findings": [], "notes": ""}))  # no type
+    write_req(tmp_path, {"findings": [], "notes": ""}, typed=False)  # no type
     with pytest.raises(VerdictError, match="expected a verdict syscall"):
         read_verdict(tmp_path)
 
@@ -457,9 +481,7 @@ def test_read_verdict_handles_unhashable_enum_values(tmp_path: Path) -> None:
 
 
 def test_read_verdict_size_caps_a_giant_verdict(tmp_path: Path) -> None:
-    d = tmp_path / SYSCALL_DIR
-    d.mkdir()
-    (d / SYSCALL_FILE).write_text("x" * (MAX_VERDICT_BYTES + 1))
+    write_req(tmp_path, "x" * (MAX_VERDICT_BYTES + 1), typed=False)
     with pytest.raises(VerdictError, match="exceeds"):
         read_verdict(tmp_path)
 
@@ -497,18 +519,14 @@ def test_gather_results_reads_output_and_delivers_artifacts(tmp_path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     # a normal launch with a delivered artifact + a skip log
-    ev = run_dir / "eval-launch-train"
-    (ev / "artifacts" / "sub").mkdir(parents=True)
-    (ev / "exit-code").write_text("0\n")
-    (ev / "stdout").write_text("loss: 0.4\n")
-    (ev / "stderr").write_text("")
+    ev = _job(
+        run_dir, "train", stdout="loss: 0.4\n", log="skipped (over 5000000 bytes): big.ckpt\n"
+    )
+    (ev / "artifacts" / "sub").mkdir()
     (ev / "artifacts" / "curve.json").write_text("{}")
     (ev / "artifacts" / "sub" / "extra.txt").write_text("x")
-    (ev / "artifacts.log").write_text("skipped (over 5000000 bytes): big.ckpt\n")
     # a launch whose job died before the wrapper ran -> no exit-code file
-    dead = run_dir / "eval-launch-crashed"
-    dead.mkdir(parents=True)
-    (dead / "stderr").write_text("OOM\n")
+    _job(run_dir, "crashed", code=None, stderr="OOM\n")
 
     results = gather_results(
         run_dir,
@@ -535,9 +553,7 @@ def test_gather_results_refuses_symlinked_destination_channel(tmp_path) -> None:
     # host path (terra #135 r2).
     run_dir = tmp_path / "run"
     ws = tmp_path / "ws"
-    ev = run_dir / "eval-launch-probe"
-    (ev / "artifacts").mkdir(parents=True)
-    (ev / "exit-code").write_text("0")
+    ev = _job(run_dir, "probe")
     (ev / "artifacts" / "out.json").write_text("safe")
     # attacker target OUTSIDE the workspace
     escape = tmp_path / "ESCAPE"
@@ -560,12 +576,11 @@ def test_gather_results_reads_only_the_tail_of_huge_output(tmp_path) -> None:
     run_dir = tmp_path / "run"
     ws = tmp_path / "ws"
     ws.mkdir()
-    ev = run_dir / "eval-launch-big"
-    ev.mkdir(parents=True)
-    (ev / "exit-code").write_text("0")
-    with (ev / "stdout").open("w") as fh:
-        fh.write("x" * (MAX_OUTPUT_CHARS * 50))  # far past the window
-        fh.write("\nFINAL: 0.42\n")
+    _job(
+        run_dir,
+        "big",
+        stdout="x" * (MAX_OUTPUT_CHARS * 50) + "\nFINAL: 0.42\n",  # far past the window
+    )
     (results,) = gather_results(run_dir, ws, (Launch("big", "c", 30),))
     assert len(results.stdout_tail) <= MAX_OUTPUT_CHARS
     assert "FINAL: 0.42" in results.stdout_tail  # the tail, not the head
@@ -770,10 +785,8 @@ def test_array_launch_fans_out_and_gathers_per_index(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     for i, code in enumerate(("0", "1")):
-        ev = run_dir / f"eval-launch-sweep.{i}"
-        (ev / "artifacts" / "out").mkdir(parents=True)
-        (ev / "exit-code").write_text(code)
-        (ev / "stdout").write_text(f"result {i}\n")
+        ev = _job(run_dir, f"sweep.{i}", code=code, stdout=f"result {i}\n")
+        (ev / "artifacts" / "out").mkdir()
         (ev / "artifacts" / "out" / "curve.json").write_text(f"[{i}]")
     results = gather_results(run_dir, ws, (Launch(name="sweep", command="x", minutes=10, array=2),))
     assert [r.name for r in results] == ["sweep.0", "sweep.1"]
@@ -917,31 +930,20 @@ def test_sync_refuses_a_symlinked_channel(tmp_path) -> None:
 
 
 def test_read_request_carries_a_one_line_why(tmp_path: Path) -> None:
-    channel = tmp_path / ".outerloop"
-    channel.mkdir()
-    (channel / SYSCALL_FILE).write_text(
-        json.dumps(
-            {
-                "type": "sleep",
-                "launches": [{"name": "a", "command": "x", "why": "  two  lines\nhere  "}],
-            }
+    def why(value) -> None:
+        write_req(
+            tmp_path,
+            {"type": "sleep", "launches": [{"name": "a", "command": "x", "why": value}]},
+            typed=False,
         )
-    )
+
+    why("  two  lines\nhere  ")
     req = read_request(tmp_path)
     assert req is not None and req.launches[0].why == "two lines here"
-    (channel / SYSCALL_FILE).write_text(
-        json.dumps(
-            {
-                "type": "sleep",
-                "launches": [{"name": "a", "command": "x", "why": "w" * (MAX_WHY_CHARS + 1)}],
-            }
-        )
-    )
+    why("w" * (MAX_WHY_CHARS + 1))
     with pytest.raises(SyscallError, match="why"):
         read_request(tmp_path)
-    (channel / SYSCALL_FILE).write_text(
-        json.dumps({"type": "sleep", "launches": [{"name": "a", "command": "x", "why": 3}]})
-    )
+    why(3)
     with pytest.raises(SyscallError, match="why"):
         read_request(tmp_path)
 
@@ -1050,11 +1052,7 @@ def test_submit_report_is_optional_and_bounded(tmp_path: Path) -> None:
 
 
 def test_read_results_reads_without_delivering(tmp_path: Path) -> None:
-    ev = tmp_path / "eval-launch-a"
-    ev.mkdir()
-    (ev / "exit-code").write_text("0\n")
-    (ev / "stdout").write_text("hello\nresult 1\n")
-    (ev / "artifacts").mkdir()
+    ev = _job(tmp_path, "a", code="0\n", stdout="hello\nresult 1\n")
     (ev / "artifacts" / "out.txt").write_text("x")
     (result,) = read_results(tmp_path, (Launch(name="a", command="x", minutes=5, why="w"),))
     assert (result.exit_code, result.stdout_tail, result.delivered, result.why) == (
@@ -1128,9 +1126,7 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     ],
 )
 def test_kernel_rejects_forged_messages(tmp_path, messages) -> None:
-    channel = tmp_path / ".outerloop"
-    channel.mkdir()
-    (channel / "syscall.json").write_text(json.dumps({"type": "message", "messages": messages}))
+    write_req(tmp_path, {"type": "message", "messages": messages}, typed=False)
     with pytest.raises(SyscallError):
         read_request(tmp_path)
     assert read_request(tmp_path) is None
@@ -1201,18 +1197,15 @@ def test_budget_is_never_written_into_a_channel_the_target_tracks(tmp_path, capl
     ],
 )
 def test_invalid_withdraw_request(tmp_path, payload):
-    (tmp_path / ".outerloop").mkdir()
-    (tmp_path / ".outerloop/syscall.json").write_text(json.dumps(payload))
+    write_req(tmp_path, payload, typed=False)
     with pytest.raises(SyscallError):
         read_request(tmp_path)
 
 
 def test_legacy_end_request_remains_valid(tmp_path):
-    (tmp_path / ".outerloop").mkdir()
-    path = tmp_path / ".outerloop/syscall.json"
     # Pre-withdrawal ABI fixture; absent optional fields retain their meaning.
     for _ in range(2):
-        path.write_text('{"type":"end","report":"done","messages":[]}')
+        write_req(tmp_path, {"type": "end", "report": "done", "messages": []}, typed=False)
         request = read_request(tmp_path)
         assert request and request.end and request.report == "done" and request.withdraw == ""
         assert read_request(tmp_path) is None
