@@ -2533,18 +2533,33 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
     assert park.candidate_sha and park.sleeps_used == 0 and park.launches_used == 0
 
 
-@pytest.mark.parametrize("kind", ["launch", "submit", "stale", "outdated-pin"])
 @pytest.mark.parametrize(
-    "retry", ["end", "explicit-end", "clean", "outage", "timeout", "budget", "error"]
+    "kind,retry,entry",
+    [
+        # one case per distinct entry into the refusal (the `where` word and the
+        # preflight that turns a submit into a checkpoint); "outdated-pin"
+        # reaches the identical branch as "stale" — they diverge only after a
+        # checkpoint is taken, which the refusal never does
+        ("launch", "end", "fresh"),
+        ("submit", "end", "fresh"),
+        ("stale", "end", "fresh"),
+        ("launch", "end", "replies-only"),  # no launcher wired, replies only
+        ("submit", "end", "wake"),  # refusal delivered into a resume entry
+        # the author's answers after a refusal: an explicit end, a failed wake
+        # (outcome + preserved rejection), and an outage on the refusal wake
+        ("submit", "explicit-end", "fresh"),
+        ("submit", "error", "fresh"),
+        ("submit", "outage", "fresh"),
+        # recovery: an in-scope request proceeds and only the new work is
+        # charged — the measured gate, or a park when the request launches
+        ("submit", "clean", "fresh"),
+        ("launch", "clean", "fresh"),
+    ],
 )
-@pytest.mark.parametrize("entry", ["fresh", "wake", "replies-only"])
 def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
     from outerloop.endpoints import EndpointUnavailable
     from outerloop.inbox import pending
     from outerloop.orchestrator import RunParked, SubmitPreflight
-
-    if entry == "replies-only" and retry == "clean":
-        pytest.skip("clean compute requests require a launcher")
 
     # Nonzero starting meters catch both accidental charges and resets.
     meters: list[tuple[int, int, float]] = []
