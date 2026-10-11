@@ -12,14 +12,18 @@ verifier never fails the target repo's CI.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
 from pathlib import Path
 
 from outerloop.github import EnvTokenProvider, GitHubClient
-from outerloop.posting import EXPECTED_FAILURES, post_round, post_skip_stub
+from outerloop.posting import (
+    EXPECTED_FAILURES,
+    post_round,
+    post_skip_stub,
+    read_emitted_envelope,
+)
 from outerloop.review import sanitize
 from outerloop.review_agent import pull_request
 from outerloop.verifier import (
@@ -37,24 +41,10 @@ def post_from_file(
 ) -> str | None:
     """Post the emitted verdict (or skip stub). Returns the round label, or
     None when there was nothing to post or the envelope was refused."""
-    try:
-        envelope = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("verdict file unreadable (%s); nothing posted", exc)
-        return None
-    if not isinstance(envelope, dict):
-        log.warning("verdict file is not an object; nothing posted")
-        return None
-    if envelope.get("repo") != repo or envelope.get("number") != number:
-        log.warning("verdict envelope names a different PR; refused")
+    envelope = read_emitted_envelope(path, repo, number, "verdict")
+    if envelope is None:
         return None
     kind = envelope.get("kind")
-    if kind == "skip-clean":
-        log.info("session skipped cleanly (%s); nothing to post", envelope.get("detail", ""))
-        return None
-    if kind not in ("skip-stub", "findings"):
-        log.warning("unknown envelope kind %r; nothing posted", kind)
-        return None
     try:
         # the write authority re-checks the bot-only rule for EVERY kind: this
         # side of the artifact boundary is the one that must never post on a

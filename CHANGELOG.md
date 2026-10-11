@@ -16,6 +16,13 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- Refreshed locked dependencies to current releases admitted by the existing
+  bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).
@@ -26,6 +33,28 @@ Versions follow [SemVer](https://semver.org).
   now an infrastructure failure: two uncharged retries, then a park naming the
   `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
   missing journal or `stage.wait_note` reads as zero retries / no note.
+- A codex run that slept and resumed was priced once per leg: `exec resume`
+  reports the thread's cumulative token usage as each leg's usage, so
+  `outerloop status` overstated a resumed session's cost by roughly the
+  number of legs (#479). Session totals now price a codex thread once, at
+  its newest leg. Claude Code sessions keep summing each leg's reported
+  cost: cumulative resume totals arrived only in Claude Code 2.1.277, and
+  the CLI version that ran a session is not recorded — an author override
+  can pin an older CLI whose legs are per invocation — so summing, which
+  can overstate a resumed session on a current CLI, never undercounts one
+  on an older CLI.
+  Upgrading: index entries written before this change carry no session id
+  and keep contributing their recorded cost, so resumed codex sessions
+  captured before the upgrade still overstate; totals are accurate for
+  sessions captured after upgrading.
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
+- A session that ends in error while an out-of-memory kill happens in the job
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
   so throttled runs park briefly instead of ending aborted (#481).
