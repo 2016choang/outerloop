@@ -1017,9 +1017,9 @@ def test_hold_launches_preserves_servicing_and_resumes(
             github=github,
             service_spec=spec,
             dry_run=dry_run,
-            # service_dry_run crosses nothing else here; one True proves it
-            # is passed through to the lanes verbatim
-            service_dry_run=True,
+            # service_dry_run crosses nothing else here; riding the dry_run
+            # parametrize proves it reaches the lanes verbatim either way
+            service_dry_run=dry_run,
             min_free_bytes=1,
             min_tick_s=0,
         )
@@ -1044,7 +1044,7 @@ def test_hold_launches_preserves_servicing_and_resumes(
     resumed = step(NOW + GRACE + 3)
     assert not resumed.launch_blocked
     assert getattr(resumed, lane) == ("work", "123")
-    assert lanes[lane].call_args.kwargs["dry_run"] is True
+    assert lanes[lane].call_args.kwargs["dry_run"] is dry_run
 
 
 def test_hold_launches_reports_without_services(tmp_path):
@@ -4307,6 +4307,7 @@ def test_check_message_wakes_only_on_failure(tmp_path, conclusion):
     [
         ("parked", "bot", "blessed"),  # withdrawal + both head reports
         ("parked", "human", "blessed"),  # a human's arm is left alone, heads reported
+        ("parked", "former-bot", "blessed"),  # a former alias's arm is still withdrawn
         ("running", "bot", "blessed"),  # withdrawal, but a live run gets no report
         ("parked", "bot", ""),  # unblessed: reports are for the measured head only
     ],
@@ -4356,9 +4357,8 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
         def merge_pull(self, *args, **kwargs):
             raise AssertionError("unblessed head must never merge")
 
-    # only the login test distinguishes armer values: a former bot alias takes
-    # the same is_own_login path (tests/test_bot_aliases.py)
-    monkeypatch.delenv("OUTERLOOP_BOT_ALIASES", raising=False)
+    # the alias path through withdrawal; the rest is the plain login test
+    monkeypatch.setenv("OUTERLOOP_BOT_ALIASES", "former-bot")
     github = GitHub()
     caplog.set_level("INFO")
     for index, head in enumerate(["human-1", "human-1", "human-2"]):
@@ -4372,7 +4372,7 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
             github=github,
             bot_login="bot",
         )
-    assert github.disarms == int(armer == "bot")
+    assert github.disarms == int(armer in {"bot", "former-bot"})
     if github.disarms:
         assert "auto-merge withdrawal" in caplog.text
     messages = pending(run_dir(tmp_path, record.run_id), 0)
@@ -4618,10 +4618,11 @@ def test_self_merge_status_deduplicates_under_lease(tmp_path):
         assert read_lease(tmp_path, record.run_id) is None
 
     tick_once()
-    (post,) = github.posts
-    # the dedup key and the threaded reason, not the surrounding sentence
-    assert "<!-- outerloop:self-merge-status -->" in post
-    assert "base moved: origin/main new != measured old" in post
+    # the only check of the user-facing status sentence in the suite
+    assert github.posts == [
+        "<!-- outerloop:self-merge-status -->\nSelf-merge waiting: no head was blessed at publish: "
+        "base moved: origin/main new != measured old."
+    ]
     github.comments[0]["body"] = github.comments[0]["body"].replace("outerloop:", f"{prefix}:")
     github.comments.append(
         {"body": "<!-- outerloop:self-merge-status -->\nunrelated", "user": {"login": "human"}}
