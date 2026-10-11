@@ -105,15 +105,33 @@ def _wire(evaluator, workspace, base_ws=None):
 
 
 def run_climb(
-    tmp_path, values, session=None, config=CONFIG, changed=None, harness=None, contract=None, **kw
+    tmp_path,
+    values=(),
+    session=None,
+    config=CONFIG,
+    changed=None,
+    harness=None,
+    contract=None,
+    measurer=None,
+    snapshot=None,
+    inbox_dir=None,
+    **kw,
 ):
+    """attempt_once over the standard fake wiring; every seam is overridable
+    (a custom `measurer`/`snapshot`/`inbox_dir` replaces the inline ones, and
+    `changed` may be a list or a callable returning the paths per call)."""
     harness = harness or FakeHarness(result=session or ok_session())
     evaluator = FakeEvaluator(values=list(values))
-    measurer, snapshot = _wire(evaluator, tmp_path)
+    if measurer is None or snapshot is None:
+        wired, wired_snapshot = _wire(evaluator, tmp_path)
+        measurer = measurer or wired
+        snapshot = snapshot or wired_snapshot
     # `created` is a brief-only input, so a resume rejects it; a fresh run gets the
     # usual stamp. (Callers can still override via kw.)
     if "created" not in kw and not kw.get("resume_session_id"):
         kw["created"] = "2026-08-06T00:00:00Z"
+    if changed is None:
+        changed = ["src/pilot/solvers/tsp.py"]
     result = attempt_once(
         config,
         contract or CONTRACT,
@@ -122,9 +140,9 @@ def run_climb(
         measurer,
         "base",
         snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
+        inbox_dir=inbox_dir or tmp_path.parent / (tmp_path.name + "-run"),
         ruler="mean tour length over the frozen pool",
-        changed_paths=lambda: changed if changed is not None else ["src/pilot/solvers/tsp.py"],
+        changed_paths=changed if callable(changed) else (lambda: changed),
         **kw,
     )
     return result, harness, evaluator
@@ -339,18 +357,12 @@ def test_submit_parks_the_dispatched_gate_with_the_submitted_marker(
 
         m.results = wait  # type: ignore[method-assign]
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            DEEP_CONTRACT,
+        run_climb(
             tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
+            harness=harness,
+            contract=DEEP_CONTRACT,
+            measurer=m,
+            snapshot=_bare_snapshot(),
             launcher=_fake_launcher(launched),
         )
     p = exc.value
@@ -394,18 +406,11 @@ def test_a_submits_sibling_sweep_is_clamped_too(tmp_path: Path) -> None:
     )
     launched: list = []
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            contract,
+        run_climb(
             tmp_path,
-            FakeHarness(result=ok_session()),
-            ParkingMeasurer(park_on_call=1),
-            "base",
-            _bare_snapshot(),
-            inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
+            contract=contract,
+            measurer=ParkingMeasurer(park_on_call=1),
+            snapshot=_bare_snapshot(),
             launcher=_fake_launcher(launched),
         )
     assert exc.value.submitted
@@ -426,22 +431,7 @@ def test_stop_without_submit_is_unmeasured(tmp_path: Path) -> None:
 def test_unchanged_tree_finish_is_never_measured(tmp_path: Path) -> None:
     """A finish with no changed paths has nothing to measure — the gate
     would compare base against itself (metered or not)."""
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: [],
-        created="t",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.9], changed=[])
     assert result.outcome == "no-improvement"  # maps to the negative-result ending
     assert "no code change; metric noise" in result.note
     assert evaluator.calls == []  # nothing was measured
@@ -452,21 +442,7 @@ def test_submitted_unchanged_tree_is_fed_back_without_a_gate(tmp_path: Path) -> 
     author gets the feedback (and the eval charge back); conceding then
     ends the run honestly."""
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: [],
-        created="t",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.9], harness=harness, changed=[])
     assert result.outcome == "no-improvement"
     assert evaluator.calls == []  # base-vs-base was never run
 
@@ -481,23 +457,9 @@ def test_feature_off_metered_runs_still_measure_at_finish(tmp_path: Path) -> Non
         "    metric: mean_tour_length\n",
         "    metric: mean_tour_length\n    gpus: 1\n    eval_minutes: 240\n",
     ).replace("gpu_hours_per_run: 1", "gpu_hours_per_run: 10")
-    harness = FakeHarness(result=ok_session())
     m = ParkingMeasurer(park_on_call=1)
     with pytest.raises(RunParked) as exc:  # the gate parked = it RAN
-        attempt_once(
-            CONFIG,
-            metered,
-            tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
-            launcher=None,
-        )
+        run_climb(tmp_path, contract=metered, measurer=m, snapshot=_bare_snapshot(), launcher=None)
     assert exc.value.phase == "candidate"
 
 
@@ -506,43 +468,24 @@ def test_failed_gate_submit_feeds_back_to_the_author(tmp_path: Path) -> None:
     # the result (it decides what happens next) — never a silent terminal; the
     # author's plain finish then ends the run honestly.
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, 13.9, 13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-        launcher=lambda sha, req: "",
+    result, harness, evaluator = run_climb(
+        tmp_path, [13.9, 13.9, 13.9], harness=harness, launcher=lambda sha, req: ""
     )
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1"]  # the author heard the gate result
     assert len(evaluator.calls) == 2  # the concluding tree differed, so it was measured
 
 
-def _gate_negative_attempt(tmp_path: Path, harness, evaluator, contract: str = CONTRACT):
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    return attempt_once(
-        CONFIG,
-        contract,
+def _gate_negative_attempt(tmp_path: Path, values, harness, contract: str = CONTRACT):
+    """A submit the inline gate rejects: every seal has the same content, a
+    stub launcher (nothing is ever launched)."""
+    return run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        values,
+        harness=harness,
+        contract=contract,
         launcher=lambda sha, req: "",
-        tree_of=lambda sha: "same-tree",  # every seal has the same content
+        tree_of=lambda sha: "same-tree",
     )
 
 
@@ -552,8 +495,8 @@ def test_unchanged_tree_after_a_gate_negative_is_not_measured_again(tmp_path: Pa
     measured a second time (the speedrun fleet paid a second 8 GPU-hour gate
     for an identical tree, 2026-08-28)."""
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])  # a third eval would empty the queue
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    # a third eval would empty the queue
+    result, _, evaluator = _gate_negative_attempt(tmp_path, [13.9, 13.9], harness)
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1"]
     assert len(evaluator.calls) == 2
@@ -563,8 +506,7 @@ def test_identical_resubmit_is_told_so_without_a_second_gate(tmp_path: Path) -> 
     """A resubmit of the tree the gate already judged runs nothing: the author
     is told the verdict stands and decides again (bounded by sleep_k)."""
     harness = _SeqHarness(["the claim", "again", "conceded"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    result, _, evaluator = _gate_negative_attempt(tmp_path, [13.9, 13.9], harness)
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1", "s2"]
     assert len(evaluator.calls) == 2
@@ -578,8 +520,9 @@ def test_conceding_after_an_errored_eval_ends_without_another_gate(tmp_path: Pat
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, EvalError("job hit its walltime (TIMEOUT)")])  # type: ignore[list-item]
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, EvalError("job hit its walltime (TIMEOUT)")], harness
+    )
     assert result.outcome == "no-improvement"
     assert result.note == "ended without a submit"
     assert harness.resumes == [None, "s1"]
@@ -592,8 +535,9 @@ def test_resubmitting_after_an_errored_eval_runs_it_again(tmp_path: Path) -> Non
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "again", "conceded"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, EvalError("job hit its walltime (TIMEOUT)"), 13.9])  # type: ignore[list-item]
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, EvalError("job hit its walltime (TIMEOUT)"), 13.9], harness
+    )
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1", "s2"]
     assert len(evaluator.calls) == 3
@@ -607,8 +551,6 @@ def test_resubmit_after_a_gate_verdict_keeps_scope_and_snapshot_guards(tmp_path:
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "again"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    measurer, _snapshot = _wire(evaluator, tmp_path)
     seals = {"n": 0}
 
     def snapshot() -> str:
@@ -617,18 +559,11 @@ def test_resubmit_after_a_gate_verdict_keeps_scope_and_snapshot_guards(tmp_path:
             raise EvalError("git objects unwritable")
         return f"cand{seals['n']}"
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        [13.9, 13.9],
+        harness=harness,
+        snapshot=snapshot,
         launcher=lambda sha, req: "",
         tree_of=lambda sha: "same-tree",
     )
@@ -636,21 +571,12 @@ def test_resubmit_after_a_gate_verdict_keeps_scope_and_snapshot_guards(tmp_path:
     assert seals["n"] == 2
 
     harness = _SeqHarness(["the claim", "again", "still dirty", "abandoned"], submit_on=(1, 2, 3))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    measurer, snapshot2 = _wire(evaluator, tmp_path)
     paths = iter([["src/pilot/solvers/tsp.py"], ["docs/roadmap.md"], ["docs/roadmap.md"]])
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot2,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: next(paths),
-        created="t",
+        [13.9, 13.9],
+        harness=harness,
+        changed=lambda: next(paths),
         launcher=lambda sha, req: "",
         tree_of=lambda sha: "same-tree",
     )
@@ -662,8 +588,9 @@ def test_identical_resubmit_past_the_sleep_budget_ends_on_the_verdict(tmp_path: 
     """An exhausted submit is refused; the ensuing stop ends unmeasured."""
     one_sleep = CONTRACT.replace("    direction: min\n", "    direction: min\n    sleep_k: 1\n", 1)
     harness = _SeqHarness(["the claim", "again", "never reached"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    result = _gate_negative_attempt(tmp_path, harness, evaluator, contract=one_sleep)
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, 13.9], harness, contract=one_sleep
+    )
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1", "s2"]
     assert result.note == "ended without a submit"
@@ -684,21 +611,10 @@ def test_inline_gate_never_dispatches_a_submits_sibling_launches(tmp_path: Path)
         },
     )
     launched: list = []
-    harness = _SeqHarness(["the claim", "conceded"])
-    evaluator = FakeEvaluator(values=[13.9, 13.9, 13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        [13.9, 13.9, 13.9],
+        harness=_SeqHarness(["the claim", "conceded"]),
         launcher=_fake_launcher(launched),
     )
     assert result.outcome == "no-improvement"
@@ -773,22 +689,7 @@ def test_seeded_benchmark_measures_both_sides_under_one_fresh_seed(tmp_path: Pat
     """seed_env: the orchestrator draws ONE seed per climb, pins baseline
     and candidate to it (paired), and reports it on the result for the
     ledger — nothing about the pool was knowable when the solver wrote."""
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876, 13.10])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        SEEDED_CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="2026-08-09T00:00:00Z",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.876, 13.10], contract=SEEDED_CONTRACT)
     assert result.outcome == "improved"
     first, second = evaluator.seen_env
     assert first is not None and set(first) == {"PILOT_TSP_SEED"}
@@ -888,19 +789,7 @@ def test_candidate_measure_parks_after_the_session(tmp_path: Path) -> None:
     harness = FakeHarness(result=ok_session())
     m = ParkingMeasurer(park_on_call=1)  # the gate's first (baseline+candidate) call parks
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            CONTRACT,
-            tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
-        )
+        run_climb(tmp_path, harness=harness, measurer=m, snapshot=_bare_snapshot())
     assert exc.value.phase == "candidate"
     assert exc.value.candidate_sha == "cand1"
     assert exc.value.session is not None  # the session ran before this park
@@ -958,25 +847,11 @@ def test_snapshot_failure_is_eval_error_not_a_crash(tmp_path: Path) -> None:
     """A snapshot failure (the session ran, the tree could not be captured) is
     an eval-error result with the session — never an escaping exception."""
     harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876])  # baseline only; no candidate reached
-    measurer, _ = _wire(evaluator, tmp_path)
 
     def snapshot() -> str:
         raise EvalError("git write-tree failed")
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-    )
+    result, _, _ = run_climb(tmp_path, [13.876], harness=harness, snapshot=snapshot)
     assert result.outcome == "eval-error"
     assert result.session is not None and "snapshot" in result.note
 
@@ -1036,28 +911,13 @@ def test_forbidden_paths_are_scope_violations(tmp_path: Path) -> None:
 def test_out_of_scope_tree_is_rejected_before_the_snapshot(tmp_path: Path) -> None:
     # the out-of-scope edit could be to the ruler itself — it is never
     # snapshotted OR measured, not merely rejected after the fact.
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876])
-    measurer, _ = _wire(evaluator, tmp_path)
     snapshotted: list[int] = []
 
     def snapshot() -> str:
         snapshotted.append(1)
         return "cand1"
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["docs/secret.md"],
-        created="t",
-    )
+    result, _, _ = run_climb(tmp_path, [13.876], snapshot=snapshot, changed=["docs/secret.md"])
     assert result.outcome == "scope-violation"
     assert snapshotted == []  # never snapshotted the out-of-scope tree
 
@@ -1626,24 +1486,15 @@ def _verdict(blocking: bool, round_no: int):
 
 
 def _run_panel_climb(tmp_path, values, verdicts, texts=None, supports_resume=True, submit_on=()):
-    harness = _SeqHarness(
-        texts or ["report r1", "report r2"], supports_resume=supports_resume, submit_on=submit_on
-    )
-    evaluator = FakeEvaluator(values=list(values))
     panel = _QueuedPanel(verdicts)
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, harness, evaluator = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        values,
+        harness=_SeqHarness(
+            texts or ["report r1", "report r2"],
+            supports_resume=supports_resume,
+            submit_on=submit_on,
+        ),
         panel_runner=panel,
         # a stub launcher arms the syscall surface (submit rides it); no
         # launch is ever staged by these tests so it must never be called
@@ -1738,22 +1589,8 @@ def test_wake_without_a_session_id_fails_closed_to_draft(tmp_path: Path) -> None
             return SessionResult(**{**session.__dict__, "session_id": ""})
 
     harness = _NoIdHarness(["report r1"])
-    evaluator = FakeEvaluator(values=[13.9, 13.1])
-    panel = _QueuedPanel([_verdict(True, 1)])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-        panel_runner=panel,
+    result, _, _ = run_climb(
+        tmp_path, [13.9, 13.1], harness=harness, panel_runner=_QueuedPanel([_verdict(True, 1)])
     )
     assert result.outcome == "improved"
     assert result.panel_blocking_open  # draft path, not a blind fresh session
@@ -2277,17 +2114,12 @@ def test_stale_preflight_precedes_cache_and_compute_budget(tmp_path):
         },
     )
     with pytest.raises(RunParked) as caught:
-        attempt_once(
-            CONFIG,
-            contract,
+        run_climb(
             tmp_path,
-            FakeHarness(result=ok_session()),
-            NeverMeasured(),
-            "base",
-            lambda: "seal",
+            contract=contract,
+            measurer=NeverMeasured(),
+            snapshot=lambda: "seal",
             inbox_dir=tmp_path / "inbox",
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
             launcher=lambda *a: pytest.fail("launch"),
             launches_used=3,
             gpu_hours_used=1.0,
@@ -2484,18 +2316,12 @@ def test_sibling_launch_capacity_race_keeps_evaluations_and_notifies_author(tmp_
 
         measurer.results = wait  # type: ignore[method-assign]
     with pytest.raises(RunParked) as caught:
-        attempt_once(
-            CONFIG,
-            DEEP_CONTRACT,
+        run_climb(
             tmp_path,
-            FakeHarness(result=ok_session()),
-            measurer,
-            "base",
-            _bare_snapshot(),
+            contract=DEEP_CONTRACT,
+            measurer=measurer,
+            snapshot=_bare_snapshot(),
             inbox_dir=directory,
-            ruler="r",
-            created="t",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
             launcher=launcher,
         )
     parked = caught.value
@@ -2746,19 +2572,12 @@ def test_scope_refusal_after_accepted_submit_still_says_again(tmp_path):
 
     paths = iter([["report.md"], ["src/pilot/solvers/tsp.py"], ["report.md"]])
     harness = _SeqHarness(["dirty", "clean", "dirty again", "abandoned"], submit_on=(1, 2, 3))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        DEEP_CONTRACT,
+    result, harness, evaluator = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
-        ruler="r",
-        changed_paths=lambda: next(paths),
+        [13.9, 13.9],
+        harness=harness,
+        contract=DEEP_CONTRACT,
+        changed=lambda: next(paths),
         launcher=lambda *a: pytest.fail("launch"),
     )
     assert result.outcome == "no-improvement" and result.tree_rejected
@@ -3004,17 +2823,12 @@ def test_cached_baseline_resource_identity_and_budget(tmp_path, monkeypatch, cha
 
     monkeypatch.setattr("outerloop.orchestrator.syscall_budget_error", check_budget)
     _write_syscall(tmp_path, {"submit": True, "report": "H: candidate"})
-    attempt_once(
-        CONFIG,
-        contract_text,
+    run_climb(
         tmp_path,
-        FakeHarness(result=ok_session()),
-        measurer,
-        "base",
-        lambda: "candidate",
+        contract=contract_text,
+        measurer=measurer,
+        snapshot=lambda: "candidate",
         inbox_dir=tmp_path / "inbox",
-        ruler="score",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
         launcher=_fake_launcher([]),
     )
     assert checked
@@ -3106,20 +2920,15 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
     measurer, snapshot = _wire(evaluator, tmp_path)
 
     def resume():
-        return attempt_once(
-            CONFIG,
-            CONTRACT,
+        return run_climb(
             tmp_path,
-            author,
-            measurer,
-            "base",
-            snapshot,
+            harness=author,
+            measurer=measurer,
+            snapshot=snapshot,
             inbox_dir=directory,
-            ruler="mean tour length",
             resume_session_id=record.resume_session_id,
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
             panel_runner=judge,
-        )
+        )[0]
 
     if interrupt:
         with pytest.raises(KeyboardInterrupt):
