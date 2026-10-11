@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 from outerloop.github import GitHubClient, GitHubError
 from outerloop.harness import redact
@@ -28,6 +29,32 @@ EXPECTED_FAILURES = (
     OSError,
     json.JSONDecodeError,
 )
+
+
+def read_emitted_envelope(path: Path, repo: str, number: int, noun: str) -> dict | None:
+    """Decode and gate the untrusted envelope a session job emitted: the
+    envelope when it names this PR and is postable, else None (with a log)."""
+    try:
+        envelope = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("%s file unreadable (%s); nothing posted", noun, exc)
+        return None
+    if not isinstance(envelope, dict):
+        log.warning("%s file is not an object; nothing posted", noun)
+        return None
+    if envelope.get("repo") != repo or envelope.get("number") != number:
+        log.warning("%s envelope names a different PR; refused", noun)
+        return None
+    kind = envelope.get("kind")
+    if kind == "skip-clean":
+        # a clean skip (bot PR, opt-out) posts nothing by design; the
+        # envelope exists so a MISSING artifact means a broken session
+        log.info("session skipped cleanly (%s); nothing to post", envelope.get("detail", ""))
+        return None
+    if kind not in ("skip-stub", "findings"):
+        log.warning("unknown envelope kind %r; nothing posted", kind)
+        return None
+    return envelope
 
 
 def post_round(
@@ -65,6 +92,18 @@ def _reviewer_key(by: str) -> str:
     return by
 
 
+def sanitize_attribution(by: str) -> str:
+    """Make an attribution safe to render in a comment: it is render-side
+    data that can cross a job boundary in the least-token split, so strip
+    backticks/newlines, cap, never trust. The cap fits a panel line
+    ("summarizer:<backend> over lens+lens+..."); a real overflow ends in an
+    ellipsis so it never reads as a mid-word bug."""
+    by = " ".join(str(by).split()).replace("`", "")
+    if len(by) > 120:
+        by = by[:119].rstrip() + "…"
+    return by
+
+
 def _round_stamp(
     client: GitHubClient,
     repo: str,
@@ -78,13 +117,7 @@ def _round_stamp(
     styles never resets its numbering."""
     head = pr_data.get("head")
     head_sha = str(head.get("sha", ""))[:8] if isinstance(head, dict) else ""
-    # attribution is render-side data (it can cross a job boundary in the
-    # least-token split): strip backticks/newlines, cap, never trust. The cap
-    # fits a panel line ("summarizer:<backend> over lens+lens+..."); a real
-    # overflow ends in an ellipsis so it never reads as a mid-word bug.
-    by = " ".join(str(reviewed_by).split()).replace("`", "")
-    if len(by) > 120:
-        by = by[:119].rstrip() + "…"
+    by = sanitize_attribution(reviewed_by)
     # The round number is cosmetic: an EXPECTED failure counting prior
     # rounds must never cost the round itself. Programming errors still
     # propagate, per this module's policy.
