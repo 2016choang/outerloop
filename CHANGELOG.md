@@ -22,6 +22,8 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
   so throttled runs park briefly instead of ending aborted (#481).

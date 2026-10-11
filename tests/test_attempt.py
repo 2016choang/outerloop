@@ -4156,6 +4156,11 @@ def test_hermes_panel_lens_shares_the_judge_key_rules(monkeypatch, tmp_path) -> 
     monkeypatch.delenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", raising=False)
     with pytest.raises(ValueError, match="OUTERLOOP_PANEL_HERMES_KEY_FILE"):
         _panel_lenses_from_args(args())
+    # a relative key path is refused like on the service path (the climb runs
+    # from a flight dir, so it could resolve to the wrong file)
+    monkeypatch.setenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", "panel_hermes_key")
+    with pytest.raises(ValueError, match="relative"):
+        _panel_lenses_from_args(args())
     judge = tmp_path / "panel_hermes_key"
     judge.write_text("sk-judge")
     judge.chmod(0o600)
