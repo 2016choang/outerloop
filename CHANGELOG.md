@@ -25,6 +25,9 @@ Versions follow [SemVer](https://semver.org).
 - A label-triggered review round no longer restarts the round counter at 1
   after a summarizer (panel) round: both paths post as the same underlying
   reviewer, so the count continues (#373).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
