@@ -745,6 +745,16 @@ ends the run itself first, its own ending stands.
 The slot becomes free, and the next claim uses the current settings, including
 `OUTERLOOP_AUTHOR_OVERRIDES`. A paused loop must resume to process the request.
 
+To tell a run something it cannot see itself (a slot limit, a deployment change),
+use `outerloop message <run-id> (<text> | --file <path>) [--root <root>]`. The
+command appends one message to the run's inbox — the same atomic, deduplicated
+queue a PR comment lands in, so it needs no PR to exist — and renders at the run's
+next wake as a note from the operator, trusted like the kernel's own notes and
+capped like a comment. Unknown and already ended runs are refused. No new wake
+is scheduled: a parked run sees the message at the next tick, one sleeping on
+jobs when they finish, and a paused or wake-disarmed loop delivers when it
+resumes.
+
 **Live operator ceilings.** Create `<root>/limits.toml` to limit this fleet while
 leaving target contracts under their normal review process:
 
