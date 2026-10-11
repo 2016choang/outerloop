@@ -1757,16 +1757,12 @@ def _publish_folded(review_run, monkeypatch, *, contained=False, refusal=""):
     assert not diff & set(PROGRESS_PATHS)
 
 
-def test_publish_folded_candidate_retains_measured_base(review_run, monkeypatch):
+def test_publish_folded_candidate_retains_measured_pr_diff(review_run, monkeypatch):
     _publish_folded(review_run, monkeypatch)
 
 
 def test_publish_uses_one_parent_when_base_already_contained(review_run, monkeypatch):
     _publish_folded(review_run, monkeypatch, contained=True)
-
-
-def test_publish_folded_pr_diff_excludes_main_changes(review_run, monkeypatch):
-    _publish_folded(review_run, monkeypatch)
 
 
 @pytest.mark.parametrize("refusal", ["unfolded", "moved-head", "moved-base", "ancestry-error"])
