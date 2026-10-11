@@ -18,8 +18,8 @@ Versions follow [SemVer](https://semver.org).
 
 - Refreshed locked dependencies to current releases admitted by the existing
   bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
-  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives
-  (#337).
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).
