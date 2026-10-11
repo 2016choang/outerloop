@@ -56,14 +56,6 @@ class MeasurementPending(Exception):
         return "afterany:" + ":".join(self.job_ids) if self.job_ids else ""
 
 
-class EvalInfraError(MeasurementPending):
-    """A missing infrastructure result needs an operator and a later wake."""
-
-    def __init__(self, job_ids: tuple[str, ...], note: str):
-        super().__init__(job_ids, capacity_wait=True, note=note)
-        self.args = (note,)
-
-
 @dataclass(frozen=True)
 class Measure:
     """One eval a climb needs: a COMMITTED tree sha measured by the contract
@@ -396,52 +388,48 @@ class DispatchedMeasurer:
     def _infra_retry_path(self, m: Measure) -> Path:
         return self._ev(m) / "infra-retries.json"
 
+    def _retry_journal(self, m: Measure) -> dict[str, Any]:
+        """The measure's persisted no-result count, {} when absent or unreadable."""
+        try:
+            data = json.loads(self._infra_retry_path(m).read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def _retry_no_result(self, m: Measure, state: str) -> tuple[str, bool]:
-        """Journal before clearing the marker; a repeated delivery counts once."""
+        """A dispatched eval that ended without a result. A baseline (its tree
+        is the fixed comparison base) or a cleanly completed job points at the
+        infrastructure, not the code: journal the failure (a journal naming
+        THIS job is a delivery already counted — the count survives restarts),
+        re-dispatch up to the original attempt plus two retries, then park
+        until an operator fixes the cause and deletes the journal. Anything
+        else is the measure's own failure."""
         job_id = self._marker(m)
         baseline = m.name == "baseline" or (m.name.startswith("sib-") and m.name.endswith("-base"))
         code_file = self._ev(m) / "exit-code"
-        code = code_file.read_text().strip() if code_file.exists() else ""
-        if not (baseline or state.startswith("COMPLETED") or code == "0"):
+        clean = state.startswith("COMPLETED") or (
+            code_file.exists() and code_file.read_text().strip() == "0"
+        )
+        if not (baseline or clean):
             raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
+        prior = self._retry_journal(m)
+        failures = prior.get("retries", 0) + (prior.get("job_id") != job_id)
         note = (
             f"measure {m.name}: job {job_id} ended {state or 'UNKNOWN'}; "
             "results could not be written (infrastructure failure)"
         )
-        path = self._infra_retry_path(m)
-        try:
-            prior = json.loads(path.read_text()) if path.exists() else {}
-            retries = prior.get("retries", 0)
-            exhausted = retries >= 2
-            if exhausted:
-                note += (
-                    f"; 2 retries exhausted; parked until an operator fixes the cause "
-                    f"and deletes {path}"
-                )
-            if prior.get("job_id") != job_id:
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text(
-                    json.dumps(
-                        {
-                            "retries": min(2, retries + 1),
-                            "job_id": job_id,
-                            "exhausted": exhausted,
-                            "note": note,
-                        }
-                    )
-                )
-                temporary.replace(path)
-            else:
-                exhausted = prior["exhausted"]
-                note = prior["note"]
-            # Clear the marker only to re-dispatch; an exhausted measure keeps it,
-            # so every later wake parks on the journal instead of submitting again.
-            if not exhausted:
-                (self._ev(m) / "submitted").unlink(missing_ok=True)
-                code_file.unlink(missing_ok=True)
-        except OSError as exc:
-            note += f"; cannot persist retry state: {exc}; parked for operator repair"
-            exhausted = True
+        exhausted = failures >= 3
+        if exhausted:
+            note += (
+                f"; 2 retries exhausted; parked until an operator fixes the cause "
+                f"and deletes {self._infra_retry_path(m)}"
+            )
+        from outerloop.harness_cli import write_atomic
+
+        write_atomic(
+            self._infra_retry_path(m),
+            json.dumps({"retries": failures, "job_id": job_id, "note": note}),
+        )
         log.warning("%s", note)
         return note, exhausted
 
@@ -502,14 +490,19 @@ class DispatchedMeasurer:
         blind = False
         capacity_wait = False
         infra_notes: dict[str, str] = {}
-        exhausted = False
         for m in measures:
             if self._readable(m):
                 continue
-            retry_path = self._infra_retry_path(m)
-            if retry_path.exists():
+            prior = self._retry_journal(m)
+            if prior:
+                # a measure on infra retries parks uncharged, carrying the
+                # journal's note; with the original attempt and both retries
+                # lost, it parks for an operator instead of dispatching again
                 capacity_wait = True
-                infra_notes[m.name] = json.loads(retry_path.read_text())["note"]
+                infra_notes[m.name] = str(prior.get("note", ""))
+                if prior.get("retries", 0) >= 3:
+                    blind = True
+                    continue
             try:
                 live = self.compute.job_id_for_name(self._job_name(m))
             except Exception:
@@ -529,10 +522,9 @@ class DispatchedMeasurer:
                 # unless the files are merely late on the shared filesystem
                 if self._settled(m):
                     continue
-                infra_notes[m.name], spent = self._retry_no_result(m, self._end_state(m))
+                infra_notes[m.name], exhausted = self._retry_no_result(m, self._end_state(m))
                 capacity_wait = True
-                if spent:
-                    exhausted = True
+                if exhausted:
                     blind = True
                     continue
             # No marker, not live, no result -> never dispatched -> dispatch.
@@ -565,17 +557,15 @@ class DispatchedMeasurer:
                 # once the filesystem has had its moment
                 if self._settled(m):
                     continue
-                infra_notes[m.name], spent = self._retry_no_result(m, state)
+                infra_notes[m.name], exhausted = self._retry_no_result(m, state)
                 capacity_wait = True
-                exhausted |= spent
                 blind = True
                 continue
             pending.append(job_id)
-        infra_note = "; ".join(infra_notes.values())
-        if exhausted:
-            raise EvalInfraError(tuple(pending), infra_note)
         if pending or blind:
-            raise MeasurementPending(tuple(pending), capacity_wait=capacity_wait, note=infra_note)
+            raise MeasurementPending(
+                tuple(pending), capacity_wait=capacity_wait, note="; ".join(infra_notes.values())
+            )
         out: dict[str, float] = {}
         for m in measures:
             self._settled(m)  # exit-code seen, stdout possibly still on its way
