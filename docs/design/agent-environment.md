@@ -39,19 +39,26 @@ key:
   never write. A missing file is empty guidance, never a contract error.
 
 One reader, `outerloop.contract.read_guidance`, runs with the SAME ref the
-contract was read at (the default branch for the Actions verifier, the
-pinned base sha via git objects for climbs and wakes), so an agent can
-never influence its own guidance. Each file is capped at 8,000 characters.
-The author half is inserted LAST in the brief under a `# Lab guidance`
-heading labelled advisory ("the kernel rules above win"); the panel half
-is appended after the kernel claim as guidance the judges may raise only as
-advisory findings.
+contract was read at — the default branch for the Actions verifier, and
+for climbs and wakes the base ref's git objects (`git show` at the pinned
+sha; a working-tree file is never read, and a symlink blob — whose text is
+its target, not file content — is refused as empty guidance) — so an
+agent can never influence its own guidance. Each file is capped at 8,000
+characters. The author half is inserted LAST in the brief under a
+`# Lab guidance` heading labelled advisory ("the kernel rules above win");
+the panel half rides the judges' own prompt, after the kernel rubric and
+outside the fence that holds the claim as untrusted data, labelled as this
+repository's advisory standards — the judges may raise it only as advisory
+findings.
 
 The panel may block only on validity: harness exploitation, ruler/seed
 fishing, data leakage, a confirmed contradiction between the claim and its
-own evidence, and scope and measurement facts. The former one-idea mandate
-is gone entirely — a repository that wants it writes it into its guidance
-files, where it is advice, never a blocking rule.
+own evidence, and scope and measurement facts. The kernel rubric names no
+taste categories at all — the aggregation and landscape standards live
+only in the pack, so `none` leaves the judges validity criteria only. The
+former one-idea mandate is gone entirely — a repository that wants it
+writes it into its guidance files, where it is advice, never a blocking
+rule.
 
 ## What this changes now
 

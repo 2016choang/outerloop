@@ -29,7 +29,7 @@ The knobs that shape a climb, all optional:
 | `max_concurrent_gpus` | The pace ceiling for an author's sweeps, in GPUs: a sweep runs at most this many GPUs' worth of tasks at once (`--array=0-N%K`, K = ceiling / `gpus`). Lenient by design; unset = the author's own pace |
 | `steward.allowed` | Paths a separate stewardship lane may maintain (the ruler, the harness) — never the solver |
 | `merge: manual \| auto` | Whether a gate-and-panel-clean PR waits for a human or merges itself |
-| `guidance: default \| none \| <dir>` | Which research-taste pack the author brief and the panel claim carry, as advisory text: the kernel's default pack, nothing, or a repo-relative directory holding `author.md` and `panel.md` (recommended `.github/outerloop/guidance/`, which agents can never write) |
+| `guidance: default \| none \| <dir>` | Which research-taste pack the author brief and the panel judges carry, as advisory text: the kernel's default pack, nothing, or a repo-relative directory holding `author.md` and `panel.md` (recommended `.github/outerloop/guidance/`, which agents can never write) |
 | `verification: gate \| self_report` | Per-benchmark verification: kernel measurements by default, or explicitly labelled author claims |
 | `channels.siblings`, `messages`, `shared_reports`, `branches` | Contract-wide switches for kernel-mediated sharing; all default to true |
 
@@ -42,13 +42,15 @@ is never the metric. CPU benchmarks are not metered.
 `guidance` selects the research-taste pack: the kernel's agent-facing text
 carries only mechanics, and taste (how to pick directions, how much
 landscape a claim needs) arrives as a labelled advisory section at the end
-of the author brief and after the panel's claim. `default` ships the
-kernel's pack, `none` ships nothing, and a directory is read from the same
-ref as the contract — `author.md` and `panel.md`, each capped at 8,000
-characters, a missing file meaning empty guidance. The panel never blocks
-on guidance; it blocks only on validity (harness exploitation, ruler/seed
-fishing, data leakage, a confirmed claim-vs-evidence contradiction, and
-scope and measurement facts).
+of the author brief and in the panel judges' prompt — never inside the
+claim body, which the judges fence as untrusted data. `default` ships the
+kernel's pack, `none` ships nothing, and a directory is read via git
+objects from the same ref as the contract — `author.md` and `panel.md`,
+each capped at 8,000 characters, a missing file meaning empty guidance
+(a symlink blob is refused). The panel never blocks on guidance; it
+blocks only on validity (harness exploitation, ruler/seed fishing, data
+leakage, a confirmed claim-vs-evidence contradiction, and scope and
+measurement facts).
 
 ```bash
 uv run python -m outerloop.contract_cli .outerloop.yaml   # validate before you push

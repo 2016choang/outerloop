@@ -14,12 +14,16 @@ Versions follow [SemVer](https://semver.org).
   `guidance` selects the pack: `default` (the moved texts minus the
   one-idea rule), `none`, or a repo-relative directory holding `author.md`
   and `panel.md` (recommended location `.github/outerloop/guidance/`).
-  Guidance is read from the same ref as the contract, capped at 8,000
-  characters per file, inserted last and labelled advisory, and may never
-  point into `.outerloop/`. The panel now blocks only on validity — harness
+  Guidance is read via git objects from the same ref as the contract
+  (never the working tree; a symlink blob is refused), capped at 8,000
+  characters per file, carried last in the author brief and in the panel
+  judges' prompt — outside the fence that holds the claim as untrusted
+  data — and labelled advisory; it may never point into `.outerloop/`.
+  The panel now blocks only on validity — harness
   exploitation, ruler/seed fishing, data leakage, a confirmed claim-vs-evidence
-  contradiction, and scope and measurement facts; aggregation, landscape and
-  the taste halves of the overfitting/unsupported-claim/measurement-gap rubric
+  contradiction, and scope and measurement facts; aggregation and landscape
+  live only in the pack (so `none` leaves validity criteria only), and the
+  taste halves of the overfitting/unsupported-claim/measurement-gap rubric
   are advisory-only. Upgrading: the one-idea rule is no longer enforced
   anywhere — a repository that wants it writes it into its guidance files
   (the panel will not block on it); the default hypothesis, done criteria,
