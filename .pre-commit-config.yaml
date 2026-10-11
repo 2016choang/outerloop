@@ -5,6 +5,9 @@ repos:
       - id: check-added-large-files
         args: [--maxkb=500]
       - id: end-of-file-fixer
+        # byte-exact archived-writer fixture: save_record must round-trip it,
+        # and that writer emitted no trailing newline
+        exclude: ^tests/fixtures/author_route_legacy\.json$
       - id: trailing-whitespace
       - id: check-merge-conflict
       - id: check-yaml

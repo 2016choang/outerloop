@@ -16,6 +16,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).
@@ -36,6 +39,14 @@ Versions follow [SemVer](https://semver.org).
   and keep contributing their recorded cost, so resumed codex sessions
   captured before the upgrade still overstate; totals are accurate for
   sessions captured after upgrading.
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
+- A session that ends in error while an out-of-memory kill happens in the job
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
   so throttled runs park briefly instead of ending aborted (#481).

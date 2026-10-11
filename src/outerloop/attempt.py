@@ -3463,26 +3463,20 @@ def _resume_run(
     return outcome
 
 
-def _judge_lens_key(
+def _shelled_judge_key_path(
     *,
     backend: str,
     key_file_env: str,
     author_backend: str,
     claude_panel_path: Path,
-    image: str,
-) -> str:
-    """Resolve a non-claude judge lens's OWN key file, enforcing the three
-    separations every shelled judge shares (codex, hermes, any future
-    backend): the image is required (a judge never runs uncontained next to
-    key files), the key must be named explicitly, and it must differ from BOTH
-    the author's key of the same provider AND the claude panel key (a
-    cross-provider send would leak an anthropic credential to another login).
-    Returns the redacted key (or "" under an ADC-covered deployment)."""
-    if not image:
-        raise ValueError(
-            f"a {backend} panel lens requires --image (a shelled judge only "
-            "ever runs inside the container)"
-        )
+) -> Path:
+    """The ONE owner of the key-separation rules every shelled (codex, hermes)
+    panel judge shares — the manual climb and the tick preflight both call it:
+    the key is named explicitly, absolute (a climb runs from a flight directory,
+    so a relative path can resolve to the wrong file), and neither an author
+    key nor the claude panel key (a cross-provider send would leak an anthropic
+    credential to another login). Returns the expanded (not resolved) path;
+    callers resolve where they compare; raises ValueError on a violation."""
     raw = os.environ.get(key_file_env, "").strip()
     if not raw:
         raise ValueError(
@@ -3490,6 +3484,8 @@ def _judge_lens_key(
             "(role separation: the judge's own key, never the author's)"
         )
     path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{backend} panel key path {path} is relative; only absolute paths fly")
     for author in dict.fromkeys((author_backend, "claude", "codex", "hermes")):
         author_path = Path(resolve_author_key_file(author)).expanduser()
         if path.resolve() == author_path.resolve():
@@ -3502,7 +3498,32 @@ def _judge_lens_key(
             f"{backend} panel key file {path} is the claude panel key file "
             "(an anthropic key must never reach another provider's login)"
         )
-    return role_key(raw, backend)
+    return path
+
+
+def _judge_lens_key(
+    *,
+    backend: str,
+    key_file_env: str,
+    author_backend: str,
+    claude_panel_path: Path,
+    image: str,
+) -> str:
+    """A non-claude judge lens's OWN key: the image requirement plus the
+    shared separation rules above. Returns the redacted key (or "" under an
+    ADC-covered deployment)."""
+    if not image:
+        raise ValueError(
+            f"a {backend} panel lens requires --image (a shelled judge only "
+            "ever runs inside the container)"
+        )
+    key_path = _shelled_judge_key_path(
+        backend=backend,
+        key_file_env=key_file_env,
+        author_backend=author_backend,
+        claude_panel_path=claude_panel_path,
+    )
+    return role_key(key_path, backend)
 
 
 def _panel_lenses_from_args(

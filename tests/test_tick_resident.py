@@ -45,6 +45,9 @@ def _install(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "squeue": '#!/bin/sh\ncase "$*" in *"-j "*) echo PENDING;; esac\n',
         "scontrol": '#!/bin/sh\necho "JobId=42 EndTime=2030-01-01T00:00:00 JobState=RUNNING"\n',
         "timeout": '#!/bin/sh\nshift 2\nexec "$@"\n',  # --kill-after=.. 15m cmd...
+        # the resident loop's cadence wait: the tick count, not the wall clock,
+        # is what these tests observe
+        "sleep": "#!/bin/sh\nexit 0\n",
         # uv: `sync` is a no-op; `run ... tick` is the fake tick — it counts
         # its calls, appends to the shim on the 2nd call, sets PAUSE on the 3rd
         "uv": f'''#!/bin/sh

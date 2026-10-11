@@ -11,14 +11,19 @@ advisory.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
 from pathlib import Path
 
 from outerloop.github import EnvTokenProvider, GitHubClient
-from outerloop.posting import EXPECTED_FAILURES, post_round_review, post_skip_stub
+from outerloop.posting import (
+    EXPECTED_FAILURES,
+    post_round_review,
+    post_skip_stub,
+    read_emitted_envelope,
+    sanitize_attribution,
+)
 from outerloop.review import (
     MARKER,
     format_comment,
@@ -47,26 +52,10 @@ def post_from_file(
 ) -> str | None:
     """Post the emitted findings (or skip stub). Returns the round label, or
     None when there was nothing to post or the envelope was refused."""
-    try:
-        envelope = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("findings file unreadable (%s); nothing posted", exc)
-        return None
-    if not isinstance(envelope, dict):
-        log.warning("findings file is not an object; nothing posted")
-        return None
-    if envelope.get("repo") != repo or envelope.get("number") != number:
-        log.warning("findings envelope names a different PR; refused")
+    envelope = read_emitted_envelope(path, repo, number, "findings")
+    if envelope is None:
         return None
     kind = envelope.get("kind")
-    if kind == "skip-clean":
-        # a clean skip (bot PR, opt-out) posts nothing by design; the
-        # envelope exists so a MISSING artifact always means a broken session
-        log.info("session skipped cleanly (%s); nothing to post", envelope.get("detail", ""))
-        return None
-    if kind not in ("skip-stub", "findings"):
-        log.warning("unknown envelope kind %r; nothing posted", kind)
-        return None
     try:
         # The write authority re-checks the skip rules for EVERY kind: the
         # session job decided them once, but this side of the artifact
@@ -82,10 +71,12 @@ def post_from_file(
             # comment — collapse newlines, neutralize markdown, cap length
             detail = sanitize(str(envelope.get("detail", "")), 300)
             # name WHOSE round failed: with two standing reviewers, an
-            # unattributed stub is ambiguous exactly when a key dies
-            who = " ".join(opinion_label.split())[:MAX_OPINION_LABEL] or str(
-                envelope.get("reviewed_by", "")
-            )
+            # unattributed stub is ambiguous exactly when a key dies.
+            # reviewed_by is untrusted: sanitized, then a code span so markdown
+            # cannot close the stub's emphasis (the trusted label renders bare)
+            label = " ".join(opinion_label.split())[:MAX_OPINION_LABEL]
+            by = sanitize_attribution(str(envelope.get("reviewed_by", "")))
+            who = label or (f"`{by}`" if by else "")
             role = f"advisory review ({who})" if who else "advisory review"
             post_skip_stub(client, repo, number, role, RuntimeError(detail))
             return "skip-stub"
