@@ -6173,9 +6173,21 @@ def test_auto_publish_saves_blessing_without_github_merge_calls(tmp_path, monkey
     assert record.auto_publish_head == _git(target, "rev-parse", github.prs[0]["head"]).strip()
 
 
-@pytest.mark.parametrize("has_auth", [False, True])
-@pytest.mark.parametrize("ending", ["deadline", "stuck"])
-@pytest.mark.parametrize("dry_run", [False, True])
+# dry_run only dries WAKE delivery (tick.sweep passes _sweep_running the
+# live path on purpose), so the deadline ending needs one dry case to pin
+# that invariant; the stuck+dry path writes nothing at all, so auth is a
+# dead axis there and runs once.
+@pytest.mark.parametrize(
+    ("has_auth", "ending", "dry_run"),
+    [
+        (True, "deadline", False),
+        (False, "deadline", False),
+        (True, "deadline", True),
+        (True, "stuck", False),
+        (False, "stuck", False),
+        (False, "stuck", True),
+    ],
+)
 def test_tick_snapshot_uses_kernel_auth(
     tmp_path, target_repo_lines, monkeypatch, caplog, has_auth, ending, dry_run
 ):
@@ -7210,9 +7222,12 @@ def test_missing_scope_history_refuses_publish(tmp_path, target_repo, monkeypatc
     assert "fetch the base and fold it, then submit again." in record.ending_note
 
 
-@pytest.mark.parametrize("phase", ["candidate", "author-sleep"])
+# The park's phase (candidate vs author-sleep) is dead here: both refusals
+# fire before the wake's phase dispatch — the unfetched base refuses at the
+# policy clone, the unrelated tree at submission_paths — so only the failure
+# shape is parametrized.
 @pytest.mark.parametrize("history", ["unrelated", "unfetched"])
-def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatch, phase, history):
+def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatch, history):
     from dataclasses import replace
 
     from outerloop.github import Workspace
@@ -7224,7 +7239,7 @@ def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatc
     _git(root, "add", "-A")
     _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "unrelated")
     candidate = _git(root, "rev-parse", "HEAD").strip()
-    stage = {**record.stage, "phase": phase, "candidate_sha": candidate}
+    stage = {**record.stage, "candidate_sha": candidate}
     if history == "unfetched":
 
         def unexpected_collector(*args, **kwargs):
@@ -7276,25 +7291,34 @@ def test_scope_merge_base_counts_rename_source_and_preserves_memory_filter(tmp_p
     assert submission_paths(ws, "main", exclude_memory=True) == ["code", "protected"]
 
 
-@pytest.mark.parametrize("operation", ["merge-base", "rev-parse"])
+# One row per GitError shape; `_scope_revision` classifies both its git
+# operations through the same except block (merge-base and quiet rev-parse
+# only differ in the argv built beforehand), so each shape runs once through
+# submission_paths' merge-base — plus one rev-parse row for that argv branch.
 @pytest.mark.parametrize(
-    "returncode,stderr,stdout,refused",
+    "operation,returncode,stderr,stdout,refused",
     [
-        (None, "", "", False),
-        (1, "", "", True),
-        (1, "I/O error", "", False),
-        (1, "", "unexpected output", False),
-        (128, "fatal: Not a valid object name missing", "", True),
-        (
-            128,
-            "fatal: ambiguous argument 'missing': "
-            "unknown revision or path not in the working tree.",
-            "",
-            True,
-        ),
-        (128, "fatal: packed object ab0123 is corrupt", "", False),
-        (128, "fatal: cannot lock ref", "", False),
-        (2, "fatal: Not a valid object name missing", "", False),
+        *[
+            ("merge-base", returncode, stderr, stdout, refused)
+            for returncode, stderr, stdout, refused in [
+                (None, "", "", False),
+                (1, "", "", True),
+                (1, "I/O error", "", False),
+                (1, "", "unexpected output", False),
+                (128, "fatal: Not a valid object name missing", "", True),
+                (
+                    128,
+                    "fatal: ambiguous argument 'missing': "
+                    "unknown revision or path not in the working tree.",
+                    "",
+                    True,
+                ),
+                (128, "fatal: packed object ab0123 is corrupt", "", False),
+                (128, "fatal: cannot lock ref", "", False),
+                (2, "fatal: Not a valid object name missing", "", False),
+            ]
+        ],
+        ("rev-parse", 128, "fatal: Not a valid object name missing", "", True),
     ],
 )
 def test_scope_git_failure_classification(
@@ -7433,8 +7457,12 @@ def test_contains_tip_falls_back_for_missing_objects(tmp_path, answer):
     assert not _contains_tip(ws, "tip", "measured")
 
 
-@pytest.mark.parametrize("pr", [False, True])
-@pytest.mark.parametrize("sleep_again", [False, True])
+# A PR suppresses the silent-stop resumes, and so does a sleep: with
+# sleep_again on, pr changes no assertion outcome (the parked pr_url is
+# covered by pr=True alone), so the (True, True) corner is dropped.
+@pytest.mark.parametrize(
+    ("pr", "sleep_again"), [(False, False), (True, False), (False, True)]
+)
 def test_hermes_resume_configuration_block_preserves_park(
     tmp_path, monkeypatch, caplog, pr, sleep_again
 ):
@@ -7557,8 +7585,19 @@ def test_hermes_resume_configuration_block_preserves_park(
         assert not woke
 
 
-@pytest.mark.parametrize("wake", [False, True])
-@pytest.mark.parametrize("failure", ["missing", "dead", "term", "interrupt", "operator"])
+# Every failure mode runs on the wake entry: each names a distinct way
+# session_url turns into EndpointUnavailable (a missing URL file, a refused
+# connection, a SIGTERM, a Ctrl-C, plus the operator retirement). On a fresh
+# run the same EndpointUnavailable parks through the capacity branch instead
+# (attempt.py's fresh except), so one representative ("dead") covers it; the
+# exception class is invisible past session_url's shared except clause.
+@pytest.mark.parametrize(
+    ("wake", "failure"),
+    [
+        *[(True, f) for f in ["missing", "dead", "term", "interrupt", "operator"]],
+        (False, "dead"),
+    ],
+)
 def test_endpoint_unavailable_parks_and_recovers(
     tmp_path, target_repo_syscalls, monkeypatch, wake, failure
 ):
@@ -7681,9 +7720,20 @@ def test_endpoint_unavailable_parks_and_recovers(
     assert "endpoint_wait" not in load_record(root, "tsp-1").stage
 
 
-@pytest.mark.parametrize("entry", ["fresh", "wake"])
+# Every ending runs on the fresh entry: the endings only vary the second
+# author call's result, which one shared handler classifies for both entries
+# (orchestrator._resume). The wake entry re-enters that same loop through
+# run_author_leg, so one ending ("end") covers its distinct part — the
+# refused tree flowing through the wake's own finish tail.
 @pytest.mark.parametrize(
-    "ending", ["end", "explicit-end", "outage", "timeout", "budget", "error", "repeat", "crash"]
+    ("entry", "ending"),
+    [
+        *[
+            ("fresh", ending)
+            for ending in ["end", "explicit-end", "outage", "timeout", "budget", "error", "repeat", "crash"]
+        ],
+        ("wake", "end"),
+    ],
 )
 def test_scope_rejected_tree_never_reaches_active_line(
     tmp_path, target_repo_lines, monkeypatch, entry, ending
@@ -8109,8 +8159,13 @@ def test_v021_line_snapshot_upgrade_retry(tmp_path, monkeypatch, interrupt):
     assert (ws.root / "protected.txt").read_text() == "new forbidden change\n"
 
 
-@pytest.mark.parametrize("sessionless", [False, True])
-@pytest.mark.parametrize("interrupt", [False, True])
+# The interrupt fires at the same save_record call whatever the record's
+# shape (the session only parameterizes branchless stage values in
+# _park_run), so the sessionless resume and the interrupted park each run
+# once — the (sessionless, interrupt) corner would repeat one of them.
+@pytest.mark.parametrize(
+    ("sessionless", "interrupt"), [(False, False), (True, False), (False, True)]
+)
 def test_v021_capacity_refusal_park_resume(tmp_path, monkeypatch, sessionless, interrupt):
     from unittest.mock import Mock
 
@@ -8226,8 +8281,11 @@ def test_v021_capacity_refusal_park_resume(tmp_path, monkeypatch, sessionless, i
     assert not pending(directory, second.inbox_seq)
 
 
-@pytest.mark.parametrize("outstanding", [False, True])
-@pytest.mark.parametrize("interrupt", [False, True])
+# An outstanding launch ends the wake before the interrupt branch is ever
+# reached, so (outstanding, interrupt) would rerun the outstanding case.
+@pytest.mark.parametrize(
+    ("outstanding", "interrupt"), [(False, False), (False, True), (True, False)]
+)
 def test_v021_sessionless_author_sleep_resumes_directly(
     tmp_path, monkeypatch, interrupt, outstanding
 ):
