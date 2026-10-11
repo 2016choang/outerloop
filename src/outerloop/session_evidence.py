@@ -34,8 +34,12 @@ NATIVE_MAX_SECONDS = 0.25
 # Fixed kernel index outside the workspace and HOME container mounts.
 SESSION_INDEX = "session-index.json"
 
-# A resumed session of these backends reports cumulative usage per leg.
-CUMULATIVE_BACKENDS = frozenset({"claude", "codex"})
+# A resumed codex thread reports the whole thread's usage as each leg's.
+# Claude Code reports cumulative resume totals only since 2.1.277 and the
+# CLI version that ran a session is not recorded (an override can pin an
+# older CLI), so its legs are summed instead: an overstatement on a
+# current CLI never undercounts a leg on an older one.
+CUMULATIVE_BACKENDS = frozenset({"codex"})
 
 
 class NativeLookupLimit(OSError):
