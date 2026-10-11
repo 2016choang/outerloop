@@ -87,6 +87,12 @@ def test_lenses_read_their_workspaces_and_blocking_merges(tmp_path: Path) -> Non
     )
     # every lens gets the repository's panel guidance in its own prompt
     assert all("this repo's standard" in j.briefs[0] for j in (verify, review))
+    # in the panel the review lens blocks only on validity, and its guidance
+    # precedes the untrusted PR text so a report cannot forge or swallow it
+    from outerloop.review import PANEL_BLOCKING
+
+    assert PANEL_BLOCKING in review.briefs[0]
+    assert review.briefs[0].index("this repo's standard") < review.briefs[0].index(_PR.title)
     assert verify.workspaces == [tmp_path]  # verify reads both trees from the root
     assert review.workspaces == [tmp_path / "pr-head"]  # review reads the candidate only
     assert len(verdict.blocking) == 1 and verdict.blocking[0].file == "src/x.py"

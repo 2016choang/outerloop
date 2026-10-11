@@ -186,7 +186,7 @@ def run_panel(
         elif lens.kind == "review":
             workspace = panel_workspace / "pr-head"
             brief = build_agent_brief(
-                pr, today, syscall_cmd=tool_command(workspace), guidance=guidance
+                pr, today, syscall_cmd=tool_command(workspace), guidance=guidance, panel=True
             )
             spec = reviewer_spec()
             policy = review_result_from_role

@@ -335,6 +335,17 @@ def build_summarizer_brief(opinions: list[dict], *, syscall_cmd: str = DEFAULT_S
     )
 
 
+# The pre-PR panel judges a measured claim, not a code PR: it blocks only where
+# the number or the run cannot be trusted. Appended to the review rubric there.
+PANEL_BLOCKING = (
+    "This review is part of the pre-PR panel on a measured research claim. In it, set "
+    "`blocking` true only when a confirmed defect makes the measured number or the "
+    "run untrustworthy: the code the metric depends on is wrong, it games the "
+    "benchmark or the ruler, it leaks data, or it is a security defect (credentials, "
+    "sandbox escape). Every other defect, however real, is advisory here."
+)
+
+
 def guidance_section(guidance: str) -> str:
     """This repository's panel guidance as the judges' own labelled section:
     outside every untrusted fence, after the kernel rubric, advisory only."""
@@ -354,6 +365,7 @@ def build_agent_brief(
     syscall_cmd: str = DEFAULT_SYSCALL_CMD,
     lens: str = "",
     guidance: str = "",
+    panel: bool = False,
 ) -> str:
     """The reviewer brief for an agent session: the shared rubric, the
     investigation instruction, and the PR itself, built on the shared
@@ -368,9 +380,12 @@ def build_agent_brief(
     if lens and lens != "general" and lens not in REVIEW_LENSES:
         raise ValueError(f"unknown review lens {lens!r} (have: {sorted(REVIEW_LENSES)})")
     focus = f"\n\n{REVIEW_LENSES[lens]}" if lens and lens != "general" else ""
+    rules = f"\n\n{PANEL_BLOCKING}" if panel else ""
+    # the guidance rides the trusted prompt BEFORE the untrusted PR text, so a
+    # report cannot forge or swallow it
     return (
-        f"{SYSTEM_PROMPT}{focus}\n\n{_agent_investigation(syscall_cmd)}\n\n"
-        f"{build_prompt(pr, today)}{guidance_section(guidance)}"
+        f"{SYSTEM_PROMPT}{focus}{rules}{guidance_section(guidance)}\n\n"
+        f"{_agent_investigation(syscall_cmd)}\n\n{build_prompt(pr, today)}"
     )
 
 
