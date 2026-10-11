@@ -19,7 +19,11 @@ def test_status_wait_and_outage_read_only(tmp_path, capsys, monkeypatch):
         author_backend="hermes",
         author_model="open-model[endpoint=local]",
         author_overridden=True,
-        stage={"phase": "candidate", "gpu_hours_used": 2.5},
+        stage={
+            "phase": "candidate",
+            "gpu_hours_used": 2.5,
+            "wait_note": "job 102 ended COMPLETED; results could not be written",
+        },
     )
     save_record(tmp_path, run, 1)
     save_record(tmp_path, replace(run, run_id="ended", state="ended", ending="aborted"), 1)
@@ -54,6 +58,7 @@ roadmap: README.md
     assert "one target=owner/repo agent=agent-01 state=parked phase=candidate" in text
     assert "author=hermes/open-model[endpoint=local] overridden=yes GPU-hours=2.5/8.0" in text
     assert "waiting for endpoint local since 1970-01-01T00:01:40+00:00" in text
+    assert "waiting: job 102 ended COMPLETED; results could not be written" in text
     assert "Endpoint outage local since 1970-01-01T00:01:40+00:00; waiting runs: one" in text
     assert main(["status", "--root", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -76,6 +81,7 @@ roadmap: README.md
                 "gpu_hours_used": 2.5,
                 "gpu_hours_budget": 8.0,
                 "endpoint_wait": {"endpoint": "local", "since": 100},
+                "wait_note": "job 102 ended COMPLETED; results could not be written",
             }
         ],
         "outages": [{"endpoint": "local", "since": 100, "waiting_runs": ["one"]}],

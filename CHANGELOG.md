@@ -29,6 +29,10 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A dispatched baseline or cleanly completed eval that ends with no result is
+  now an infrastructure failure: two uncharged retries, then a park naming the
+  `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
+  missing journal or `stage.wait_note` reads as zero retries / no note.
 - A codex run that slept and resumed was priced once per leg: `exec resume`
   reports the thread's cumulative token usage as each leg's usage, so
   `outerloop status` overstated a resumed session's cost by roughly the
