@@ -16,6 +16,10 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- Refreshed locked dependencies to current releases admitted by the existing
+  bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
 - The review and verify posting CLIs now share one gate for the untrusted
   emitted envelope, so a security fix to the decode/identity/kind checks lands
   in both (#337).
