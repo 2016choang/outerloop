@@ -438,11 +438,17 @@ def test_post_from_file_publishes_the_skip_stub(tmp_path: Path) -> None:
     from outerloop.review_post_cli import post_from_file
 
     client = _Client()
-    path = _findings_envelope(tmp_path, kind="skip-stub", detail="rate_limit_error: slow down")
+    path = _findings_envelope(
+        tmp_path,
+        kind="skip-stub",
+        detail="rate_limit_error: slow down",
+        reviewed_by="evil\n# forged",
+    )
     label = post_from_file(client, "org/repo", 7, "autoresearch-bot", path)  # type: ignore[arg-type]
     assert label == "skip-stub"
     assert client.reviews == []
     assert len(client.comments) == 1 and "could not run" in client.comments[0]
+    assert "\n# forged" not in client.comments[0]  # reviewed_by sanitized, not raw
 
 
 def test_post_from_file_stub_is_skip_checked_and_sanitized(tmp_path: Path) -> None:

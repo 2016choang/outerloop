@@ -32,13 +32,8 @@ EXPECTED_FAILURES = (
 
 
 def read_emitted_envelope(path: Path, repo: str, number: int, noun: str) -> dict | None:
-    """Decode and gate the envelope a session job emitted for the posting
-    half of the token split: the artifact crossed a job boundary into
-    token-holding code, so nothing in it is trusted. Returns the validated
-    envelope for a postable kind ("skip-stub" or "findings"), or None when
-    the file is unreadable, not an object, names a different PR, skipped
-    cleanly, or carries an unknown kind. `noun` is the artifact name in the
-    log lines."""
+    """Decode and gate the untrusted envelope a session job emitted: the
+    envelope when it names this PR and is postable, else None (with a log)."""
     try:
         envelope = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -97,6 +92,18 @@ def _reviewer_key(by: str) -> str:
     return by
 
 
+def sanitize_attribution(by: str) -> str:
+    """Make an attribution safe to render in a comment: it is render-side
+    data that can cross a job boundary in the least-token split, so strip
+    backticks/newlines, cap, never trust. The cap fits a panel line
+    ("summarizer:<backend> over lens+lens+..."); a real overflow ends in an
+    ellipsis so it never reads as a mid-word bug."""
+    by = " ".join(str(by).split()).replace("`", "")
+    if len(by) > 120:
+        by = by[:119].rstrip() + "…"
+    return by
+
+
 def _round_stamp(
     client: GitHubClient,
     repo: str,
@@ -110,13 +117,7 @@ def _round_stamp(
     styles never resets its numbering."""
     head = pr_data.get("head")
     head_sha = str(head.get("sha", ""))[:8] if isinstance(head, dict) else ""
-    # attribution is render-side data (it can cross a job boundary in the
-    # least-token split): strip backticks/newlines, cap, never trust. The cap
-    # fits a panel line ("summarizer:<backend> over lens+lens+..."); a real
-    # overflow ends in an ellipsis so it never reads as a mid-word bug.
-    by = " ".join(str(reviewed_by).split()).replace("`", "")
-    if len(by) > 120:
-        by = by[:119].rstrip() + "…"
+    by = sanitize_attribution(reviewed_by)
     # The round number is cosmetic: an EXPECTED failure counting prior
     # rounds must never cost the round itself. Programming errors still
     # propagate, per this module's policy.

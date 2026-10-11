@@ -22,6 +22,7 @@ from outerloop.posting import (
     post_round_review,
     post_skip_stub,
     read_emitted_envelope,
+    sanitize_attribution,
 )
 from outerloop.review import (
     MARKER,
@@ -70,9 +71,10 @@ def post_from_file(
             # comment — collapse newlines, neutralize markdown, cap length
             detail = sanitize(str(envelope.get("detail", "")), 300)
             # name WHOSE round failed: with two standing reviewers, an
-            # unattributed stub is ambiguous exactly when a key dies
-            who = " ".join(opinion_label.split())[:MAX_OPINION_LABEL] or str(
-                envelope.get("reviewed_by", "")
+            # unattributed stub is ambiguous exactly when a key dies.
+            # reviewed_by is untrusted here too: same sanitizer as the stamp
+            who = " ".join(opinion_label.split())[:MAX_OPINION_LABEL] or sanitize_attribution(
+                str(envelope.get("reviewed_by", ""))
             )
             role = f"advisory review ({who})" if who else "advisory review"
             post_skip_stub(client, repo, number, role, RuntimeError(detail))
