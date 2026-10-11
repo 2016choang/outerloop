@@ -302,7 +302,7 @@ def render(brief: SessionBrief) -> str:
             f"You are on your own persistent branch `{brief.line_ref}` — your "
             "lab notebook, not the main ledger. The base branch is already "
             "merged in; if that merge conflicted, resolving it is your first "
-            "task (your divergence debt coming due). A PR to main is cut only "
+            "task. A PR to main is cut only "
             "from a credited win: check out the base branch, re-apply the "
             "changes the win needs onto it, and finish on that tree — never "
             "the whole line. Your memory "
@@ -442,8 +442,7 @@ def render(brief: SessionBrief) -> str:
                     "with `submit --minutes <N>` (default "
                     f"{brief.eval_minutes_default} min per eval, the baseline's "
                     "runtime with headroom); an eval that runs out of walltime is an "
-                    "eval error, not a result. Budget your experiments against the "
-                    "final eval you will need. On this benchmark a submit is "
+                    "eval error, not a result. On this benchmark a submit is "
                     "REFUSED until at least one launch has returned results "
                     "this run.",
                     "",
@@ -473,8 +472,7 @@ def render(brief: SessionBrief) -> str:
             "sleeps (a `sleep` with nothing staged is a checkpoint that "
             "refreshes your session clock and costs one sleep). "
             + (
-                "The sibling view is refreshed at every wake; `siblings` shows it. "
-                "Check it before choosing a direction and again before a submit."
+                "The sibling view is refreshed at every wake; `siblings` shows it."
                 if brief.channels.get("siblings", True)
                 else ""
             ),
@@ -485,8 +483,8 @@ def render(brief: SessionBrief) -> str:
                     "run the paired gate and panel, and receive their verdicts. A credited "
                     "verdict opens a PR or fast-forwards its head. Submit needs no prior "
                     "launch. The optional report becomes the PR's research report. "
-                    "The repo's own CI runs on the PR, a failed check comes back as a message, "
-                    "and running the repo's checks before a submit avoids that round trip.",
+                    "The repo's own CI runs on the PR, a failed check comes back "
+                    "as a message.",
                     "A submit spends a sleep and its gate's GPU-hours, but no launch count. "
                     "Stopping without a submit ends unmeasured; with a PR open it returns "
                     "to review. An edit in review is measured and pushed only on submit. "
