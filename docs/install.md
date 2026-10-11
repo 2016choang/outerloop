@@ -698,8 +698,9 @@ the value is empty) keeps Codex's own setting on native provider sessions
 and turns it off on endpoint sessions, where the provider-side tool cannot
 run; anything else means `off` everywhere (`auto` is matched
 case-insensitively, whitespace trimmed). A role whose spec grants WebSearch
-gets search force-enabled; a spec without it never disables search, so a
-native `auto` session keeps Codex's own setting.
+does not override this: the harness appends `web_search="disabled"` after
+the role's own `tools.web_search=true`, so `off` — and `auto` on endpoint
+sessions — always wins over the role grant.
 
 On a cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
