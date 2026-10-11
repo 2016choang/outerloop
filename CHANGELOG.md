@@ -15,8 +15,8 @@ Versions follow [SemVer](https://semver.org).
 ### Fixed
 
 - A session that ends in error while an out-of-memory kill happens in the job
-  (a Slurm OOM kill; the cgroup counter counts any kill in it) ended its run
-  with only the session's symptom; the ending now names what was seen (#483).
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
