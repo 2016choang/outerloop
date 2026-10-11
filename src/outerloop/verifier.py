@@ -37,6 +37,7 @@ from outerloop.review import (
     PullRequest,
     ReviewResult,
     _fence,
+    guidance_section,
     sanitize,
     verdict_line,
 )
@@ -334,15 +335,7 @@ def build_verify_agent_brief(
     the workspace, so it resolves from any backend's cwd)."""
     parts = [VERIFY_SYSTEM_PROMPT, _agent_verify_investigation(syscall_cmd)]
     parts.append(build_verify_prompt(pr, contract_text, today=today, thread=thread))
-    if guidance:
-        # outside every untrusted fence: the judges' own prompt, after the
-        # kernel rubric — this repository's advisory standards, never data
-        parts.append(
-            "## Lab guidance\n\n*(This repository's advisory research "
-            "standards — the judges may raise them only as advisory "
-            f"findings.)*\n\n{guidance}"
-        )
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) + guidance_section(guidance)
 
 
 def verify_result_from_data(data: Any) -> ReviewResult:

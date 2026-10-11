@@ -161,8 +161,8 @@ def run_panel(
     `panel_workspace` holds `pr-head/` (the candidate, sanitized) and `base/`
     (the trusted contract and ruler). The verify lens reads both (its brief
     directs ruler reads at base/); the review lens reads pr-head/ only.
-    `guidance` is this repository's panel guidance — it rides the verify
-    lens's own prompt (outside the untrusted claim fence), never the claim.
+    `guidance` is this repository's panel guidance — every lens gets it in
+    its own prompt (outside the untrusted claim fence), never in the claim.
     Lenses run sequentially; a lens with no verdict is recorded as such and
     never counts as a pass.
     """
@@ -185,7 +185,9 @@ def run_panel(
             policy = verify_result_from_role
         elif lens.kind == "review":
             workspace = panel_workspace / "pr-head"
-            brief = build_agent_brief(pr, today, syscall_cmd=tool_command(workspace))
+            brief = build_agent_brief(
+                pr, today, syscall_cmd=tool_command(workspace), guidance=guidance
+            )
             spec = reviewer_spec()
             policy = review_result_from_role
         else:

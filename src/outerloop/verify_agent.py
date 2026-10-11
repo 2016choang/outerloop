@@ -50,6 +50,21 @@ def _base_contract(client: GitHubClient, repo: str, pr_data: dict) -> str:
         return ""
 
 
+def _regular_file(client: GitHubClient, repo: str, path: str, ref: str) -> str | None:
+    """A file's text only when every component of `path` is a real directory
+    or regular file at `ref`: the Contents API follows a symlink to another
+    file in the repo, which the git-object reader refuses."""
+    parent = ""
+    parts = path.split("/")
+    for i, part in enumerate(parts):
+        want = "file" if i == len(parts) - 1 else "dir"
+        listing = client.list_directory(repo, parent, ref)
+        if not any(e.get("name") == part and e.get("type") == want for e in listing):
+            return None
+        parent = f"{parent}/{part}" if parent else part
+    return client.get_file_content(repo, path, ref)
+
+
 def _base_guidance(client: GitHubClient, repo: str, pr_data: dict, contract_text: str) -> str:
     """The panel guidance from the BASE branch — the same ref the contract was
     read at. Best-effort like the contract: a failure degrades to no guidance
@@ -66,7 +81,7 @@ def _base_guidance(client: GitHubClient, repo: str, pr_data: dict, contract_text
             mode = load_contract(contract_text, repo).guidance
     try:
         return read_guidance(
-            lambda name: client.get_file_content(repo, name, base_ref or "HEAD"), mode
+            lambda name: _regular_file(client, repo, name, base_ref or "HEAD"), mode
         )[1]
     except EXPECTED_FAILURES as exc:
         log.warning("verifying without the lab guidance: %s", exc)

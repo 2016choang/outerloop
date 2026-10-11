@@ -335,12 +335,25 @@ def build_summarizer_brief(opinions: list[dict], *, syscall_cmd: str = DEFAULT_S
     )
 
 
+def guidance_section(guidance: str) -> str:
+    """This repository's panel guidance as the judges' own labelled section:
+    outside every untrusted fence, after the kernel rubric, advisory only."""
+    if not guidance:
+        return ""
+    return (
+        "\n\n## Lab guidance\n\n*(This repository's advisory research "
+        "standards — the judges may raise them only as advisory "
+        f"findings.)*\n\n{guidance}"
+    )
+
+
 def build_agent_brief(
     pr: PullRequest,
     today: str | None = None,
     *,
     syscall_cmd: str = DEFAULT_SYSCALL_CMD,
     lens: str = "",
+    guidance: str = "",
 ) -> str:
     """The reviewer brief for an agent session: the shared rubric, the
     investigation instruction, and the PR itself, built on the shared
@@ -357,7 +370,7 @@ def build_agent_brief(
     focus = f"\n\n{REVIEW_LENSES[lens]}" if lens and lens != "general" else ""
     return (
         f"{SYSTEM_PROMPT}{focus}\n\n{_agent_investigation(syscall_cmd)}\n\n"
-        f"{build_prompt(pr, today)}"
+        f"{build_prompt(pr, today)}{guidance_section(guidance)}"
     )
 
 

@@ -74,6 +74,25 @@ def test_contract_at_over_git_show() -> None:
     ws = _Ws({"guidance/author.md": "sweep first"}, symlinks=frozenset({"guidance/panel.md"}))
     assert guidance_at(ws, "abc", "guidance") == ("sweep first", "")
     assert guidance_at(_Ws({}), "abc", "guidance") == ("", "")
+    # the Actions verifier's API reader refuses the same links, although the
+    # Contents API itself would follow them to the target file's text
+    from outerloop.verify_agent import _regular_file
+
+    tree = {
+        "": {"g": "dir", "link": "symlink"},
+        "g": {"author.md": "file", "panel.md": "symlink"},
+    }
+
+    class API:
+        def list_directory(self, repo, path, ref):
+            return [{"name": n, "type": t} for n, t in tree.get(path, {}).items()]
+
+        def get_file_content(self, repo, path, ref):
+            return "followed"
+
+    assert _regular_file(API(), "o/r", "g/author.md", "main") == "followed"
+    assert _regular_file(API(), "o/r", "g/panel.md", "main") is None
+    assert _regular_file(API(), "o/r", "link/author.md", "main") is None
 
 
 def test_tick_contract_text_via_the_api() -> None:

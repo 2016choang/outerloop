@@ -236,7 +236,7 @@ def test_siblings_command_reads_the_fleet_snapshot(tmp_path: Path) -> None:
     out = cmd_siblings(tmp_path, None)
     assert "agent-02 (parked/candidate): compose embedding decay" in out
     assert "agent-03 (running)" in out
-    assert "prefer a direction no sibling" in out
+    assert "prefer a direction" not in out  # direction advice lives in the guidance pack
     (tmp_path / ".outerloop" / "siblings.json").write_text("not json")
     assert cmd_siblings(tmp_path, None) == "no sibling activity known."
 

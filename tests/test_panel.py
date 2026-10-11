@@ -44,9 +44,11 @@ class _Judge:
     text: str
     is_error: bool = False
     workspaces: list = field(default_factory=list)
+    briefs: list = field(default_factory=list)
 
     def run(self, brief_text, workspace, resume_session_id=None) -> SessionResult:
         self.workspaces.append(Path(workspace))
+        self.briefs.append(brief_text)
         if not self.is_error:
             # commit the verdict through the syscall channel, as the tool would
             try:
@@ -81,7 +83,10 @@ def test_lenses_read_their_workspaces_and_blocking_merges(tmp_path: Path) -> Non
         contract_text="benchmarks: []",
         today="2026-08-15",
         round_no=1,
+        guidance="this repo's standard",
     )
+    # every lens gets the repository's panel guidance in its own prompt
+    assert all("this repo's standard" in j.briefs[0] for j in (verify, review))
     assert verify.workspaces == [tmp_path]  # verify reads both trees from the root
     assert review.workspaces == [tmp_path / "pr-head"]  # review reads the candidate only
     assert len(verdict.blocking) == 1 and verdict.blocking[0].file == "src/x.py"
