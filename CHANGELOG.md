@@ -16,6 +16,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).

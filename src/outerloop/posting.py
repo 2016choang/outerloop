@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 from outerloop.github import GitHubClient, GitHubError
 from outerloop.harness import redact
@@ -28,6 +29,37 @@ EXPECTED_FAILURES = (
     OSError,
     json.JSONDecodeError,
 )
+
+
+def read_emitted_envelope(path: Path, repo: str, number: int, noun: str) -> dict | None:
+    """Decode and gate the envelope a session job emitted for the posting
+    half of the token split: the artifact crossed a job boundary into
+    token-holding code, so nothing in it is trusted. Returns the validated
+    envelope for a postable kind ("skip-stub" or "findings"), or None when
+    the file is unreadable, not an object, names a different PR, skipped
+    cleanly, or carries an unknown kind. `noun` is the artifact name in the
+    log lines."""
+    try:
+        envelope = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("%s file unreadable (%s); nothing posted", noun, exc)
+        return None
+    if not isinstance(envelope, dict):
+        log.warning("%s file is not an object; nothing posted", noun)
+        return None
+    if envelope.get("repo") != repo or envelope.get("number") != number:
+        log.warning("%s envelope names a different PR; refused", noun)
+        return None
+    kind = envelope.get("kind")
+    if kind == "skip-clean":
+        # a clean skip (bot PR, opt-out) posts nothing by design; the
+        # envelope exists so a MISSING artifact means a broken session
+        log.info("session skipped cleanly (%s); nothing to post", envelope.get("detail", ""))
+        return None
+    if kind not in ("skip-stub", "findings"):
+        log.warning("unknown envelope kind %r; nothing posted", kind)
+        return None
+    return envelope
 
 
 def post_round(
