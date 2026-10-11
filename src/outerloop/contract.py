@@ -80,13 +80,15 @@ def _capped(text: str) -> str:
 def read_guidance(read: Callable[[str], str | None], mode: str) -> tuple[str, str]:
     """The (author, panel) guidance texts for a contract's `guidance` mode.
 
-    `read` fetches a repo-relative file from the SAME ref the contract was
-    read at — guidance is base-reviewed text with the contract's trust,
-    never workspace state, so an agent cannot influence it. `default` is the
-    in-kernel pack (guidance_pack); `none` is empty; a directory mode reads
-    `<dir>/author.md` and `<dir>/panel.md`, where a missing file is empty
-    guidance — advisory, never a contract error. Each text is capped at
-    MAX_GUIDANCE_CHARS."""
+    `read` fetches a repo-relative file's blob from the SAME ref/sha the
+    contract was read at — guidance is base-reviewed text with the
+    contract's trust, never workspace state, so an agent cannot influence
+    it (the reader must go through git objects, never the working tree, and
+    refuses a symlink blob, whose text is its target rather than file
+    content). `default` is the in-kernel pack (guidance_pack); `none` is
+    empty; a directory mode reads `<dir>/author.md` and `<dir>/panel.md`,
+    where a missing file is empty guidance — advisory, never a contract
+    error. Each text is capped at MAX_GUIDANCE_CHARS."""
     if mode == "none":
         return ("", "")
     if mode == "default":
@@ -97,23 +99,6 @@ def read_guidance(read: Callable[[str], str | None], mode: str) -> tuple[str, st
         for raw in (read(f"{base}/{name}") for name in GUIDANCE_FILES)
     ]
     return (texts[0] or "", texts[1] or "")
-
-
-def guidance_in_tree(tree: Path, mode: str) -> tuple[str, str]:
-    """Guidance from a checked-out tree — the same tree `contract_in_tree`
-    reads the contract from. A file that cannot be read is empty guidance,
-    like a missing one: advisory text, never a run-ending error."""
-
-    def read(name: str) -> str | None:
-        path = tree / name
-        if not path.is_file():
-            return None
-        try:
-            return path.read_text()
-        except (OSError, ValueError):  # unreadable or undecodable
-            return None
-
-    return read_guidance(read, mode)
 
 
 class ContractError(ValueError):
@@ -490,8 +475,9 @@ class Contract(_StrictModel):
     # and placed last. `default` (the in-kernel pack), `none`, or a
     # repo-relative directory holding author.md and panel.md — recommended
     # location `.github/outerloop/guidance/`, which agents can never write.
-    # Read from the same ref as the contract; a missing file is empty
-    # guidance, never a contract error. Never into `.outerloop/`.
+    # Read via git objects from the same ref as the contract (a symlink
+    # blob is refused); a missing file is empty guidance, never a contract
+    # error. Never into `.outerloop/`.
     guidance: str = "default"
 
     @field_validator("guidance")

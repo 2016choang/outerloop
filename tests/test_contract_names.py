@@ -13,7 +13,7 @@ from outerloop.contract import (
     contract_text_in_tree,
     find_contract,
 )
-from outerloop.github import GitError, contract_at
+from outerloop.github import GitError, contract_at, guidance_at
 
 
 def test_contract_and_github_are_forbidden() -> None:
@@ -42,12 +42,21 @@ def test_contract_text_in_tree_raises_naming_contract(tmp_path: Path) -> None:
 
 
 class _Ws:
-    """A Workspace stand-in: `git show <sha>:<path>` fails for a missing path."""
+    """A Workspace stand-in over a fixed tree: `ls-tree` reports the MODE,
+    `git show <sha>:<path>` fails for a missing path (a symlink's show text
+    is its target, so the reader never asks for one)."""
 
-    def __init__(self, files: dict[str, str]) -> None:
+    def __init__(self, files: dict[str, str], symlinks: frozenset[str] = frozenset()) -> None:
         self.files = files
+        self.symlinks = symlinks
 
     def git(self, *args: str) -> str:
+        if args[0] == "ls-tree":
+            name = args[-1]
+            if name not in self.files and name not in self.symlinks:
+                return ""
+            mode = "120000" if name in self.symlinks else "100644"
+            return f"{mode} blob 0000000000000000000000000000000000000000\t{name}"
         assert args[0] == "show"
         sha, _, name = args[1].partition(":")
         if name not in self.files:
@@ -59,6 +68,12 @@ def test_contract_at_over_git_show() -> None:
     assert contract_at(_Ws({".outerloop.yaml": "new"}), "abc") == "new"
     with pytest.raises(GitError, match="no contract at abc"):
         contract_at(_Ws({}), "abc")
+    # the one guidance reader: git objects only, and a symlink blob (whose
+    # `git show` text is its target, not file content) is refused as empty
+    # guidance, like a missing path
+    ws = _Ws({"guidance/author.md": "sweep first"}, symlinks=frozenset({"guidance/panel.md"}))
+    assert guidance_at(ws, "abc", "guidance") == ("sweep first", "")
+    assert guidance_at(_Ws({}), "abc", "guidance") == ("", "")
 
 
 def test_tick_contract_text_via_the_api() -> None:

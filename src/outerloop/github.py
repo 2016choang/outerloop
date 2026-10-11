@@ -765,7 +765,9 @@ class GitHubClient:
 
         Best-effort by design (reviewer context): directories, submodules,
         files over the API's inline limit, and missing paths all return None
-        rather than raising.
+        rather than raising. A symlink returns None too — its blob text is
+        the link target, not file content (the same refusal the git-object
+        reader applies).
         """
         api_path = (
             f"/repos/{urllib.parse.quote(repo)}/contents/"
@@ -778,6 +780,8 @@ class GitHubClient:
                 log.warning("context fetch failed for %s@%s: %s", path, ref, exc)
             return None
         if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None
+        if data.get("type") != "file":
             return None
         try:
             raw = base64.b64decode(data.get("content", ""))
@@ -1782,10 +1786,19 @@ def contract_at(ws: Any, sha: str) -> str:
 def guidance_at(ws: Any, sha: str, mode: str) -> tuple[str, str]:
     """The target's guidance texts at `sha` via Workspace.git — the same git
     objects `contract_at` reads the contract from (a wake reads guidance at
-    the pinned base sha, never the session's working tree)."""
+    the pinned base sha, never the session's working tree). This is the one
+    reader: every site reads blobs, never a checked-out file, so a symlink
+    (mode 120000 — whose `git show` text is its TARGET, not file content)
+    cannot read outside the repo or into `.outerloop/`; it is refused as
+    empty guidance, like a missing path."""
 
     def read(name: str) -> str | None:
         try:
+            # ls-tree names the MODE first: only a regular file is read — a
+            # path through a symlinked directory never resolves in the tree
+            meta = ws.git("ls-tree", sha, "--", name).split()
+            if not meta or meta[0] not in ("100644", "100755"):
+                return None
             return ws.git("show", f"{sha}:{name}")
         except GitError:
             return None

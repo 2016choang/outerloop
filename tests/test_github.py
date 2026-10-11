@@ -350,7 +350,11 @@ def test_pull_request_files_paginate(provider: FileTokenProvider) -> None:
 
 
 def test_file_content_decodes_base64(provider: FileTokenProvider) -> None:
-    payload = {"encoding": "base64", "content": base64.b64encode(b"hello\nworld").decode()}
+    payload = {
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode(b"hello\nworld").decode(),
+    }
     client = GitHubClient(auth=provider, transport=FakeTransport([payload]))
     assert client.get_file_content("org/repo", "a/b.py", "sha") == "hello\nworld"
 
@@ -366,6 +370,14 @@ def test_file_content_is_none_on_error_or_nonfile(provider: FileTokenProvider) -
 
     directory = GitHubClient(auth=provider, transport=FakeTransport([[{"name": "sub"}]]))
     assert directory.get_file_content("org/repo", "dir", "sha") is None
+
+    # a symlink's blob text is its target, not file content: refused like a
+    # non-file, the same rule the git-object reader applies
+    symlink = GitHubClient(
+        auth=provider,
+        transport=FakeTransport([{"type": "symlink", "encoding": "base64", "content": "../x"}]),
+    )
+    assert symlink.get_file_content("org/repo", "link.md", "sha") is None
 
 
 def test_enable_auto_merge_arms_via_graphql(provider: FileTokenProvider) -> None:

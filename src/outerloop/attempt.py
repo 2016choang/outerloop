@@ -37,7 +37,6 @@ from outerloop.contract import (
     BenchmarkNotFoundError,
     Contract,
     contract_text_in_tree,
-    guidance_in_tree,
     load_contract,
 )
 from outerloop.dispatch import (
@@ -4740,10 +4739,14 @@ def live_attempt(
         _exclude_merge_artifacts(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
-        # guidance is read from the SAME base-branch tree the contract came
-        # from — before any line checkout, so a line cannot shape its own
-        # guidance (same rule as its budgets)
-        author_guidance, panel_guidance = guidance_in_tree(workspace, contract.guidance)
+        # guidance is read from the SAME base-branch ref the contract tree
+        # was checked out from, via git objects only (never the working
+        # tree, where a symlink could read outside the repo) — before any
+        # line checkout, so a line cannot shape its own guidance (same rule
+        # as its budgets)
+        author_guidance, panel_guidance = guidance_at(
+            ws, f"origin/{base_branch}", contract.guidance
+        )
         record = dc_replace(
             record,
             verification=contract.benchmark(config.benchmark).verification,
