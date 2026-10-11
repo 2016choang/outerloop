@@ -660,12 +660,13 @@ def test_legacy_slot_is_miss_and_redispatch_is_idempotent(
     assert len(submitted) == 1
 
 
-@pytest.mark.parametrize("name", ["baseline", "sib-tsp-base"])
+@pytest.mark.parametrize("name", ["baseline", "sib-tsp-base", "candidate"])
 def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
-    """A dispatched baseline (or suite baseline) that ends with no result is an
-    infrastructure failure, not a negative result: two uncharged re-dispatches
-    — the count survives restarts, and a repeated delivery of one job counts
-    once — then a park whose note names the file an operator deletes."""
+    """A dispatched baseline, suite baseline, or cleanly completed candidate
+    that ends with no result is an infrastructure failure, not a negative
+    result: two uncharged re-dispatches — the count survives restarts, and a
+    repeated delivery of one job counts once — then a park whose note names
+    the file an operator deletes."""
     measure = Measure(name, "sha", "cmd", "r2")
     submitted: list = []
     states = {"100": "COMPLETED"}
