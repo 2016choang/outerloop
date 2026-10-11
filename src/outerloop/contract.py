@@ -78,7 +78,8 @@ def _guidance_dir(mode: str) -> PurePosixPath:
 def _capped(text: str) -> str:
     if len(text) <= MAX_GUIDANCE_CHARS:
         return text
-    return text[:MAX_GUIDANCE_CHARS].rstrip() + "\n[truncated to the guidance budget]"
+    marker = "\n[truncated to the guidance budget]"
+    return text[: MAX_GUIDANCE_CHARS - len(marker)].rstrip() + marker
 
 
 def read_guidance(read: Callable[[str], str | None], mode: str) -> tuple[str, str]:

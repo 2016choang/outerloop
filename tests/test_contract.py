@@ -480,5 +480,5 @@ def test_guidance_reader_guards_the_channel_dir_and_caps_size():
     # oversized guidance is capped, visibly
     big = {"guidance/author.md": "x" * (MAX_GUIDANCE_CHARS + 500)}
     capped = read_guidance(lambda name: big.get(name), "guidance")[0]
-    assert len(capped) <= MAX_GUIDANCE_CHARS + 40
+    assert len(capped) <= MAX_GUIDANCE_CHARS
     assert "[truncated" in capped

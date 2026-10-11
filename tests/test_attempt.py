@@ -4935,10 +4935,10 @@ def test_guidance_layer_shapes_brief_and_claim(mode: str) -> None:
         assert "prefer sweeps on this repo" in brief
         assert "this repo blocks nothing on taste" in judge_brief
         assert "this repo blocks nothing on taste" not in claim
-    # the judges' guidance sits outside the fence holding the claim, and is
+    # the judges' guidance precedes the fenced claim (trusted prompt), and is
     # labelled this repository's advisory standards
     if "## Lab guidance" in judge_brief:
-        assert judge_brief.index("## Lab guidance") > judge_brief.index("The claim (")
+        assert judge_brief.index("## Lab guidance") < judge_brief.index("The claim (")
         assert "advisory research standards" in judge_brief
     # kernel text never carries the retired taste rules, in any mode — the
     # guidance section is present, labelled, and cannot restore them as rules

@@ -333,9 +333,13 @@ def build_verify_agent_brief(
     branch so the rules arrive orchestrator-vouched. `syscall_cmd` is the
     command the judge runs to record its verdict (absolute when the caller knows
     the workspace, so it resolves from any backend's cwd)."""
-    parts = [VERIFY_SYSTEM_PROMPT, _agent_verify_investigation(syscall_cmd)]
+    # the guidance rides the trusted rubric, before any untrusted claim text
+    parts = [
+        VERIFY_SYSTEM_PROMPT + guidance_section(guidance),
+        _agent_verify_investigation(syscall_cmd),
+    ]
     parts.append(build_verify_prompt(pr, contract_text, today=today, thread=thread))
-    return "\n\n".join(parts) + guidance_section(guidance)
+    return "\n\n".join(parts)
 
 
 def verify_result_from_data(data: Any) -> ReviewResult:
