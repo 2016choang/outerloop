@@ -1037,8 +1037,6 @@ def main(argv: list[str] | None = None) -> int:
         "finish; a paused loop delivers when it resumes. No new wake is scheduled.",
     )
     p.add_argument("run_id")
-    # nargs="*", not "?": an optional positional before an option is parsed
-    # differently across Python versions; words after --root must still count
     p.add_argument("text", nargs="*", help="the message text")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p.add_argument("--file", type=Path, help="read the message text from this path")
@@ -1059,7 +1057,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--root")
     p.add_argument("--note", default="")
     p.add_argument("--cancel", action="store_true", help="remove a pending rebind request")
-    args = parser.parse_args(argv)
+    # older 3.12 releases stop the message text at `--root`; the leftover
+    # words are still the message's, and nothing else accepts strays
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        if args.command != "message" or any(word.startswith("-") for word in extra):
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
+        args.text = [*args.text, *extra]
     if args.command == "rebind":
         from outerloop.rebind import cancel, request
 
