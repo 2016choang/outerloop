@@ -694,14 +694,37 @@ def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
     with pytest.raises(MeasurementPending):  # later wakes stay parked
         _measurer(tmp_path, submitted, states=states).results([measure])
     assert len(submitted) == 2  # the original dispatch plus exactly two retries
+    # a journal that cannot be written parks the run; it never aborts it
+    infra = m._infra_retry_path(measure)
+    infra.unlink()  # the operator cleared the journal…
+    infra.mkdir()  # …but the path cannot hold a file, so every write fails
+    with pytest.raises(MeasurementPending) as unsaved:
+        _measurer(tmp_path, submitted, states=states).results([measure])
+    assert unsaved.value.capacity_wait  # parked uncharged, not an OSError
+    assert "could not be saved" in unsaved.value.note
+    assert len(submitted) == 2  # parked now — nothing was re-dispatched
 
 
-def test_no_result_candidate_death_is_still_an_eval_error(tmp_path):
+def test_no_result_candidate_death_is_still_an_eval_error(tmp_path, monkeypatch):
     """Only baselines and cleanly completed jobs are retried: a candidate that
-    died (here OOM) fails the climb, and is never resubmitted."""
+    died (here OOM) fails the climb, and is never resubmitted. A journal that
+    already recorded this delivery as an infra retry — a crash may leave one
+    before the re-dispatch — outranks a scheduler status that is unavailable."""
     submitted: list = []
     m = _measurer(tmp_path, submitted, states={"100": "OUT_OF_MEMORY"})
     _dispatched(m, _measures()[1], job="100")
     with pytest.raises(EvalError, match="OUT_OF_MEMORY"):
         m.results([_measures()[1]])
     assert not submitted
+    # the crash-resume case: the journal names THIS job, so the scheduler's
+    # silence is not new evidence against the candidate
+    m._infra_retry_path(_measures()[1]).write_text(json.dumps({"retries": 1, "job_id": "100"}))
+
+    def unavailable(job_id: str) -> str:
+        raise RuntimeError("sacct did not run")
+
+    monkeypatch.setattr(m.compute, "status", unavailable)
+    with pytest.raises(MeasurementPending) as caught:
+        m.results([_measures()[1]])
+    assert caught.value.capacity_wait
+    assert len(submitted) == 1  # the re-dispatch the crash cut short

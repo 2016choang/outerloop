@@ -410,9 +410,11 @@ class DispatchedMeasurer:
         clean = state.startswith("COMPLETED") or (
             code_file.exists() and code_file.read_text().strip() == "0"
         )
-        if not (baseline or clean):
-            raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
         prior = self._retry_journal(m)
+        # a journal naming THIS job means this delivery was already classified
+        # as infra before a crash — an unavailable status must not fail it
+        if not (baseline or clean or prior.get("job_id") == job_id):
+            raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
         failures = prior.get("retries", 0) + (prior.get("job_id") != job_id)
         note = (
             f"measure {m.name}: job {job_id} ended {state or 'UNKNOWN'}; "
@@ -426,10 +428,16 @@ class DispatchedMeasurer:
             )
         from outerloop.harness_cli import write_atomic
 
-        write_atomic(
-            self._infra_retry_path(m),
-            json.dumps({"retries": failures, "job_id": job_id, "note": note}),
-        )
+        try:
+            write_atomic(
+                self._infra_retry_path(m),
+                json.dumps({"retries": failures, "job_id": job_id, "note": note}),
+            )
+        except OSError:
+            # without the journal the retry count cannot survive a restart:
+            # park the run now rather than re-dispatch without a bound
+            exhausted = True
+            note += "; retry state could not be saved; parked uncharged"
         log.warning("%s", note)
         return note, exhausted
 
