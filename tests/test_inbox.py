@@ -484,8 +484,7 @@ def test_reply_destination_survives_thread_change_and_legacy_entry(tmp_path):
     assert [(r, n) for r, n, _ in github.posted] == github.looked_up
 
 
-# neutral and skipped take the success path, cancelled the failure path
-@pytest.mark.parametrize("conclusion", ["failure", "success"])
+@pytest.mark.parametrize("conclusion", ["failure", "success", "neutral", "skipped", "cancelled"])
 def test_checks_are_deduplicated_messages_with_context_rules(tmp_path, conclusion):
     from outerloop.inbox import gather_github_messages, wake_pending
 
