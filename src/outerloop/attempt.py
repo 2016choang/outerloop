@@ -3762,30 +3762,6 @@ def build_panel_runner(
     return runner
 
 
-def _session_job_cause() -> str:
-    """The scheduler's cause for the death of the job hosting this session, or
-    "" when it cannot name one (a local run, a failed query, or a job still
-    alive that simply carried a session which failed on its own).
-
-    A cgroup OOM kill or a hard walltime kill leaves only a symptom in the
-    session's stderr — the bridge's blanket "unavailable or interrupted" —
-    while the scheduler already knows the real cause: sacct reports the
-    terminal state during the kill window, while this ending is still being
-    written (the sweep's grace exists for that same window)."""
-    job_id = os.environ.get("SLURM_JOB_ID", "")
-    if not job_id.isdigit():
-        return ""
-    try:
-        from outerloop.compute import compute_from_env, is_terminal
-
-        state = compute_from_env().status(job_id)
-    except Exception:
-        return ""  # the scheduler could not say: today's note stands
-    if not is_terminal(state) or state.startswith("COMPLETED"):
-        return ""
-    return f"session job {job_id} ended {state}"
-
-
 def _finish_attempt(
     *,
     result: AttemptResult,
@@ -3808,10 +3784,6 @@ def _finish_attempt(
     snapshot_attempted: bool = False,
 ) -> AttemptOutcome:
     """Finish an unsubmitted stop, or publish a credited sealed tree."""
-    if result.outcome == "session-error" and (cause := _session_job_cause()):
-        # the session's own detail names only a symptom; the scheduler names
-        # the cause (e.g. the job was killed for exceeding its memory request)
-        result = dc_replace(result, note=f"{cause}; {result.note}")
     latest = load_record(run_root, run_id)
     meter = {
         k: v

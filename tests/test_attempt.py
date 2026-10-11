@@ -1151,7 +1151,7 @@ def test_out_of_scope_edit_aborts_without_pr(tmp_path, target_repo, monkeypatch,
     assert "roadmap" in record.ending_note
 
 
-def test_session_error_aborts_cleanly(tmp_path, target_repo, monkeypatch) -> None:
+def test_session_error_aborts_cleanly(tmp_path, target_repo) -> None:
     @dataclass
     class DeadHarness:
         def run(self, brief_text, workspace, resume_session_id=None) -> SessionResult:
@@ -1165,19 +1165,6 @@ def test_session_error_aborts_cleanly(tmp_path, target_repo, monkeypatch) -> Non
                 transcript_path="",
             )
 
-    @dataclass
-    class OomCompute:
-        def status(self, job_id: str) -> str:
-            return "OUT_OF_MEMORY"
-
-        def cancel(self, job_id: str) -> bool:
-            return True
-
-    # the job hosting the session was killed for exceeding its memory
-    # request: the ending names the scheduler's cause, not just the session's
-    # symptom (#483)
-    monkeypatch.setenv("SLURM_JOB_ID", "4242")
-    monkeypatch.setattr("outerloop.compute.compute_from_env", lambda: OomCompute())
     github = FakeGitHub()
     _q = list([13.876])
     with _queued_local(_q):
@@ -1193,8 +1180,6 @@ def test_session_error_aborts_cleanly(tmp_path, target_repo, monkeypatch) -> Non
         )
     assert outcome.outcome == "session-error"
     assert github.prs == []
-    record = load_record(tmp_path / "state", "tsp-err")
-    assert "OUT_OF_MEMORY" in record.ending_note
 
 
 def test_exhausted_live_attempt_ends_budget_exhausted(tmp_path, target_repo) -> None:

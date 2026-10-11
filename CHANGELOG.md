@@ -14,15 +14,6 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
-- A session killed with its Slurm job (an OOM kill at the job's memory
-  request) ended its run with only the session's symptom ("codex bridge
-  unavailable or interrupted") as the note. The kernel now asks the
-  scheduler for the job hosting the session and names its terminal state
-  (e.g. OUT_OF_MEMORY) in the run note and report; a failed query falls
-  back to the old message (#483).
-- A wake leg whose session died before completing a turn no longer reports
-  the run's cost as unknown and its turns as zero: the report keeps the
-  spend restored from the session record the park saved (#483).
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
