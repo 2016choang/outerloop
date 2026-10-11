@@ -22,6 +22,37 @@ A rule that guards none of these is a convention, not a mechanism. If a
 convention keeps failing in a way that crosses a boundary, it earns a
 mechanism then, not before.
 
+## The guidance layer
+
+The same split now applies to the kernel's agent-facing text. Mechanics —
+session lifecycle, the report's field names, the fold procedure, the
+anti-fabrication rules — stay in the kernel. Research taste — how to pick a
+direction, how much landscape a claim needs, what counts as publishable —
+moved into a GUIDANCE layer selected by the contract's top-level `guidance`
+key:
+
+- `default`: the kernel's own pack (the texts that used to live in the
+  brief and the verifier rubric);
+- `none`: no guidance at all;
+- a repo-relative directory holding `author.md` and `panel.md` —
+  recommended location `.github/outerloop/guidance/`, which agents can
+  never write. A missing file is empty guidance, never a contract error.
+
+One reader, `outerloop.contract.read_guidance`, runs with the SAME ref the
+contract was read at (the default branch for the Actions verifier, the
+pinned base sha via git objects for climbs and wakes), so an agent can
+never influence its own guidance. Each file is capped at 8,000 characters.
+The author half is inserted LAST in the brief under a `# Lab guidance`
+heading labelled advisory ("the kernel rules above win"); the panel half
+is appended after the kernel claim as guidance the judges may raise only as
+advisory findings.
+
+The panel may block only on validity: harness exploitation, ruler/seed
+fishing, data leakage, a confirmed contradiction between the claim and its
+own evidence, and scope and measurement facts. The former one-idea mandate
+is gone entirely — a repository that wants it writes it into its guidance
+files, where it is advice, never a blocking rule.
+
 ## What this changes now
 
 **1. Sessions may commit on their own line.** The rule "do not commit" guards
@@ -90,6 +121,5 @@ Each can be added if the plain version shows a need.
 
 - Authors may reset or delete their own published branches (owner,
   2026-09-25).
-- The namespace is `ideas/<agent-id>/`: it names the purpose and matches
-  the "one idea per PR" language of the brief and panel. Adopters may use
-  it for other purposes; the kernel only enforces ownership.
+- The namespace is `ideas/<agent-id>/`: it names the purpose. Adopters may
+  use it for other purposes; the kernel only enforces ownership.
