@@ -543,9 +543,13 @@ def normalize_path(entry: str) -> PurePosixPath:
 
 
 def forbidden_paths(contract: Contract) -> tuple[str, ...]:
-    """Write paths forbidden for this contract: the hard-coded set plus the
-    target's roadmap."""
-    return (*ALWAYS_FORBIDDEN, str(normalize_path(contract.roadmap)))
+    """Write paths forbidden for this contract: the hard-coded set, the
+    target's roadmap, and a guidance directory — trusted text, so agents can
+    never write it, wherever the repository keeps it (like the contract)."""
+    guidance = (
+        () if contract.guidance in ("default", "none") else (str(_guidance_dir(contract.guidance)),)
+    )
+    return (*ALWAYS_FORBIDDEN, str(normalize_path(contract.roadmap)), *guidance)
 
 
 def _fold(path: PurePosixPath) -> PurePosixPath:

@@ -342,7 +342,8 @@ PANEL_BLOCKING = (
     "`blocking` true only when a confirmed defect makes the measured number or the "
     "run untrustworthy: the code the metric depends on is wrong, it games the "
     "benchmark or the ruler, it leaks data, or it is a security defect (credentials, "
-    "sandbox escape). Every other defect, however real, is advisory here."
+    "sandbox escape) — or when the claim is confirmed to contradict its own evidence. "
+    "Every other defect, however real, is advisory here."
 )
 
 

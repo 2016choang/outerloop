@@ -470,6 +470,13 @@ def test_guidance_reader_guards_the_channel_dir_and_caps_size():
             read_guidance(read, mode)
         with pytest.raises(ValidationError):
             load_contract(PILOT_CONTRACT + f"\nguidance: {mode}\n", "org/repo")
+    # a guidance directory is trusted text: agents can never write it, and a
+    # scope that would let them is refused at load
+    from outerloop.contract import path_is_forbidden
+
+    guided = load_contract(PILOT_CONTRACT + "\nguidance: lab/guidance\n", "org/repo")
+    assert path_is_forbidden("lab/guidance/panel.md", guided)
+    assert not path_is_forbidden("lab/other.md", guided)
     # oversized guidance is capped, visibly
     big = {"guidance/author.md": "x" * (MAX_GUIDANCE_CHARS + 500)}
     capped = read_guidance(lambda name: big.get(name), "guidance")[0]

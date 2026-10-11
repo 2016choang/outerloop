@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -14,6 +15,9 @@ from outerloop.contract import (
     find_contract,
 )
 from outerloop.github import GitError, contract_at, guidance_at
+
+if TYPE_CHECKING:
+    from outerloop.github import GitHubClient
 
 
 def test_contract_and_github_are_forbidden() -> None:
@@ -90,9 +94,10 @@ def test_contract_at_over_git_show() -> None:
         def get_file_content(self, repo, path, ref):
             return "followed"
 
-    assert _regular_file(API(), "o/r", "g/author.md", "main") == "followed"
-    assert _regular_file(API(), "o/r", "g/panel.md", "main") is None
-    assert _regular_file(API(), "o/r", "link/author.md", "main") is None
+    api = cast("GitHubClient", API())
+    assert _regular_file(api, "o/r", "g/author.md", "main") == "followed"
+    assert _regular_file(api, "o/r", "g/panel.md", "main") is None
+    assert _regular_file(api, "o/r", "link/author.md", "main") is None
 
 
 def test_tick_contract_text_via_the_api() -> None:
