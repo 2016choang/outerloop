@@ -31,6 +31,7 @@ from outerloop.endpoint_wait import session_url as endpoint_session_url
 from outerloop.endpoints import EndpointProfile
 from outerloop.hermes_install import hermes_ready, hermes_runtime
 from outerloop.image import apptainer_from_env
+from outerloop.runstate import is_throttle
 from outerloop.session_evidence import (
     DEFAULT_CAP,
     active,
@@ -297,11 +298,14 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 
 
 # Substrings that mean "the API itself is unavailable to us" — credit,
-# limit, auth, throttling. Matched only against error surfaces of an
-# is_error result (backend error text, never agent prose). The first group is
+# limit, auth. Matched only against error surfaces of an is_error result
+# (backend error text, never agent prose). The first group is
 # Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
 # 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
 # header", "No auth credentials found") so the Anthropic patterns miss them.
+# Throttling is NOT here: runstate.THROTTLE_PATTERNS (via is_throttle) owns
+# that wording so the outage classification and the latch's short cooldown
+# come from one shared list (#481).
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -309,8 +313,6 @@ OUTAGE_PATTERNS = (
     "billing",
     "authentication_error",
     "invalid x-api-key",
-    "rate_limit_error",
-    "overloaded_error",
     "401",
     "missing authentication",
     "no auth credentials",
@@ -353,7 +355,7 @@ def outage(result: SessionResult) -> bool:
         if not text.startswith("api error"):
             return False
         surface = text
-    return any(pattern in surface for pattern in OUTAGE_PATTERNS)
+    return any(pattern in surface for pattern in OUTAGE_PATTERNS) or is_throttle(surface)
 
 
 def budget_exhausted(result: SessionResult) -> bool:
@@ -855,8 +857,9 @@ class ClaudeCodeHarness:
         # machine "API Error ..." text (never agent prose) is the
         # authoritative cause, so surface it as the detail: downstream notes,
         # the operator log, and the outage latch (its classifier AND its
-        # throttle-duration check, which reads rate_limit/overloaded off the
-        # detail) all then see the real error instead of "success". Lift ONLY
+        # throttle-duration check, which reads the shared throttle patterns
+        # off the detail) all then see the real error instead of "success".
+        # Lift ONLY
         # for the contradiction we have actually observed: an is_error whose
         # subtype is empty or the self-contradictory "success", with no backend
         # `messages`. Under those, `result` is machine error text, not agent

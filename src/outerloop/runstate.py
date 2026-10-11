@@ -19,6 +19,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -57,7 +58,31 @@ LEASE_NAME = "lease.json"
 # the orchestrator for most of an hour (review finding).
 OUTAGE_COOLDOWN_S = 45 * 60
 THROTTLE_COOLDOWN_S = 5 * 60
-_THROTTLE_HINTS = ("rate_limit", "overloaded")
+# The ONE notion of throttling: the wording each backend reports when the
+# API refuses us over RATE (a per-minute quota, a momentary overload) —
+# never over credit or auth. Both decisions read this same tuple, so they
+# cannot disagree (#481): harness.outage folds it into its outage
+# classification (a throttled run parks, it never ends aborted), and
+# stamp_outage gives any of it the SHORT cooldown above. Matched as one
+# casefolded regex against backend error text only; the 429 is word-shaped
+# so a bare number inside another number (a token count, a line number)
+# cannot trip it.
+THROTTLE_PATTERNS = (
+    "rate_limit",  # Anthropic "rate_limit_error"
+    "rate limit",  # OpenAI-compatible / hermes wording
+    "overloaded",  # Anthropic "overloaded_error" (529)
+    "too many requests",  # "429 Too Many Requests" (codex, OpenAI-compatible)
+    "exceeded retry limit",  # codex gave up retrying a throttled stream
+    r"\b429\b",
+)
+_THROTTLE_RE = re.compile("|".join(THROTTLE_PATTERNS))
+
+
+def is_throttle(detail: str) -> bool:
+    """True when backend error text `detail` says we were refused over rate."""
+    return _THROTTLE_RE.search(detail.casefold()) is not None
+
+
 # Stamps are written on compute nodes and read on other hosts: a stamp a
 # few seconds "in the future" is NTP skew and must count as active, while
 # a far-future timestamp is corruption and must not pause forever.
@@ -84,11 +109,7 @@ def stamp_outage(root: Path, detail: str, now: float, role: str = "solver") -> N
     # which is exactly the failure the latch exists to prevent
     path = _outage_path(root, role)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    cooldown = (
-        THROTTLE_COOLDOWN_S
-        if any(hint in detail.casefold() for hint in _THROTTLE_HINTS)
-        else OUTAGE_COOLDOWN_S
-    )
+    cooldown = THROTTLE_COOLDOWN_S if is_throttle(detail) else OUTAGE_COOLDOWN_S
     tmp.write_text(json.dumps({"detail": detail[:300], "time": now, "cooldown_s": cooldown}))
     os.replace(tmp, path)
 
