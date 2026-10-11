@@ -465,7 +465,7 @@ def test_guidance_reader_guards_the_channel_dir_and_caps_size():
     # a missing file is empty guidance, never a contract error
     assert read_guidance(read, "docs/guidance") == ("", "")
     # the workspace syscall channel is never a guidance source
-    for mode in (".outerloop/guidance", ".outerloop", ".OUTERLOOP"):
+    for mode in (".outerloop/guidance", ".outerloop", ".OUTERLOOP", "agent_memory/guidance"):
         with pytest.raises(ScopeError):
             read_guidance(read, mode)
         with pytest.raises(ValidationError):

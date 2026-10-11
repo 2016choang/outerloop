@@ -68,6 +68,10 @@ def _guidance_dir(mode: str) -> PurePosixPath:
         raise ScopeError(
             f"guidance must not point into .outerloop/ (the workspace syscall channel): {mode!r}"
         )
+    # a research line's memory is the agent's own writable notebook, exempt
+    # from the forbidden-path check (attempt.LINE_MEMORY_PATHS)
+    if path.parts[0].casefold() in ("agent_memory", "agent_memory.md"):
+        raise ScopeError(f"guidance must not live in the agent's line memory: {mode!r}")
     return path
 
 
