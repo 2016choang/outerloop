@@ -1763,10 +1763,11 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
 
 def test_submit_without_report_is_accepted(tmp_path: Path) -> None:
     _write_syscall(tmp_path, {"launches": [], "submit": True})
-    result, _, _ = run_climb(
+    result, harness, _ = run_climb(
         tmp_path, [13.876, 13.10], contract=DEEP_CONTRACT, launcher=_fake_launcher([])
     )
-    assert result.outcome == "improved"  # accepted; how many legs it took is not the point
+    # one author session: a retry would charge an extra author leg
+    assert result.outcome == "improved" and len(harness.calls) == 1
     assert "no report was given" in pr_body(result, CONFIG, ())
 
 
@@ -2361,6 +2362,9 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
         # an outage on the refusal wake
         ("submit", "explicit-end", "fresh"),
         ("submit", "error", "fresh"),
+        # both budget_exhausted branches: session walltime (stop_reason) and
+        # max-turns (error_detail)
+        ("submit", "timeout", "fresh"),
         ("submit", "budget", "fresh"),
         ("submit", "outage", "fresh"),
         # recovery: an in-scope request proceeds and only the new work is
