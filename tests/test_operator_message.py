@@ -38,15 +38,19 @@ def test_command_message_renders_as_the_wake_delivers_it(tmp_path, run, capsys):
     assert code_fence(text) not in rendered
 
 
-@pytest.mark.parametrize("run_id", ["missing", "../r1", ".", ".."])
-def test_command_refuses_unknown_ids(tmp_path, run, run_id, capsys):
+@pytest.mark.parametrize(
+    ("run_id", "ended", "error"),
+    [
+        ("missing", False, "unknown run id"),
+        ("../r1", False, "unknown run id"),
+        (".", False, "unknown run id"),
+        ("..", False, "unknown run id"),
+        ("r1", True, "already ended"),
+    ],
+)
+def test_command_refuses_unknown_or_ended_runs(tmp_path, run, run_id, ended, error, capsys):
+    if ended:
+        save_record(tmp_path, replace(run, state=ENDED, ending="operator"), 2)
     assert main(["message", run_id, "--root", str(tmp_path), "hello"]) == 2
-    assert "unknown run id" in capsys.readouterr().err
-    assert not (run_dir(tmp_path, "r1") / "inbox").exists()
-
-
-def test_command_refuses_ended_run(tmp_path, run, capsys):
-    save_record(tmp_path, replace(run, state=ENDED, ending="operator"), 2)
-    assert main(["message", "r1", "--root", str(tmp_path), "hello"]) == 2
-    assert "already ended" in capsys.readouterr().err
+    assert error in capsys.readouterr().err
     assert not (run_dir(tmp_path, "r1") / "inbox").exists()
