@@ -1735,7 +1735,12 @@ def attempt_once(
                 note=f"scope refusal delivery failed: {type(exc).__name__}: {exc}",
                 run_seed=run_seed,
             )
-        session = wake_result.session
+        failed = wake_result.session
+        if not wake_result.ok and failed.cost_usd is None and not failed.num_turns:
+            # a leg killed before completing a turn reports zeros; the spend
+            # the park restored from the session record is the run's real one
+            failed = dc_replace(failed, cost_usd=session.cost_usd, num_turns=session.num_turns)
+        session = failed
         if wake_result.ok:
             _ack(messages)
             return None
