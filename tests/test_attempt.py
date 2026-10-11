@@ -4860,14 +4860,71 @@ def test_line_memory_reaches_the_next_session_brief(tmp_path: Path, target_repo_
     assert "A session ends whenever" in brief
 
 
-def test_panel_claim_carries_the_one_idea_mandate() -> None:
+def test_panel_claim_carries_guidance_not_a_mandate() -> None:
     from outerloop.attempt import _panel_claim_body
 
-    lines = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=True)
-    assert "ONE idea" in lines and "BLOCKING" in lines
-    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=False)
-    assert "ONE idea" not in plain
+    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text")
     assert "measured by the orchestrator" in plain
+    assert "## Lab guidance" not in plain  # no guidance, no section
+    advised = _panel_claim_body("tsp", 13.8, 13.1, "report text", guidance="prefer sweeps")
+    assert "## Lab guidance" in advised and "prefer sweeps" in advised
+    # the guidance rides after the kernel claim, labelled advisory-only
+    assert advised.index("measured by the orchestrator") < advised.index("prefer sweeps")
+    assert "advisory" in advised
+
+
+@pytest.mark.parametrize("mode", ["default", "none", "files"])
+def test_guidance_layer_shapes_brief_and_claim(tmp_path: Path, mode: str) -> None:
+    """The two layers: kernel text carries mechanics, the guidance pack carries
+    taste. Under every mode the retired one-idea and blocking-taste rules
+    appear nowhere in author- or judge-facing text (they are not even in the
+    default pack); the labelled guidance section appears exactly when the
+    mode supplies one."""
+    from outerloop.attempt import _panel_claim_body
+    from outerloop.brief import BriefInputs, build_brief, render
+    from outerloop.brief import Task as BriefTask
+    from outerloop.contract import guidance_in_tree, read_guidance
+
+    (tmp_path / "guidance").mkdir()
+    (tmp_path / "guidance" / "author.md").write_text("prefer sweeps on this repo\n")
+    (tmp_path / "guidance" / "panel.md").write_text("this repo blocks nothing on taste\n")
+    author, panel = (
+        guidance_in_tree(tmp_path, "guidance")
+        if mode == "files"
+        else read_guidance(lambda name: None, mode)
+    )
+    brief = render(
+        build_brief(
+            BriefInputs(
+                task=BriefTask("h", "tsp", "e", "d"),
+                contract_text="c",
+                ruler="r",
+                guidance=author,
+            ),
+            created="t",
+        )
+    )
+    claim = _panel_claim_body("tsp", 13.8, 13.1, "report text", guidance=panel)
+
+    if mode == "default":
+        assert "# Lab guidance" in brief and "## How to write" in brief
+        assert "## Lab guidance" in claim and "aggregation standard" in claim
+    elif mode == "none":
+        assert "# Lab guidance" not in brief and "How to write" not in brief
+        assert "## Lab guidance" not in claim
+    else:
+        assert "prefer sweeps on this repo" in brief
+        assert "this repo blocks nothing on taste" in claim
+    # kernel text never carries the retired taste rules, in any mode — the
+    # guidance section is present, labelled, and cannot restore them as rules
+    for text in (brief, claim):
+        assert "One idea per PR" not in text
+        assert "ONE idea" not in text
+        assert "BLOCKING" not in text
+    if mode != "none":
+        assert "advisory" in brief.split("# Lab guidance", 1)[1][:200]
+        # last and after every kernel rule, so it cannot override them
+        assert brief.index("# Lab guidance") > brief.index("# Ground rules")
 
 
 def test_line_divergence_reaches_the_brief(tmp_path: Path, target_repo_lines) -> None:

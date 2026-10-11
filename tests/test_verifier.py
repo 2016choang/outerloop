@@ -260,6 +260,9 @@ def test_aggregation_is_a_first_class_verify_category() -> None:
     from outerloop.verifier import CATEGORIES, VERIFY_SYSTEM_PROMPT
 
     assert "aggregation" in CATEGORIES
-    assert "documents each change's own effect" in VERIFY_SYSTEM_PROMPT
     assert "landscape" in CATEGORIES
-    assert "picture of the landscape" in VERIFY_SYSTEM_PROMPT
+    # the standards themselves are guidance now, not kernel rubric: the
+    # categories stay but are marked advisory, and blocking is validity-only
+    assert "aggregation: ADVISORY ONLY" in VERIFY_SYSTEM_PROMPT
+    assert "landscape: ADVISORY ONLY" in VERIFY_SYSTEM_PROMPT
+    assert "confirmed VALIDITY defect" in VERIFY_SYSTEM_PROMPT

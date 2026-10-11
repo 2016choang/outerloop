@@ -123,7 +123,9 @@ def test_render_omits_empty_memory_sections() -> None:
 def test_ground_rules_ask_for_a_report() -> None:
     text = render(build_brief(make_inputs(), created="t"))
     assert "research report" in text
-    assert "negative result" in text.casefold()
+    # the report's required fields are mechanics the kernel parses
+    for field in ("hypothesis", "what you did", "outcome with numbers", "takeaways"):
+        assert field in text
 
 
 def test_brief_describes_submit_without_prior_launch_or_report() -> None:
@@ -256,7 +258,9 @@ def test_brief_renders_the_research_line_section_only_when_on() -> None:
     on = render(build_brief(make_inputs(line_ref="agents/agent-07"), created="t"))
     assert "# Your research line" in on
     assert "`agents/agent-07`" in on
-    assert "is ONE idea" in on
+    # the extraction mechanics are stated neutrally — taste lives in guidance
+    assert "never the whole line" in on
+    assert "ONE idea" not in on
     off = render(build_brief(make_inputs(), created="t"))
     assert "Your research line" not in off
 
@@ -348,5 +352,6 @@ def test_siblings_guidance_checks_each_wake_before_direction_and_submit() -> Non
     text = render(build_brief(make_inputs(launch_budget=3, sleep_budget=2), created="t"))
     assert "refreshed at every wake; `siblings` shows it" in text
     assert "before choosing a direction and again before a submit" in text
-    assert "prefer a direction no sibling is on unless you have a distinct angle" in text
+    # the direction preference is guidance, not kernel mechanics
+    assert "prefer a direction no sibling is on" not in text
     assert "as of your session start" not in text
