@@ -46,6 +46,14 @@ def _terminal_run(root: Path, run_id: str, *, state="ended", ending="negative-re
     (run_dir(root, run_id) / "report.md").write_text(REPORT)
 
 
+def _eval_dir(run_directory: Path, name: str, stdout: str) -> Path:
+    """One eval directory with its job's stdout, as the measurer leaves it."""
+    ev = run_directory / name
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "stdout").write_text(stdout)
+    return ev
+
+
 def test_collect_rows_reads_terminal_records_and_reports(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     _terminal_run(tmp_path, "speedrun-2", ending="merged")
@@ -107,10 +115,9 @@ def test_views_render_the_rows_and_respect_direction(tmp_path: Path) -> None:
     assert "best candidate: **0.7** (max)" in render_md("org/repo", two, {"acc": "max"})
     assert "best candidate: **0.3** (min)" in render_md("org/repo", two, {"acc": "min"})
     # the chart data is EMBEDDED (fetch() is blocked on a file:// page) and
-    # carries the direction
+    # carries the direction; the one fetch in the page is the optional live
+    # strip, which fails silently there
     html = render_html("org/repo", boards, {"speedrun": "min"})
-    # the CHART data is embedded (fetch is blocked on a file:// page); the one
-    # fetch in the page is the optional live strip, which fails silently there
     assert '"boards"' in html and "38146" in html
     assert html.count("fetch('") == 1 and "climb/status.json" in html
     # agent-written text cannot break out of the inline script: "<" is
@@ -596,9 +603,7 @@ def test_curves_come_from_eval_stdout_downsampled(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_POINTS, _curve_from_eval
 
     _terminal_run(tmp_path, "speedrun-1")
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc-def"
-    ev.mkdir()
-    (ev / "stdout").write_text(STDOUT_WITH_CURVE)
+    ev = _eval_dir(run_dir(tmp_path, "speedrun-1"), "eval-candidate-abc-def", STDOUT_WITH_CURVE)
     # eval output is job output: a malformed number must not abort collection
     with open(ev / "stdout", "a") as fh:
         fh.write("step 9999 val loss 1.2.3 (fp32)\n")
@@ -617,12 +622,8 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 
     _terminal_run(tmp_path, "speedrun-3")
     rd = run_dir(tmp_path, "speedrun-3")
-    worse = rd / "eval-launch-wide"
-    worse.mkdir()
-    (worse / "stdout").write_text("step 128 val loss 5.0\nstep 256 val loss 4.8\n")
-    better = rd / "eval-launch-deep"
-    better.mkdir()
-    (better / "stdout").write_text("step 128 val loss 4.9\nstep 256 val loss 3.9\n")
+    _eval_dir(rd, "eval-launch-wide", "step 128 val loss 5.0\nstep 256 val loss 4.8\n")
+    _eval_dir(rd, "eval-launch-deep", "step 128 val loss 4.9\nstep 256 val loss 3.9\n")
     # no candidate eval -> the best (lowest final) launch is used
     assert _curve_from_eval(rd) == [[128, 4.9], [256, 3.9]]
 
@@ -713,9 +714,9 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
     from outerloop.climbboard import _curve_from_eval
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
+    _eval_dir(
+        rd,
+        "eval-candidate-x",
         "step 1 val loss 4.5\n"
         f"step 2 val loss {'9' * 400}\n"
         f"step {'9' * 400} val loss 4.4\n"
@@ -723,7 +724,7 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
         "step 5 val loss 1e999\n"
         "step 3 val loss 4.3\n"
         "step 4 val loss 3.2e0\n"
-        "step 5 val loss 3.1"  # no trailing newline: the point still counts
+        "step 5 val loss 3.1",  # no trailing newline: the point still counts
     )
     assert _curve_from_eval(rd) == [[1, 4.5], [3, 4.3], [4, 3.2], [5, 3.1]]
 
@@ -732,9 +733,7 @@ def test_cap_truncation_never_publishes_a_partial_number(tmp_path: Path, monkeyp
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
+    ev = _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
     monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)  # cuts inside 4.4444
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
     # the cap is bytes, not characters: 4-byte emoji count 4x
@@ -747,9 +746,7 @@ def test_fresh_curve_bounds_a_newline_free_stdout(tmp_path: Path, monkeypatch) -
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\n" + "x" * 100_000)
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "x" * 100_000)
     monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 64)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
@@ -780,10 +777,8 @@ def test_fresh_curve_abandons_oversized_stdout(tmp_path: Path, monkeypatch) -> N
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
-        "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
+    _eval_dir(
+        rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
     )
     monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
@@ -841,9 +836,11 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
     the page rewrite instead of publishing a curveless page."""
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.1\n")
+    _eval_dir(
+        run_dir(tmp_path, "speedrun-1"),
+        "eval-candidate-abc",
+        "step 1 val loss 4.5\nstep 2 val loss 4.1\n",
+    )
 
     gh.batch_fail = True
     assert service_climb_board(tmp_path, gh, "org/repo") == 0
@@ -879,9 +876,7 @@ def test_curve_survives_a_vanishing_eval_dir(tmp_path: Path, monkeypatch) -> Non
 
     rd = tmp_path / "r"
     for name in ("eval-candidate-a", "eval-candidate-b"):
-        d = rd / name
-        d.mkdir(parents=True)
-        (d / "stdout").write_text("step 1 val loss 3.0\n")
+        _eval_dir(rd, name, "step 1 val loss 3.0\n")
     orig = Path.stat
 
     def vanishing(self, **kw):
