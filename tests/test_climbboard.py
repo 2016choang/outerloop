@@ -278,6 +278,20 @@ class _BoardGitHub:
         return True
 
 
+def _blackout(gh: _BoardGitHub, *paths: str) -> set[str]:
+    """Make gh.get_file raise 500 on `paths`; emptying the set ends the outage."""
+    dead = set(paths)
+    real = gh.get_file
+
+    def flaky(repo, path, ref):
+        if path in dead:
+            raise _GitHubError(500)
+        return real(repo, path, ref)
+
+    gh.get_file = flaky  # type: ignore[method-assign]
+    return dead
+
+
 def test_service_publishes_once_per_change(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
@@ -328,15 +342,7 @@ def test_transient_json_read_failure_never_orphans_an_indexed_benchmark(tmp_path
         [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
     )
     gh.files["climb/data/old-bench.json"] = old_rows
-    real_get = gh.get_file
-    blackout = {"climb/data/old-bench.json"}
-
-    def flaky_get(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    blackout = _blackout(gh, "climb/data/old-bench.json")
     _terminal_run(tmp_path, "speedrun-1")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert "## old-bench" not in gh.files["CLIMB.md"]  # skipped this pass...
@@ -356,15 +362,7 @@ def test_unreadable_board_json_is_never_overwritten(tmp_path: Path) -> None:
         [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 9472}]
     )
     _terminal_run(tmp_path, "speedrun-1")
-    real_get = gh.get_file
-    blackout = {"climb/data/speedrun.json"}
-
-    def flaky(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky  # type: ignore[method-assign]
+    blackout = _blackout(gh, "climb/data/speedrun.json")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert json.loads(gh.files["climb/data/speedrun.json"])[0]["run_id"] == "old-1"  # untouched
     assert json.loads(gh.files["climb/index.json"]) == {"speedrun": "min"}
@@ -854,14 +852,7 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
 
     # curve-file outage: CLIMB.md may still refresh, index.html sits out
     html_before = gh.files["index.html"]
-    real_get = gh.get_file
-
-    def flaky_get(repo, path, ref):
-        if path.startswith("climb/curves/"):
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    _blackout(gh, "climb/curves/speedrun.json")
     _terminal_run(tmp_path, "speedrun-2")
     service_climb_board(tmp_path, gh, "org/repo")
     assert gh.files["index.html"] == html_before
