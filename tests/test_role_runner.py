@@ -73,7 +73,7 @@ def test_session_error_propagates(tmp_path: Path) -> None:
 
 def test_session_error_names_an_oom_kill_during_the_session(tmp_path: Path, monkeypatch) -> None:
     # the cgroup's oom_kill counter rises across the session; the error
-    # detail names the cause ahead of the symptom
+    # detail names what was seen ahead of the symptom
     events = tmp_path / "memory.events"
     events.write_text("oom_kill 3\n")
 
@@ -82,13 +82,13 @@ def test_session_error_names_an_oom_kill_during_the_session(tmp_path: Path, monk
         def run(
             self, brief_text: str, workspace: Path, resume_session_id: str | None = None
         ) -> SessionResult:
-            events.write_text("oom_kill 4\n")  # the job's memory limit killed the bridge
+            events.write_text("oom_kill 4\n")  # an out-of-memory kill hit the cgroup
             return _session(is_error=True, error_detail="codex bridge unavailable or interrupted")
 
     monkeypatch.setattr("outerloop.role_runner._MEMORY_EVENTS", events)
     result = run_role(reviewer_spec(), OomHarness(), "brief", tmp_path)
     assert result.error == (
-        "out of memory: the job's memory limit killed a session process "
+        "an out-of-memory kill happened in this job during the session "
         "(oom_kill +1); codex bridge unavailable or interrupted"
     )
 

@@ -289,12 +289,15 @@ def run_role(
         ):
             # An OOM kill leaves the session only a symptom (the bridge's
             # blanket "unavailable or interrupted"); the cgroup's oom_kill
-            # counter names the cause, so it goes ahead of that symptom. A
-            # budget ending keeps its own detail — an experiment the session
-            # OOM-killed mid-run must not turn "caps hit" into an error.
+            # counter records it, so the observation goes ahead of that
+            # symptom. The counter counts any kill in the cgroup — the job's
+            # limit, a global OOM, or another process sharing it — so the
+            # cause names only what was seen, not who did it. A budget ending
+            # keeps its own detail — an experiment the session OOM-killed
+            # mid-run must not turn "caps hit" into an error.
             cause = (
-                "out of memory: the job's memory limit killed a session "
-                f"process (oom_kill +{killed})"
+                "an out-of-memory kill happened in this job during the "
+                f"session (oom_kill +{killed})"
             )
             session = replace(
                 session,
