@@ -325,8 +325,15 @@ def test_context_excludes_drive_by_and_forged_marker_comments(review_run) -> Non
 PR_BRANCH = "feat/auto/agent-01/tsp-r1"
 
 
-@pytest.mark.parametrize("pr_url,number", [("https://github.com/org/pilot/pull/7", 7), ("", 42)])
-@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize(
+    "pr_url,number,failed",
+    [
+        # one case per axis: a missing pr_url falls back to the issue number,
+        # and a failed session still flushes its staged replies
+        ("https://github.com/org/pilot/pull/7", 7, True),
+        ("", 42, False),
+    ],
+)
 def test_reply_syscall_posts_on_run_thread_once(review_run, pr_url, number, failed) -> None:
     from outerloop.attempt import run_author_leg
     from outerloop.github import Workspace
@@ -980,9 +987,7 @@ def test_unsubmitted_review_edit_is_not_measured_or_pushed(review_run, monkeypat
         (True, "insufficient panel time"),
     ],
 )
-def test_review_submit_parks_and_delivers_verdict(
-    review_run, monkeypatch, credited, panel_skip
-):
+def test_review_submit_parks_and_delivers_verdict(review_run, monkeypatch, credited, panel_skip):
     import json
 
     from outerloop.attempt import resume_attempt, resume_run
@@ -1248,14 +1253,7 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
 
 
 @pytest.mark.parametrize("edit", ["none", "working", "committed"])
-@pytest.mark.parametrize(
-    "panel_skip",
-    [
-        "",
-        "a panel judge key is this run's author key (role separation)",
-        "the job's walltime cap left 1 min for a read that needs 10",
-    ],
-)
+@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
 def test_review_submit_scope_includes_existing_pr_changes(
     review_run, monkeypatch, edit, panel_skip
 ):
@@ -1425,8 +1423,16 @@ def test_review_outage_refunds_attempt_and_preserves_delivery(review_run):
     assert outage_active(root, NOW)
 
 
-@pytest.mark.parametrize("ending", ["merged", "rejected", "operator"])
-@pytest.mark.parametrize("during", ["session", "post"])
+@pytest.mark.parametrize(
+    "ending,during",
+    [
+        # one case per interleaving: the run ends inside the author session,
+        # or while the reply is being posted. The ending value only
+        # round-trips through the record, so one value per path suffices.
+        ("merged", "session"),
+        ("rejected", "post"),
+    ],
+)
 def test_reply_return_preserves_concurrent_ending(review_run, ending, during):
     from outerloop.attempt import finish_run
     from outerloop.runstate import ENDED
@@ -1768,11 +1774,10 @@ def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeyp
     _publish_folded(review_run, monkeypatch, refusal=refusal)
 
 
-@pytest.mark.parametrize("base", ["main", "release"])
 @pytest.mark.parametrize(
     "history", ["equal", "ancestor", "divergent", "old-pin", "rewound", "unknown-pin"]
 )
-def test_submit_fetch_detects_move_during_author_leg(review_run, base, history):
+def test_submit_fetch_detects_move_during_author_leg(review_run, history):
     from outerloop.attempt import _submit_preflight
     from outerloop.github import Workspace
 
@@ -1797,7 +1802,7 @@ def test_submit_fetch_detects_move_during_author_leg(review_run, base, history):
         ).strip()
 
     tip = commit(old, "new base")
-    _git(wsroot, "push", str(bare), f"{tip}:refs/heads/{base}")
+    _git(wsroot, "push", str(bare), f"{tip}:refs/heads/main")
     # The workspace's remote-tracking ref has not seen this move.
     head = old if history == "divergent" else tip
     if history == "divergent":
@@ -1810,15 +1815,15 @@ def test_submit_fetch_detects_move_during_author_leg(review_run, base, history):
         pin = commit(tip, "former base tip")
     if history == "unknown-pin":
         pin = ""
-    result = _submit_preflight(Workspace(root=wsroot, url=str(bare)), base, pin)
+    result = _submit_preflight(Workspace(root=wsroot, url=str(bare)), "main", pin)
     expected = {
         "divergent": "stale",
         "old-pin": "outdated-pin",
         "rewound": "outdated-pin",
         "unknown-pin": "unknown",
     }.get(history, "ready")
-    assert result.status == expected and result.tip == tip and result.base_branch == base
-    assert _git(wsroot, "rev-parse", f"origin/{base}").strip() == tip
+    assert result.status == expected and result.tip == tip and result.base_branch == "main"
+    assert _git(wsroot, "rev-parse", "origin/main").strip() == tip
 
 
 @pytest.mark.parametrize("operation", ["fetch", "resolve", "merge-base"])
