@@ -34,6 +34,9 @@ NATIVE_MAX_SECONDS = 0.25
 # Fixed kernel index outside the workspace and HOME container mounts.
 SESSION_INDEX = "session-index.json"
 
+# A resumed session of these backends reports cumulative usage per leg.
+CUMULATIVE_BACKENDS = frozenset({"claude", "codex"})
+
 
 class NativeLookupLimit(OSError):
     """Discovery could not establish a unique source within its budget."""
@@ -444,9 +447,7 @@ def index_session(
             "record_path": record_path,
             "cost_usd": number(record["cost_usd"]),
             "verified": record["verified"],
-            # A codex resume reports the thread's cumulative usage as this
-            # leg's usage; the session id groups a thread's legs so its totals
-            # price it once (#479). Absent for entries written before this.
+            # The session id groups a cumulative backend's legs; older entries omit both.
             "backend": record.get("backend") or "",
             "session_id": record.get("session_id") or "",
         }
@@ -469,29 +470,24 @@ def index_session(
 def session_totals(directory: Path) -> dict[str, Any]:
     """Persisted totals; containment supplies authority, not file permissions.
 
-    A codex resume reports the thread's cumulative usage as the leg's usage
-    (#479), so legs of one codex session_id are never summed over the same
-    tokens: only the newest leg of each thread is priced. Entries written
-    before session ids were indexed (and every non-codex leg, whose usage is
-    per invocation) carry no grouping and keep their recorded cost.
+    A resumed session of a cumulative backend reports the whole session's
+    usage as its leg's usage, so only the newest leg of each such session is
+    priced. Entries without a session id keep their recorded cost.
     """
     try:
         sessions = read_index(directory)
     except (OSError, ValueError):
         log.warning("could not read session index in %s", directory, exc_info=True)
         sessions = {}
-    latest: dict[str, str] = {}
+    latest: dict[tuple[str, str], str] = {}
     for invocation, entry in sessions.items():
-        if entry.get("backend") == "codex" and entry.get("session_id"):
-            latest[entry["session_id"]] = invocation
+        if entry.get("backend") in CUMULATIVE_BACKENDS and entry.get("session_id"):
+            latest[(entry["backend"], entry["session_id"])] = invocation
     costs = tuple(
         number(entry["cost_usd"])
         for invocation, entry in sessions.items()
-        if not (
-            entry.get("backend") == "codex"
-            and entry.get("session_id")
-            and latest[entry["session_id"]] != invocation
-        )
+        # the default keeps untracked entries; tracked legs keep only their newest
+        if latest.get((entry.get("backend"), entry.get("session_id")), invocation) == invocation
     )
     known = sum(cost for cost in costs if cost is not None)
     unknown = sum(cost is None for cost in costs)

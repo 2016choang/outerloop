@@ -112,7 +112,9 @@ def test_prices_unknown_zero_and_cached(monkeypatch):
         assert price("model", tokens) is None
 
 
-def fake_run(backend, ws, native, prompt="brief", resume=None, *, contained=False):
+def fake_run(
+    backend, ws, native, prompt="brief", resume=None, *, contained=False, session_id="session-1"
+):
     class Adapter:
         api_key = "synthetic-secret"
         model = "test-model"
@@ -127,7 +129,7 @@ def fake_run(backend, ws, native, prompt="brief", resume=None, *, contained=Fals
                 state["prompt"] = "Prior context\n" + brief if resume_session_id else brief
             capture = workspace.parent / "capture.json"
             capture.write_text("{}")
-            return SessionResult("completed", False, 0.42, 2, "session-1", "done", str(capture))
+            return SessionResult("completed", False, 0.42, 2, session_id, "done", str(capture))
 
     return Adapter().run(prompt, ws, resume)
 
@@ -485,38 +487,42 @@ def test_codex_failed_invocation_has_unknown_cost(tmp_path, monkeypatch, failure
     assert json.loads(Path(result.session_record_path).read_text())["cost_usd"] is None
 
 
-def test_resumed_codex_thread_totals_to_its_last_leg(tmp_path, monkeypatch):
-    """A codex resume reports the thread's cumulative usage as each leg's
-    usage (#479), so three legs of one session price the thread once, at the
-    newest leg — not the sum of every leg's cumulative cost."""
-    monkeypatch.setenv(
-        "OUTERLOOP_TOKEN_PRICES",
-        json.dumps({"test-model": {"input_tokens": 2, "output_tokens": 10}}),
-    )
-    legs = [
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_resumed_session_totals_to_its_last_leg(tmp_path, monkeypatch, backend):
+    """A resumed claude or codex session reports cumulative usage per leg, so
+    three legs of one session price the session once, at the newest leg."""
+    usage_legs = [
         {"input_tokens": 100_000, "output_tokens": 5_000},
         {"input_tokens": 300_000, "output_tokens": 9_000},
         {"input_tokens": 600_000, "output_tokens": 12_000},
     ]
+    cost_legs = [0.3, 0.8, 1.32]
+    if backend == "codex":
+        monkeypatch.setenv(
+            "OUTERLOOP_TOKEN_PRICES",
+            json.dumps({"test-model": {"input_tokens": 2, "output_tokens": 10}}),
+        )
 
     class Adapter:
         api_key = "synthetic-secret"
         model = "test-model"
 
-        @capture_session("codex")
+        @capture_session(backend)
         def run(self, brief, workspace, resume_session_id=None):
-            events = [
-                {"type": "thread.started", "thread_id": "session-1"},
-                {"type": "turn.completed", "usage": legs.pop(0)},
-            ]
-            return _parse_codex_result("\n".join(map(json.dumps, events)), "done", 0)
+            if backend == "codex":
+                events = [
+                    {"type": "thread.started", "thread_id": "session-1"},
+                    {"type": "turn.completed", "usage": usage_legs.pop(0)},
+                ]
+                return _parse_codex_result("\n".join(map(json.dumps, events)), "done", 0)
+            return SessionResult("completed", False, cost_legs.pop(0), 2, "session-1", "done", "")
 
     adapter = Adapter()
     adapter.run("brief", tmp_path / "ws")
     adapter.run("wake", tmp_path / "ws", "session-1")
     adapter.run("wake again", tmp_path / "ws", "session-1")
     totals = session_totals(tmp_path)
-    assert totals["session_cost_usd"] == pytest.approx((600_000 * 2 + 12_000 * 10) / 1_000_000)
+    assert totals["session_cost_usd"] == pytest.approx(1.32)
     assert totals["captured_sessions"] == 3
 
 
@@ -599,7 +605,7 @@ def test_persisted_totals_accumulate_after_restart_and_stay_unverified(tmp_path)
         ],
         check=True,
     )
-    fake_run("claude", ws, None, contained=True)
+    fake_run("claude", ws, None, contained=True, session_id="session-2")
     totals = fresh_totals(tmp_path)
     assert totals["session_cost_usd"] == pytest.approx(1.42)
     assert totals["captured_sessions"] == 3
