@@ -3475,8 +3475,8 @@ def _shelled_judge_key_path(
     the key is named explicitly, absolute (a climb runs from a flight directory,
     so a relative path can resolve to the wrong file), and neither an author
     key nor the claude panel key (a cross-provider send would leak an anthropic
-    credential to another login). Returns the resolved path; raises ValueError
-    on a violation."""
+    credential to another login). Returns the expanded (not resolved) path;
+    callers resolve where they compare; raises ValueError on a violation."""
     raw = os.environ.get(key_file_env, "").strip()
     if not raw:
         raise ValueError(
