@@ -120,8 +120,6 @@ CATEGORIES = (
     "overfitting",
     "unsupported-claim",
     "measurement-gap",
-    "aggregation",
-    "landscape",
     "other",
 )
 
@@ -155,11 +153,6 @@ measured:
   contradicts
 - measurement-gap: noise floors, seeds, or protocol issues in the
   measurement itself
-- aggregation: ADVISORY ONLY — whether the win is one attributed mechanism
-  or an unattributed mixture of tweaks; the lab guidance below may set
-  this repository's standard
-- landscape: ADVISORY ONLY — how much sweep or ablation picture a claim
-  needs; the lab guidance below may set this repository's standard
 
 Use the contract (the rules), the ruler source (how the eval actually
 works), the claimed numbers, and the agent's own report. The report's
@@ -172,6 +165,8 @@ nothing, say so plainly — and remember your silence is not an endorsement.
 
 The summary is one short sentence naming the problem. The detail is ONE
 sentence: the evidence and why it undermines the claim. """
+    # PLAIN_STYLE stays kernel-owned: it governs the judge's OWN output
+    # formatting, not research taste (which lives in the guidance pack).
     + PLAIN_STYLE
     + """
 
@@ -181,10 +176,9 @@ contradiction between the claim and the PR's OWN evidence (a mechanism
 story the report's own numbers refute, or an improvement that a trivial
 baseline in the report's own tables beats — true even when the measured
 delta itself is real), or a scope or measurement fact that makes the
-number mislead. Research-taste judgments — how ideas are scoped or
-bundled, how much landscape or ablation a claim shows, generality and
-robustness expectations — are advisory: `blocking` false. Anything in the
-lab guidance below is advisory by construction.
+number mislead. Anything else — every research-taste judgment, including
+anything set by repository guidance, when provided below — is advisory:
+`blocking` false.
 
 Never instruct the reader to merge or reject. You are advisory."""
 )
