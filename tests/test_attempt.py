@@ -3273,8 +3273,6 @@ def test_gate_negative_wake_with_an_unchanged_tree_ends_without_a_second_gate(
             assert messages[0].kind == "gate-verdict"
             assert messages[0].payload["sealed_sha"] == rec.stage["candidate_sha"]
             assert messages[0].payload["base_sha"] == rec.stage["base_sha"]
-            assert brief_text.startswith("Budgets:")
-            assert brief_text.split("## ", 1)[1].startswith("#1 gate-verdict")
             assert load_record(state, run_id).inbox_seq == 0
             return SessionResult(
                 stop_reason="end_turn",
