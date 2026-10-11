@@ -674,8 +674,32 @@ author key file is
 `OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. On a
-cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`.
+
+The judge and steward keys are separate files, one key per role.
+`OUTERLOOP_PANEL_KEY_FILE` is the key file for the panel's Claude judges —
+the verifier's own key, never the author's. Unset reads the default
+`~/.config/outerloop/verifier_key`; set it to an absolute path (the climb
+runs from a flight directory, so a relative path can resolve to the wrong
+place). A lens on an [endpoint profile](endpoints.md) uses that
+profile's key file instead, still never the author's.
+`OUTERLOOP_PANEL_CODEX_KEY_FILE` and `OUTERLOOP_PANEL_HERMES_KEY_FILE` hold
+the codex and hermes panel lenses' keys; they have no default — a lens
+naming that backend needs the variable set to an absolute path holding that
+judge's own key, never the author's and never the Claude panel key (an
+Anthropic key must not reach another provider's login).
+`OUTERLOOP_STEWARD_KEY_FILE` is the steward's own key; the steward lane
+stays off until it is set and the target's contract declares a steward
+scope.
+
+`OUTERLOOP_CODEX_WEB_SEARCH` governs Codex's built-in web search in every
+Codex session (author, judges, reviewers). The default `auto` keeps Codex's
+own setting on native provider sessions and turns it off on endpoint
+sessions, where the provider-side tool cannot run; `off` (or any other
+value) turns it off everywhere. A role searches the web only where its spec
+grants the web tools.
+
+On a cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and
 GPU jobs are requested per node: `--gpus-per-node=N`, or `--gres=gpu:<type>:N`

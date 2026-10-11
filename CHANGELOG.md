@@ -6,6 +6,14 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Documentation
+
+- Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
+  files (`OUTERLOOP_STEWARD_KEY_FILE`, `OUTERLOOP_PANEL_KEY_FILE`,
+  `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
+  install guide, and mark the verification-loop and dispatcher design notes
+  as built (#337).
+
 ### Changed
 
 - A review round refused because the pinned harness is too old for the model,
