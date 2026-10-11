@@ -2323,10 +2323,12 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
         ("stale", "end", "fresh"),
         ("launch", "end", "replies-only"),  # no launcher wired, replies only
         ("submit", "end", "wake"),  # refusal delivered into a resume entry
-        # the author's answers after a refusal: an explicit end, a failed wake
-        # (outcome + preserved rejection), and an outage on the refusal wake
+        # the author's answers after a refusal: an explicit end, failed wakes
+        # (outcome + preserved rejection — one per session classification), and
+        # an outage on the refusal wake
         ("submit", "explicit-end", "fresh"),
         ("submit", "error", "fresh"),
+        ("submit", "budget", "fresh"),
         ("submit", "outage", "fresh"),
         # recovery: an in-scope request proceeds and only the new work is
         # charged — the measured gate, or a park when the request launches
