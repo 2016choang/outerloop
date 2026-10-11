@@ -7285,26 +7285,22 @@ def test_scope_merge_base_counts_rename_source_and_preserves_memory_filter(tmp_p
 @pytest.mark.parametrize(
     "operation,returncode,stderr,stdout,refused",
     [
-        *[
-            ("merge-base", returncode, stderr, stdout, refused)
-            for returncode, stderr, stdout, refused in [
-                (None, "", "", False),
-                (1, "", "", True),
-                (1, "I/O error", "", False),
-                (1, "", "unexpected output", False),
-                (128, "fatal: Not a valid object name missing", "", True),
-                (
-                    128,
-                    "fatal: ambiguous argument 'missing': "
-                    "unknown revision or path not in the working tree.",
-                    "",
-                    True,
-                ),
-                (128, "fatal: packed object ab0123 is corrupt", "", False),
-                (128, "fatal: cannot lock ref", "", False),
-                (2, "fatal: Not a valid object name missing", "", False),
-            ]
-        ],
+        ("merge-base", None, "", "", False),
+        ("merge-base", 1, "", "", True),
+        ("merge-base", 1, "I/O error", "", False),
+        ("merge-base", 1, "", "unexpected output", False),
+        ("merge-base", 128, "fatal: Not a valid object name missing", "", True),
+        (
+            "merge-base",
+            128,
+            "fatal: ambiguous argument 'missing': "
+            "unknown revision or path not in the working tree.",
+            "",
+            True,
+        ),
+        ("merge-base", 128, "fatal: packed object ab0123 is corrupt", "", False),
+        ("merge-base", 128, "fatal: cannot lock ref", "", False),
+        ("merge-base", 2, "fatal: Not a valid object name missing", "", False),
         ("rev-parse", 128, "fatal: Not a valid object name missing", "", True),
     ],
 )
@@ -7713,19 +7709,14 @@ def test_endpoint_unavailable_parks_and_recovers(
 @pytest.mark.parametrize(
     ("entry", "ending"),
     [
-        *[
-            ("fresh", ending)
-            for ending in [
-                "end",
-                "explicit-end",
-                "outage",
-                "timeout",
-                "budget",
-                "error",
-                "repeat",
-                "crash",
-            ]
-        ],
+        ("fresh", "end"),
+        ("fresh", "explicit-end"),
+        ("fresh", "outage"),
+        ("fresh", "timeout"),
+        ("fresh", "budget"),
+        ("fresh", "error"),
+        ("fresh", "repeat"),
+        ("fresh", "crash"),
         ("wake", "end"),
     ],
 )
