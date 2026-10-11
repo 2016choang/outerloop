@@ -1017,9 +1017,9 @@ def test_hold_launches_preserves_servicing_and_resumes(
             github=github,
             service_spec=spec,
             dry_run=dry_run,
-            # service_dry_run crosses nothing else here; riding the dry_run
-            # parametrize proves it reaches the lanes verbatim either way
-            service_dry_run=dry_run,
+            # deliberately inverted so the lane assertions below fail if the
+            # lanes ever receive dry_run instead of service_dry_run
+            service_dry_run=not dry_run,
             min_free_bytes=1,
             min_tick_s=0,
         )
@@ -1044,7 +1044,7 @@ def test_hold_launches_preserves_servicing_and_resumes(
     resumed = step(NOW + GRACE + 3)
     assert not resumed.launch_blocked
     assert getattr(resumed, lane) == ("work", "123")
-    assert lanes[lane].call_args.kwargs["dry_run"] is dry_run
+    assert lanes[lane].call_args.kwargs["dry_run"] is (not dry_run)
 
 
 def test_hold_launches_reports_without_services(tmp_path):
