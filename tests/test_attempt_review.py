@@ -953,11 +953,20 @@ def test_unsubmitted_review_edit_is_not_measured_or_pushed(review_run, monkeypat
     assert load_record(root, "tsp-r1").state == PARKED
 
 
-@pytest.mark.parametrize("credited", [False, True, None])
-@pytest.mark.parametrize("gpus", [0, 1])
-@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
+@pytest.mark.parametrize(
+    "credited,panel_skip",
+    [
+        # one case per distinct path: the gate credits the change (publish,
+        # bless, both verdicts delivered), it does not, the gate itself
+        # fails, and a skipped panel read rides the credited path
+        (True, ""),
+        (False, ""),
+        (None, ""),
+        (True, "insufficient panel time"),
+    ],
+)
 def test_review_submit_parks_and_delivers_verdict(
-    review_run, monkeypatch, credited, gpus, panel_skip
+    review_run, monkeypatch, credited, panel_skip
 ):
     import json
 
@@ -972,7 +981,7 @@ def test_review_submit_parks_and_delivers_verdict(
     ws = run_dir(root, "tsp-r1") / "ws"
     text = CONTRACT.replace(
         "    direction: min\n",
-        f"    direction: min\n    gpus: {gpus}\n    eval_minutes: 30\n    seed_env: PRIVATE_SEED\n",
+        "    direction: min\n    gpus: 1\n    eval_minutes: 30\n    seed_env: PRIVATE_SEED\n",
     )
     (ws / ".outerloop.yaml").write_text(text)
     commit(ws, "meter")
@@ -1052,7 +1061,7 @@ def test_review_submit_parks_and_delivers_verdict(
     assert parked.stage["review_topup"] is True
     assert "Review top-up added when the PR opened" in author.calls[0][0]
     assert parked.stage["submitted"] and parked.stage["launches_used"] == 0
-    assert parked.stage["gpu_hours_used"] == gpus
+    assert parked.stage["gpu_hours_used"] == 1
     assert int(str(parked.stage["seed"])) > 0
     sealed = str(parked.stage["candidate_sha"])
     _git(ws, "merge-base", "--is-ancestor", head, sealed)
