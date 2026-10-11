@@ -29,6 +29,11 @@ Versions follow [SemVer](https://semver.org).
   (the panel will not block on it); the default hypothesis, done criteria,
   PR body and brief wording changed accordingly, and stored briefs from
   earlier versions still load unchanged.
+- A second pass moved the remaining research advice out of the kernel brief
+  into the default guidance pack (when to check the sibling view, budgeting
+  experiments against the final eval, running the repo's checks before a
+  submit) and deleted the divergence-debt aside from the research-line
+  section; under `guidance: none` the brief now states mechanics only.
 
 ### Documentation
 
