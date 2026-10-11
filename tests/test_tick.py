@@ -803,6 +803,14 @@ roadmap: docs/roadmap.md
     )
 
 
+def _panel_key(root: Path, name: str = "vkey") -> Path:
+    """A usable 0600 panel key, as the preflight demands."""
+    key = root / name
+    key.write_text("k")
+    key.chmod(0o600)
+    return key
+
+
 def _run(run_id, benchmark, created, state=ENDED, ending="negative-result", target="org/pilot"):
     return RunRecord(
         run_id=run_id,
@@ -873,9 +881,7 @@ def test_self_initiated_pending_marker_blocks_duplicates(tmp_path: Path) -> None
     )
 
     contract = _self_contract()
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")  # preflight: no usable key, no launch
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
     spec = ServiceSpec(
         qos="priority",
         target="org/pilot",
@@ -1321,9 +1327,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")  # preflight: no usable key, no launch
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -1915,9 +1919,7 @@ def test_author_config_preflight_blocks_before_side_effects(
 
     # a VALID panel key, so the panel preflight passes and the AUTHOR gate is what
     # blocks below (else "submits nothing" could be the panel preflight, not us)
-    panel_key = tmp_path / "verifier_key"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path, "verifier_key")
 
     def make(**kw: Any) -> ServiceSpec:
         return ServiceSpec(
@@ -2688,9 +2690,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -2783,9 +2783,7 @@ roadmap: docs/roadmap.md
 """,
         "org/pilot",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
     spec = ServiceSpec(
         target="org/pilot",
         account="acct",
@@ -2908,9 +2906,7 @@ roadmap: docs/roadmap.md
 """,
         "org/speedrun",
     )
-    panel_key = tmp_path / "vkey"
-    panel_key.write_text("k")
-    panel_key.chmod(0o600)
+    panel_key = _panel_key(tmp_path)
 
     def spec(gpu_partition: str) -> ServiceSpec:
         return ServiceSpec(
