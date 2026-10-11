@@ -724,25 +724,26 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
     assert _curve_from_eval(rd) == [[1, 4.5], [3, 4.3], [4, 3.2], [5, 3.1]]
 
 
-def test_cap_truncation_never_publishes_a_partial_number(tmp_path: Path, monkeypatch) -> None:
+def test_curve_stdout_scan_stops_at_the_byte_cap(tmp_path: Path, monkeypatch) -> None:
+    """A verbose eval must not exhaust the tick: the scan stops at the byte
+    cap, keeping the points before it and never publishing a number the cap
+    cut in half; the cap is bytes, not characters."""
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)  # cuts inside 4.4444
+    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
+    _eval_dir(
+        rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
+    )
+    assert cb._curve_from_eval(rd) == [[1, 4.5]]  # the point beyond the cap is dropped
+    # the cut can land inside a number: the partial tail line is dropped
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
-    # the cap is bytes, not characters: 4-byte emoji count 4x
-    (ev / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
-    assert cb._curve_from_eval(rd) == [[1, 4.5]]
-
-
-def test_fresh_curve_bounds_a_newline_free_stdout(tmp_path: Path, monkeypatch) -> None:
-    """One giant line without newlines must not buffer past the cap."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
+    # one giant line without newlines must not buffer past the cap either
     _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "x" * 100_000)
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 64)
+    assert cb._curve_from_eval(rd) == [[1, 4.5]]
+    # 4-byte emoji count 4x
+    (rd / "eval-candidate-x" / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
@@ -764,19 +765,6 @@ def test_published_curves_cost_no_stdout_scan(tmp_path: Path) -> None:
     assert merged is not None
     assert asked == ["r2"]  # r1 is published: no scan
     assert merged["data"] == {"r1": [[1, 4.0]], "r2": [[2, 3.5]]}
-
-
-def test_fresh_curve_abandons_oversized_stdout(tmp_path: Path, monkeypatch) -> None:
-    """A verbose eval must not exhaust the tick: scanning stops at the
-    byte cap, keeping the points already parsed."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
-    _eval_dir(
-        rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
-    )
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
-    assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
 def test_curves_publish_capped_and_never_clobbered(tmp_path: Path) -> None:
