@@ -6,6 +6,34 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+
+- Research taste moved out of the kernel and into a configurable GUIDANCE
+  layer. Kernel agent-facing text (the author brief, the panel claim, the
+  verifier rubric) now carries only mechanics; a new top-level contract key
+  `guidance` selects the pack: `default` (the moved texts minus the
+  one-idea rule), `none`, or a repo-relative directory holding `author.md`
+  and `panel.md` (recommended location `.github/outerloop/guidance/`).
+  Guidance is read via git objects from the same ref as the contract
+  (never the working tree; a symlink blob is refused), capped at 8,000
+  characters per file, carried last in the author brief and in the panel
+  judges' prompt — outside the fence that holds the claim as untrusted
+  data — and labelled advisory; it may never point into `.outerloop/`.
+  The panel now blocks only on validity — harness
+  exploitation, ruler/seed fishing, data leakage, a confirmed claim-vs-evidence
+  contradiction, and scope and measurement facts; aggregation and landscape
+  live only in the pack (so `none` leaves validity criteria only), and the
+  taste halves of the overfitting/unsupported-claim/measurement-gap rubric
+  are advisory-only. Upgrading: the one-idea rule is no longer enforced
+  anywhere — a repository that wants it writes it into its guidance files
+  (the panel will not block on it); the default hypothesis, done criteria,
+  PR body and brief wording changed accordingly, and stored briefs from
+  earlier versions still load unchanged.
+- A second pass moved the remaining research advice out of the kernel brief
+  into the default guidance pack (when to check the sibling view, budgeting
+  experiments against the final eval, running the repo's checks before a
+  submit) and deleted the divergence-debt aside from the research-line
+  section; under `guidance: none` the brief now states mechanics only.
 ### Added
 
 - Operator `outerloop message <run-id> (<text> | --file <path>)` to append one

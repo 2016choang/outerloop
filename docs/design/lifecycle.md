@@ -121,9 +121,10 @@ inbox. Advisory findings are delivered like blocking ones; the author decides
 what to do with them. The sibling view is refreshed at every wake, not only
 at start, and `siblings` shows each live run's hypothesis and PR link, including
 runs in review. The hypothesis survives publication for the rest of the run.
-The brief asks the author to check the view before choosing a direction and
-again before a submit, and to take an unused direction unless its angle is
-distinct. This is guidance, not a kernel step. The inbox keeps a position per GitHub collection, since issue
+When to check the view — before choosing a direction and again before a
+submit, taking an unused direction unless its angle is distinct — is guidance,
+not a kernel step: the brief states the refresh, the pack carries the advice.
+The inbox keeps a position per GitHub collection, since issue
 comments, reviews and review comments carry independent id sequences, and
 delivers each message once.
 

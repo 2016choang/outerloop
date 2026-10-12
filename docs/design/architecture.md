@@ -98,8 +98,9 @@ needs inbound access is a human with the runbook.
 
 ## Task granularity
 
-A task is **one idea, one PR** — but its evaluation scope follows the
-target's artifact structure, declared in the contract:
+A task's evaluation scope follows the target's artifact structure, declared
+in the contract (how an author scopes ideas — the former one-idea-per-PR
+rule — is guidance now, not a mechanism):
 
 - *Independent solvers* (the pilot): scope = a single benchmark; one PR moves
   one metric; solvers never share code (duplication is fine in throwaway code).
@@ -114,14 +115,26 @@ Scope checks compare the full candidate tree with its merge-base against the fet
 base tip, so changes made only on the base branch do not count as author edits.
 Missing shared history refuses publication; the separate base-tip ancestry check still applies.
 
-What stays absolute regardless of scope: one idea per PR (an idea may bring
-the few changes it needs, and the report attributes each one), full-scope
+What stays absolute regardless of scope: full-scope
 reporting, and **cross-target separation** — separate clones,
 branches, budgets, and report streams per target (`runs/<target>/`,
 `lessons/<target>.md`), never cross-target code reuse. The only global artifact
 is this machinery; the only cross-project channel is process lessons in the
 notebook. Promotion of agent-written code into a target's shared library is a
 human-gated proposal like anyone else's, never implicit.
+
+**Two layers: mechanics in the kernel, taste in guidance.** Agent-facing
+kernel text carries only mechanics (how sessions end, what the report's
+fields are, the fold procedure, the anti-fabrication rules). Research
+taste — how to pick a direction, how much landscape a claim needs, what
+"publishable" means — is a GUIDANCE pack selected by the contract's
+`guidance` key: `default` (the kernel's own pack), `none`, or a
+repo-relative directory with `author.md` and `panel.md` (recommended
+`.github/outerloop/guidance/`, which agents can never write). Guidance is
+read from the same ref as the contract, rendered last and labelled
+advisory, and never blocks a claim: the panel may block only on validity
+(harness exploitation, ruler/seed fishing, data leakage, a confirmed
+claim-vs-evidence contradiction, and scope and measurement facts).
 
 ## The research loop
 
@@ -326,6 +339,7 @@ exactly what any given agent saw, and a bad run can be replayed from its brief:
 | Lessons: distilled, bounded per-target lessons file | notebook `lessons/<target>.md` | hard cap |
 | Recent history: last N run reports for this target (incl. failures) | notebook `runs/<target>/` | hard cap, newest first |
 | Budget state: remaining GPU-hours/$/PRs this week | tick weekly accounting | fixed |
+| Lab guidance: the repo's research preferences, advisory, last | contract `guidance` key | hard cap |
 
 Everything else is deliberately absent: no other targets' data (cross-target
 separation), no raw transcripts (distillation instead), no maintainer-private

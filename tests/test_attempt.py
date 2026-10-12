@@ -4860,14 +4860,96 @@ def test_line_memory_reaches_the_next_session_brief(tmp_path: Path, target_repo_
     assert "A session ends whenever" in brief
 
 
-def test_panel_claim_carries_the_one_idea_mandate() -> None:
+def test_panel_claim_carries_guidance_not_a_mandate() -> None:
     from outerloop.attempt import _panel_claim_body
+    from outerloop.verifier import MAX_CLAIM_CHARS
 
-    lines = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=True)
-    assert "ONE idea" in lines and "BLOCKING" in lines
-    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=False)
-    assert "ONE idea" not in plain
+    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text")
     assert "measured by the orchestrator" in plain
+    assert "## Lab guidance" not in plain  # guidance rides the judge prompt, never the claim
+    # the header and wrapper are priced into the report budget, so a long
+    # report cannot push the body past the fence the verify prompt caps
+    long = _panel_claim_body("tsp", 13.8, 13.1, "r" * (2 * MAX_CLAIM_CHARS))
+    assert len(long) <= MAX_CLAIM_CHARS
+    assert long.endswith("r")  # cut by the budget, not by the prompt's truncation
+
+
+@pytest.mark.parametrize("mode", ["default", "none", "files"])
+def test_guidance_layer_shapes_brief_and_claim(mode: str) -> None:
+    """The two layers: kernel text carries mechanics, the guidance pack carries
+    taste. Under every mode the retired one-idea and blocking-taste rules
+    appear nowhere in author- or judge-facing text (they are not even in the
+    default pack); the labelled guidance section appears exactly when the
+    mode supplies one — in the author brief and in the panel judges' own
+    prompt, never inside the claim body they fence as untrusted data."""
+    from outerloop.attempt import _panel_claim_body
+    from outerloop.brief import BriefInputs, build_brief, render
+    from outerloop.brief import Task as BriefTask
+    from outerloop.contract import read_guidance
+    from outerloop.review import PullRequest
+    from outerloop.verifier import build_verify_agent_brief
+
+    files = {
+        "guidance/author.md": "prefer sweeps on this repo\n",
+        "guidance/panel.md": "this repo blocks nothing on taste\n",
+    }
+    author, panel = (
+        read_guidance(files.get, "guidance")
+        if mode == "files"
+        else read_guidance(lambda name: None, mode)
+    )
+    brief = render(
+        build_brief(
+            BriefInputs(
+                task=BriefTask("h", "tsp", "e", "d"),
+                contract_text="c",
+                ruler="r",
+                guidance=author,
+            ),
+            created="t",
+        )
+    )
+    claim = _panel_claim_body("tsp", 13.8, 13.1, "report text")
+    judge_brief = build_verify_agent_brief(
+        PullRequest(
+            repo="org/pilot",
+            number=0,
+            title="[agent] tsp",
+            body=claim,
+            diff="",
+            author="bot",
+            labels=(),
+        ),
+        "contract",
+        guidance=panel,
+    )
+
+    if mode == "default":
+        assert "# Lab guidance" in brief and "## How to write" in brief
+        assert "## Lab guidance" in judge_brief and "aggregation standard" in judge_brief
+        assert "## Lab guidance" not in claim
+    elif mode == "none":
+        assert "# Lab guidance" not in brief and "How to write" not in brief
+        assert "## Lab guidance" not in judge_brief and "## Lab guidance" not in claim
+    else:
+        assert "prefer sweeps on this repo" in brief
+        assert "this repo blocks nothing on taste" in judge_brief
+        assert "this repo blocks nothing on taste" not in claim
+    # the judges' guidance precedes the fenced claim (trusted prompt), and is
+    # labelled this repository's advisory standards
+    if "## Lab guidance" in judge_brief:
+        assert judge_brief.index("## Lab guidance") < judge_brief.index("The claim (")
+        assert "advisory research standards" in judge_brief
+    # kernel text never carries the retired taste rules, in any mode — the
+    # guidance section is present, labelled, and cannot restore them as rules
+    for text in (brief, claim, judge_brief):
+        assert "One idea per PR" not in text
+        assert "ONE idea" not in text
+        assert "BLOCKING" not in text
+    if mode != "none":
+        assert "advisory" in brief.split("# Lab guidance", 1)[1][:200]
+        # last and after every kernel rule, so it cannot override them
+        assert brief.index("# Lab guidance") > brief.index("# Ground rules")
 
 
 def test_line_divergence_reaches_the_brief(tmp_path: Path, target_repo_lines) -> None:
@@ -5720,7 +5802,7 @@ def test_panel_claim_diff_excludes_the_lines_memory(tmp_path, monkeypatch) -> No
     (wsroot / "train.py").write_text("v2\n")
     seen: dict = {}
 
-    def fake_run_panel(lenses, panel_ws, claim, contract_text, today, round_no):
+    def fake_run_panel(lenses, panel_ws, claim, contract_text, today, round_no, *, guidance=""):
         seen["diff"] = claim.diff
         return PanelVerdict(blocking=(), transcript="ok")
 

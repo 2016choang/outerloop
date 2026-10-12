@@ -447,3 +447,38 @@ def test_regression_preserves_legacy_measurement_signature():
     assert b.measurement_signature() == expected
     changed = Benchmark.model_validate(b.model_dump() | {"regression": {"free_rel": 0.005}})
     assert changed.measurement_signature() != expected
+
+
+def test_guidance_reader_guards_the_channel_dir_and_caps_size():
+    """One reader, three modes: `none` is empty, `default` is the in-kernel
+    pack, a directory reads author.md/panel.md with a missing file meaning
+    empty guidance. A path into `.outerloop/` (the workspace syscall channel)
+    is refused — by the reader and at load — and each file is capped."""
+    from outerloop.contract import MAX_GUIDANCE_CHARS, read_guidance
+
+    assert read_guidance(lambda name: None, "none") == ("", "")
+    author, panel = read_guidance(lambda name: None, "default")
+    assert author and panel  # the in-kernel pack
+    files = {"guidance/author.md": "sweep first", "guidance/panel.md": "advisory only"}
+    read = lambda name: files.get(name)
+    assert read_guidance(read, "guidance") == ("sweep first", "advisory only")
+    # a missing file is empty guidance, never a contract error
+    assert read_guidance(read, "docs/guidance") == ("", "")
+    # the workspace syscall channel is never a guidance source
+    for mode in (".outerloop/guidance", ".outerloop", ".OUTERLOOP", "agent_memory/guidance"):
+        with pytest.raises(ScopeError):
+            read_guidance(read, mode)
+        with pytest.raises(ValidationError):
+            load_contract(PILOT_CONTRACT + f"\nguidance: {mode}\n", "org/repo")
+    # a guidance directory is trusted text: agents can never write it, and a
+    # scope that would let them is refused at load
+    from outerloop.contract import path_is_forbidden
+
+    guided = load_contract(PILOT_CONTRACT + "\nguidance: lab/guidance\n", "org/repo")
+    assert path_is_forbidden("lab/guidance/panel.md", guided)
+    assert not path_is_forbidden("lab/other.md", guided)
+    # oversized guidance is capped, visibly
+    big = {"guidance/author.md": "x" * (MAX_GUIDANCE_CHARS + 500)}
+    capped = read_guidance(lambda name: big.get(name), "guidance")[0]
+    assert len(capped) <= MAX_GUIDANCE_CHARS
+    assert "[truncated" in capped

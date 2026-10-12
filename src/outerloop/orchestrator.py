@@ -842,18 +842,17 @@ def make_task(
         hypothesis=hypothesis
         or (
             f"The {bench.name} solver can be improved: study the current "
-            f"implementation and the evaluation, form ONE concrete hypothesis "
-            f"for why it underperforms, and implement it."
+            f"implementation and the evaluation, and improve the benchmark's "
+            f"metric."
         ),
         benchmark=bench.name,
         # a fact about the metric, not a target to chase
         expected_effect=f"{bench.metric} ({better} is better), {current}",
         # the finish is the AUTHOR's call; the gate decides what publishes
         done_criteria=(
-            "You decide when your result is worth publishing — and a negative "
-            "result reported clearly is a success. The orchestrator re-measures "
-            f"`{bench.command}` on a private seed to verify any improvement "
-            "claim, and the PR's CI runs the repository tests"
+            "You decide when your result is worth publishing. The orchestrator "
+            f"re-measures `{bench.command}` on a private seed to verify any "
+            "improvement claim, and the PR's CI runs the repository tests"
             + (
                 "; changes touching shared paths are suite-gated, so every sibling "
                 "benchmark must satisfy its regression policy (its floor by default)"
@@ -1317,6 +1316,7 @@ def attempt_once(
     line_ref: str = "",
     line_memory: str = "",
     line_divergence: str = "",
+    guidance: str = "",
     resume_session_id: str = "",
     inbox_seq: int = 0,
     on_inbox_delivered: Callable[[int], None] | None = None,
@@ -1402,6 +1402,7 @@ def attempt_once(
         or line_ref
         or line_memory
         or line_divergence
+        or guidance
         or brief_baseline is not None
     ):
         # a resume skips build_brief entirely (the session already carries this
@@ -1417,8 +1418,8 @@ def attempt_once(
         raise ValueError(
             "resume_session_id resumes an existing session (no fresh brief); the brief-only "
             "inputs (task_hypothesis/lessons/recent_reports/report_archive/created/"
-            "line_ref/line_memory/line_divergence/brief_baseline) have no effect on a "
-            "resume — omit them"
+            "line_ref/line_memory/line_divergence/guidance/brief_baseline) have no "
+            "effect on a resume — omit them"
         )
 
     def _consume_request() -> SyscallRequest | None:
@@ -1576,6 +1577,7 @@ def attempt_once(
                 line_ref=line_ref,
                 memory=line_memory,
                 line_divergence=line_divergence,
+                guidance=guidance,
             ),
             created=created,
         )
@@ -2704,8 +2706,7 @@ def pr_body(
     body = "\n".join(
         [
             *banner,
-            f"Automated improvement attempt on `{config.benchmark}` "
-            f"(agent `{config.agent_id}`, one idea per PR).",
+            f"Automated improvement attempt on `{config.benchmark}` (agent `{config.agent_id}`).",
             "",
             "## Research report",
             "",

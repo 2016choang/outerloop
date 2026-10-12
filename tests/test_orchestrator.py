@@ -2842,6 +2842,7 @@ def test_cached_baseline_resource_identity_and_budget(tmp_path, monkeypatch, cha
 def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch, interrupt):
     from unittest.mock import Mock
 
+    from outerloop.contract import read_guidance
     from outerloop.panel import PanelVerdict
     from outerloop.review import PullRequest
     from outerloop.runstate import load_record
@@ -2884,7 +2885,9 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
             author="agentic-learning-bot",
             labels=(),
         )
-        brief = build_verify_agent_brief(pr, CONTRACT)
+        brief = build_verify_agent_brief(
+            pr, CONTRACT, guidance=read_guidance(lambda name: None, "default")[1]
+        )
         assert "documents each change's own effect" in brief
         assert "picture of the landscape" in brief
         judgment = verify_result_from_data(
@@ -2892,7 +2895,7 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
                 "findings": [
                     {
                         "summary": "Missing ablation",
-                        "category": "aggregation",
+                        "category": "other",
                         "blocking": True,
                         "confidence": "high",
                     }
@@ -2900,10 +2903,10 @@ def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch
                 "notes": "",
             }
         )
-        assert judgment.findings[0].category == "aggregation"
+        assert judgment.findings[0].category == "other"
         judgments.append(brief)
         return PanelVerdict(
-            blocking=tuple(judgment.findings), transcript="current rubric: aggregation"
+            blocking=tuple(judgment.findings), transcript="current rubric: taste advisory"
         )
 
     author = Author()
