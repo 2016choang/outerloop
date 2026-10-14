@@ -96,7 +96,9 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_QOS",
     "OUTERLOOP_APPTAINER_BIN",
     "OUTERLOOP_IMAGE",
+    "OUTERLOOP_UNCONTAINED",
     "OUTERLOOP_PANEL",
+    "OUTERLOOP_PANEL_UNCONTAINED",
     "OUTERLOOP_PANEL_KEY_FILE",
     "OUTERLOOP_PANEL_CODEX_KEY_FILE",
     "OUTERLOOP_PANEL_HERMES_KEY_FILE",
@@ -427,15 +429,23 @@ def _tick_image(values: Mapping[str, str], environ: Mapping[str, str], mode: str
     """The image the launched tick runs with, resolved the way its launch mode passes
     settings on: the resident chain's deploy step lets a settings-file line win (even
     empty, meaning no image); a local or login loop keeps the shell's value and fills
-    only what is missing from the file. Absent everywhere: the default image."""
+    only what is missing from the file. Absent everywhere: the default image.
+    OUTERLOOP_UNCONTAINED=1, resolved the same way, means no image at all."""
+    from outerloop.image import uncontained_opt_in
     from outerloop.tick import _default_image
 
-    key = "OUTERLOOP_IMAGE"
     first, second = (values, environ) if mode == "slurm" else (environ, values)
-    for source in (first, second):
-        if key in source:
-            return source[key].strip()
-    return _default_image()
+
+    def resolved(key: str) -> str | None:
+        for source in (first, second):
+            if key in source:
+                return source[key].strip()
+        return None
+
+    if uncontained_opt_in({"OUTERLOOP_UNCONTAINED": resolved("OUTERLOOP_UNCONTAINED") or ""}):
+        return ""
+    image = resolved("OUTERLOOP_IMAGE")
+    return _default_image() if image is None else image
 
 
 def missing_harness_binary(values: Mapping[str, str], environ: Mapping[str, str]) -> str:

@@ -546,6 +546,26 @@ def test_start_validates_with_the_launched_tick_image(
     assert seen and seen[0] == expected
 
 
+@pytest.mark.parametrize(
+    "mode,environ,values,expected",
+    [
+        ("slurm", {}, {"OUTERLOOP_UNCONTAINED": "1", "OUTERLOOP_IMAGE": "/f.sif"}, ""),
+        ("slurm", {"OUTERLOOP_UNCONTAINED": "1"}, {"OUTERLOOP_UNCONTAINED": "0"}, "DEFAULT"),
+        ("local", {"OUTERLOOP_UNCONTAINED": "1"}, {"OUTERLOOP_UNCONTAINED": "0"}, ""),
+        ("local", {"OUTERLOOP_UNCONTAINED": ""}, {"OUTERLOOP_IMAGE": "/f.sif"}, "/f.sif"),
+    ],
+)
+def test_start_validates_without_an_image_when_uncontained(
+    monkeypatch, mode, environ, values, expected
+):
+    # the opt-in resolves with the image's precedence, so start refuses a codex or
+    # hermes author on an uncontained deployment exactly as the tick would
+    from outerloop import cli, tick
+
+    monkeypatch.setattr(tick, "_default_image", lambda: "DEFAULT")
+    assert cli._tick_image(values, environ, mode) == expected
+
+
 @pytest.mark.parametrize("listed", [False, True])
 @pytest.mark.parametrize("name,ceiling", [("session_minutes", 240), ("session_max_turns", 300)])
 @pytest.mark.parametrize("value", [None, True, "120", 120.5, 9, 0, -1, "ceiling+1"])
