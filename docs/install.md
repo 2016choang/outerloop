@@ -684,8 +684,35 @@ author key file is
 `OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. On a
-cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`.
+
+The judge and steward keys are separate files, one key per role.
+`OUTERLOOP_PANEL_KEY_FILE` is the key file for the panel's Claude judges —
+the verifier's own key, never the author's. Unset reads the default
+`~/.config/outerloop/verifier_key`; set it to an absolute path (the climb
+runs from a flight directory, so a relative path can resolve to the wrong
+place). A lens on an [endpoint profile](endpoints.md) uses that
+profile's key file instead, still never the author's.
+`OUTERLOOP_PANEL_CODEX_KEY_FILE` and `OUTERLOOP_PANEL_HERMES_KEY_FILE` hold
+the codex and hermes panel lenses' keys; they have no default — a lens
+naming that backend needs the variable set to an absolute path holding that
+judge's own key, never the author's and never the Claude panel key (an
+Anthropic key must not reach another provider's login).
+`OUTERLOOP_STEWARD_KEY_FILE` is the steward's own key; the steward lane
+stays off until it is set and the target's contract declares a steward
+scope.
+
+`OUTERLOOP_CODEX_WEB_SEARCH` governs Codex's built-in web search in every
+Codex session (author, judges, reviewers). `auto` (the default, also when
+the value is empty) keeps Codex's own setting on native provider sessions
+and turns it off on endpoint sessions, where the provider-side tool cannot
+run; anything else means `off` everywhere (`auto` is matched
+case-insensitively, whitespace trimmed). A role whose spec grants WebSearch
+does not override this: the harness appends `web_search="disabled"` after
+the role's own `tools.web_search=true`, so `off` — and `auto` on endpoint
+sessions — always wins over the role grant.
+
+On a cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and
 GPU jobs are requested per node: `--gpus-per-node=N`, or `--gres=gpu:<type>:N`
@@ -727,6 +754,16 @@ waits until GitHub is reachable, so the issue is told. If a session in flight
 ends the run itself first, its own ending stands.
 The slot becomes free, and the next claim uses the current settings, including
 `OUTERLOOP_AUTHOR_OVERRIDES`. A paused loop must resume to process the request.
+
+To tell a run something it cannot see itself (a slot limit, a deployment change),
+use `outerloop message <run-id> (<text> | --file <path>) [--root <root>]`. The
+command appends one message to the run's inbox — the same atomic, deduplicated
+queue a PR comment lands in, so it needs no PR to exist — and renders at the run's
+next wake as a note from the operator, trusted like the kernel's own notes and
+capped like a comment. Unknown and already ended runs are refused. No new wake
+is scheduled: a parked run sees the message at the next tick, one sleeping on
+jobs when they finish, and a paused or wake-disarmed loop delivers when it
+resumes.
 
 **Live operator ceilings.** Create `<root>/limits.toml` to limit this fleet while
 leaving target contracts under their normal review process:

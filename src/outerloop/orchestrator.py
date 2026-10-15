@@ -74,6 +74,10 @@ log = logging.getLogger(__name__)
 
 EVAL_TIMEOUT_S = 1800
 MAX_REPORT_BODY = 20_000
+# times one leg of a session is resumed after stopping with nothing staged
+SILENT_STOP_RESUMES = 3
+# inbox keys of kernel notes that refuse something; a stop after one is an answer
+REFUSAL_KEYS = ("refusal:", "refused:", "capacity-refusal:", "message-refused:", "publish-refused:")
 
 
 # Environment keys the evaluator manages itself; a contract's seed_env may
@@ -150,7 +154,9 @@ class RunParked(Exception):
         judged: tuple[str, str, AttemptResult] | None = None,
         launch_afterany: str = "",
         capacity_wait: bool = False,
+        wait_note: str = "",
     ):
+        self.wait_note = wait_note
         self.capacity_wait = capacity_wait
         self.phase = phase
         # the author's launch jobs alone (a candidate park's `afterany` also
@@ -836,18 +842,17 @@ def make_task(
         hypothesis=hypothesis
         or (
             f"The {bench.name} solver can be improved: study the current "
-            f"implementation and the evaluation, form ONE concrete hypothesis "
-            f"for why it underperforms, and implement it."
+            f"implementation and the evaluation, and improve the benchmark's "
+            f"metric."
         ),
         benchmark=bench.name,
         # a fact about the metric, not a target to chase
         expected_effect=f"{bench.metric} ({better} is better), {current}",
         # the finish is the AUTHOR's call; the gate decides what publishes
         done_criteria=(
-            "You decide when your result is worth publishing — and a negative "
-            "result reported clearly is a success. The orchestrator re-measures "
-            f"`{bench.command}` on a private seed to verify any improvement "
-            "claim, and the PR's CI runs the repository tests"
+            "You decide when your result is worth publishing. The orchestrator "
+            f"re-measures `{bench.command}` on a private seed to verify any "
+            "improvement claim, and the PR's CI runs the repository tests"
             + (
                 "; changes touching shared paths are suite-gated, so every sibling "
                 "benchmark must satisfy its regression policy (its floor by default)"
@@ -1206,6 +1211,7 @@ def resume_attempt(
             phase="candidate",
             afterany=pending.afterany(),
             capacity_wait=pending.capacity_wait,
+            wait_note=pending.note,
             base_sha=base_sha,
             seed=seed,
             suite_seed=suite_seed,
@@ -1310,6 +1316,7 @@ def attempt_once(
     line_ref: str = "",
     line_memory: str = "",
     line_divergence: str = "",
+    guidance: str = "",
     resume_session_id: str = "",
     inbox_seq: int = 0,
     on_inbox_delivered: Callable[[int], None] | None = None,
@@ -1377,6 +1384,7 @@ def attempt_once(
     contract = load_contract(contract_text, config.target)
     bench = contract.benchmark(config.benchmark)
     spec = spec or author_spec()
+    leg_start_seq = inbox_seq  # the cursor before this leg delivers anything
     if not spec.execution.can_execute:
         raise ValueError("attempt_once runs an editing role; the spec must allow execution")
     if not spec.scope:
@@ -1394,6 +1402,7 @@ def attempt_once(
         or line_ref
         or line_memory
         or line_divergence
+        or guidance
         or brief_baseline is not None
     ):
         # a resume skips build_brief entirely (the session already carries this
@@ -1409,8 +1418,8 @@ def attempt_once(
         raise ValueError(
             "resume_session_id resumes an existing session (no fresh brief); the brief-only "
             "inputs (task_hypothesis/lessons/recent_reports/report_archive/created/"
-            "line_ref/line_memory/line_divergence/brief_baseline) have no effect on a "
-            "resume — omit them"
+            "line_ref/line_memory/line_divergence/guidance/brief_baseline) have no "
+            "effect on a resume — omit them"
         )
 
     def _consume_request() -> SyscallRequest | None:
@@ -1568,6 +1577,7 @@ def attempt_once(
                 line_ref=line_ref,
                 memory=line_memory,
                 line_divergence=line_divergence,
+                guidance=guidance,
             ),
             created=created,
         )
@@ -1633,6 +1643,16 @@ def attempt_once(
     baseline_note = ""
     measured: tuple[str, ...] = ()
     refused_once = False
+    # A session that stops without staging anything (an empty reply, a line of
+    # narration) is resumed with a note rather than taken as the end of the run.
+    # Bounded so a model that keeps stopping still ends.
+    silent_stops = 0
+    # A refusal delivered with this leg (or sent during it) makes the next stop
+    # an answer; pacing notes and launch results do not.
+    kernel_spoke = any(
+        m.source == "kernel" and m.key.startswith(REFUSAL_KEYS)
+        for m in pending_messages(inbox_dir, leg_start_seq)
+    )
     # Rejection protects stop/error paths; it is never a refusal limit.
     tree_rejected = False
     scope_refused = any(
@@ -1651,7 +1671,8 @@ def attempt_once(
 
     def _resume(message: Message, *, allow_checkpoint: bool = True) -> AttemptResult | None:
         """Deliver pending messages; return an ending only if the resume fails."""
-        nonlocal session
+        nonlocal session, kernel_spoke
+        kernel_spoke = kernel_spoke or not message.key.startswith("silent-stop:")
         if on_meter is not None:
             on_meter(launches_used, sleeps_used, gpu_hours_used)
         append(inbox_dir, message)
@@ -1769,7 +1790,40 @@ def attempt_once(
                 read_error = f"unhonorable syscall request: {exc}"
                 request = SyscallRequest(launches=(), problem=read_error)
             if request is None:
-                break
+                # After a kernel note, a verdict or with a PR open, stopping is
+                # a considered answer; only a plain silent stop is resumed.
+                if (
+                    launcher is None
+                    or on_stop is not None
+                    or kernel_spoke
+                    or failed_gate is not None
+                    or silent_stops >= SILENT_STOP_RESUMES
+                    or not _can_resume()
+                ):
+                    break
+                silent_stops += 1
+                failed = _resume(
+                    Message(
+                        0,
+                        "note",
+                        "kernel",
+                        inbox_thread,
+                        time.time(),
+                        f"silent-stop:{session.session_id}:{inbox_seq}:{silent_stops}",
+                        {
+                            "text": (
+                                "Your session ended without a syscall: nothing was staged "
+                                "(no launch, sleep, submit or end), so nothing ran and your "
+                                "run is still open. Continue the work. If you are done, "
+                                "stage `end --report FILE` and end your turn."
+                            ),
+                        },
+                        origin=inbox_dir.name,
+                    )
+                )
+                if failed is not None:
+                    return failed
+                continue
             # Refresh ancestry before deriving the paths admitted below.
             no_backend = (
                 "sleep is not available here: this run has no compute backend for "
@@ -2319,6 +2373,7 @@ def attempt_once(
                 phase="candidate",
                 afterany=_merge_afterany(pending.afterany(), launch_afterany),
                 capacity_wait=pending.capacity_wait,
+                wait_note=pending.note,
                 launch_afterany=launch_afterany,
                 base_sha=base_sha,
                 seed=run_seed,
@@ -2651,8 +2706,7 @@ def pr_body(
     body = "\n".join(
         [
             *banner,
-            f"Automated improvement attempt on `{config.benchmark}` "
-            f"(agent `{config.agent_id}`, one idea per PR).",
+            f"Automated improvement attempt on `{config.benchmark}` (agent `{config.agent_id}`).",
             "",
             "## Research report",
             "",

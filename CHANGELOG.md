@@ -14,12 +14,101 @@ Versions follow [SemVer](https://semver.org).
   callers follow releases without hand bumps and never run the moving branch
   with their reviewer key (#494).
 
+- Research taste moved out of the kernel and into a configurable GUIDANCE
+  layer. Kernel agent-facing text (the author brief, the panel claim, the
+  verifier rubric) now carries only mechanics; a new top-level contract key
+  `guidance` selects the pack: `default` (the moved texts minus the
+  one-idea rule), `none`, or a repo-relative directory holding `author.md`
+  and `panel.md` (recommended location `.github/outerloop/guidance/`).
+  Guidance is read via git objects from the same ref as the contract
+  (never the working tree; a symlink blob is refused), capped at 8,000
+  characters per file, carried last in the author brief and in the panel
+  judges' prompt — outside the fence that holds the claim as untrusted
+  data — and labelled advisory; it may never point into `.outerloop/`.
+  The panel now blocks only on validity — harness
+  exploitation, ruler/seed fishing, data leakage, a confirmed claim-vs-evidence
+  contradiction, and scope and measurement facts; aggregation and landscape
+  live only in the pack (so `none` leaves validity criteria only), and the
+  taste halves of the overfitting/unsupported-claim/measurement-gap rubric
+  are advisory-only. Upgrading: the one-idea rule is no longer enforced
+  anywhere — a repository that wants it writes it into its guidance files
+  (the panel will not block on it); the default hypothesis, done criteria,
+  PR body and brief wording changed accordingly, and stored briefs from
+  earlier versions still load unchanged.
+- A second pass moved the remaining research advice out of the kernel brief
+  into the default guidance pack (when to check the sibling view, budgeting
+  experiments against the final eval, running the repo's checks before a
+  submit) and deleted the divergence-debt aside from the research-line
+  section; under `guidance: none` the brief now states mechanics only.
+### Added
+
+- Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
+  note to a run's inbox, delivered at the run's next wake — no PR needed.
+  Reuses the existing `note`/`kernel` message shape, so older kernels read it
+  without a compatibility change.
+
+### Documentation
+
+- Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
+  files (`OUTERLOOP_STEWARD_KEY_FILE`, `OUTERLOOP_PANEL_KEY_FILE`,
+  `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
+  install guide, and mark the verification-loop and dispatcher design notes
+  as built (#337).
+
+### Changed
+
+- Refreshed locked dependencies to current releases admitted by the existing
+  bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
+- The `.git` guard's object read no longer derives filter-driver overrides
+  (`cat-file -e` never converts working-tree files), dropping one
+  `git config --get-regexp` subprocess from every guarded kernel git call
+  with no change to what is refused or neutralized (#512).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
   and how to fix it instead of calling it an API outage (#475).
 
 ### Fixed
 
+- A dispatched baseline or cleanly completed eval that ends with no result is
+  now an infrastructure failure: two uncharged retries, then a park naming the
+  `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
+  missing journal or `stage.wait_note` reads as zero retries / no note.
+- A codex run that slept and resumed was priced once per leg: `exec resume`
+  reports the thread's cumulative token usage as each leg's usage, so
+  `outerloop status` overstated a resumed session's cost by roughly the
+  number of legs (#479). Session totals now price a codex thread once, at
+  its newest leg. Claude Code sessions keep summing each leg's reported
+  cost: cumulative resume totals arrived only in Claude Code 2.1.277, and
+  the CLI version that ran a session is not recorded — an author override
+  can pin an older CLI whose legs are per invocation — so summing, which
+  can overstate a resumed session on a current CLI, never undercounts one
+  on an older CLI.
+  Upgrading: index entries written before this change carry no session id
+  and keep contributing their recorded cost, so resumed codex sessions
+  captured before the upgrade still overstate; totals are accurate for
+  sessions captured after upgrading.
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
+- A session that ends in error while an out-of-memory kill happens in the job
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
+- An author session that stops without staging anything (an empty reply after
+  long reasoning, or a line of narration with no command) no longer ends its
+  run as "ended without a submit". The kernel resumes the session with a note
+  that nothing ran and the run is still open, up to three times per leg. A stop
+  after a kernel note, a gate verdict, or with a PR open is still taken as the
+  agent's answer, and `end` still ends the run.
 - A Codex session that recovers from a transient error no longer ends its run
   as aborted. Codex reports a dropped or timed-out model stream as an `error`
   event ("Reconnecting... 1/5") and carries on; the kernel now counts an error

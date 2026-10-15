@@ -63,6 +63,7 @@ from outerloop.github import (
     contract_at,
     ensure_regular_git_dir,
     git_identity,
+    guidance_at,
 )
 from outerloop.harness import (
     ClaudeModelUnset,
@@ -708,6 +709,7 @@ def _park_run(
         **{k: latest.stage[k] for k in STAGE_RETAINED_KEYS if k in latest.stage},
         "phase": parked.phase,
         "capacity_wait": parked.capacity_wait,
+        "wait_note": redact(parked.wait_note, secrets),
         "base_sha": parked.base_sha,
         "candidate_sha": parked.candidate_sha,
         "candidate_authors": authors,
@@ -1349,6 +1351,7 @@ def run_author_leg(
     dispatch: DispatchSettings | None,
     github: GitHubClient,
     secrets: tuple[str, ...],
+    guidance: str = "",
     **kwargs: Any,
 ) -> AttemptResult:
     """Prepare the author channel and run a resumed leg through the orchestrator."""
@@ -1437,6 +1440,8 @@ def run_author_leg(
         if line_ref and memory.is_file() and not memory.is_symlink():
             with memory.open("rb") as stream:
                 kwargs.setdefault("line_memory", stream.read(65_536).decode("utf-8", "replace"))
+        # guidance reaches only a fresh brief; a resume keeps its first pass's
+        kwargs.setdefault("guidance", guidance)
     result = attempt_once(
         config,
         contract_text,
@@ -1506,6 +1511,8 @@ def _wake_author_sleep(
     panel_lenses: tuple[PanelLens, ...],
     issue_number: int,
     eval_minutes: int | None,
+    author_guidance: str = "",
+    panel_guidance: str = "",
     judged: tuple[str, str, AttemptResult] | None = None,
 ) -> AttemptOutcome:
     """Wake a syscall park and resume the AUTHOR: deliver the launches' results
@@ -1806,6 +1813,7 @@ def _wake_author_sleep(
             _utc_date(now),
             exclude=LINE_MEMORY_PATHS if wake_line else (),
             secrets=secrets,
+            guidance=panel_guidance,
         )
         if panel_lenses
         else None
@@ -1835,6 +1843,7 @@ def _wake_author_sleep(
             changed_paths=changed_paths,
             spec=spec,
             panel_runner=panel_runner,
+            guidance=author_guidance,
             on_inbox_delivered=acknowledge,
             tree_of=lambda sha: ws.git("rev-parse", f"{sha}^{{tree}}").strip(),
             on_stop=(lambda session: AttemptResult(outcome="review", session=session))
@@ -3001,6 +3010,9 @@ def _resume_run(
         contract_text = yaml.safe_dump(data)
         contract = load_contract(contract_text, record.target)
         bench = contract.benchmark(record.benchmark)
+    # guidance rides the SAME pinned base sha the contract read above used —
+    # never the session's working tree
+    author_guidance, panel_guidance = guidance_at(ws, base_sha, contract.guidance)
     config = RunConfig(
         target=record.target,
         benchmark=record.benchmark,
@@ -3062,6 +3074,8 @@ def _resume_run(
             panel_lenses=panel_lenses,
             issue_number=issue_number,
             eval_minutes=eval_minutes,
+            author_guidance=author_guidance,
+            panel_guidance=panel_guidance,
         )
 
     # rebuild the session from what the park saved: the (redacted) write-up and
@@ -3247,6 +3261,7 @@ def _resume_run(
                     _dt.fromtimestamp(now, _UTC).strftime("%Y-%m-%d"),
                     exclude=(LINE_MEMORY_PATHS if _line_ref_for(bench, config.agent_id) else ()),
                     secrets=secrets,
+                    guidance=panel_guidance,
                 )(baseline, candidate, str(stage.get("report", "")))
             except Exception as exc:
                 if isinstance(exc, GitError) and _is_git_tamper(exc):
@@ -3463,26 +3478,20 @@ def _resume_run(
     return outcome
 
 
-def _judge_lens_key(
+def _shelled_judge_key_path(
     *,
     backend: str,
     key_file_env: str,
     author_backend: str,
     claude_panel_path: Path,
-    image: str,
-) -> str:
-    """Resolve a non-claude judge lens's OWN key file, enforcing the three
-    separations every shelled judge shares (codex, hermes, any future
-    backend): the image is required (a judge never runs uncontained next to
-    key files), the key must be named explicitly, and it must differ from BOTH
-    the author's key of the same provider AND the claude panel key (a
-    cross-provider send would leak an anthropic credential to another login).
-    Returns the redacted key (or "" under an ADC-covered deployment)."""
-    if not image:
-        raise ValueError(
-            f"a {backend} panel lens requires --image (a shelled judge only "
-            "ever runs inside the container)"
-        )
+) -> Path:
+    """The ONE owner of the key-separation rules every shelled (codex, hermes)
+    panel judge shares — the manual climb and the tick preflight both call it:
+    the key is named explicitly, absolute (a climb runs from a flight directory,
+    so a relative path can resolve to the wrong file), and neither an author
+    key nor the claude panel key (a cross-provider send would leak an anthropic
+    credential to another login). Returns the expanded (not resolved) path;
+    callers resolve where they compare; raises ValueError on a violation."""
     raw = os.environ.get(key_file_env, "").strip()
     if not raw:
         raise ValueError(
@@ -3490,6 +3499,8 @@ def _judge_lens_key(
             "(role separation: the judge's own key, never the author's)"
         )
     path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{backend} panel key path {path} is relative; only absolute paths fly")
     for author in dict.fromkeys((author_backend, "claude", "codex", "hermes")):
         author_path = Path(resolve_author_key_file(author)).expanduser()
         if path.resolve() == author_path.resolve():
@@ -3502,7 +3513,32 @@ def _judge_lens_key(
             f"{backend} panel key file {path} is the claude panel key file "
             "(an anthropic key must never reach another provider's login)"
         )
-    return role_key(raw, backend)
+    return path
+
+
+def _judge_lens_key(
+    *,
+    backend: str,
+    key_file_env: str,
+    author_backend: str,
+    claude_panel_path: Path,
+    image: str,
+) -> str:
+    """A non-claude judge lens's OWN key: the image requirement plus the
+    shared separation rules above. Returns the redacted key (or "" under an
+    ADC-covered deployment)."""
+    if not image:
+        raise ValueError(
+            f"a {backend} panel lens requires --image (a shelled judge only "
+            "ever runs inside the container)"
+        )
+    key_path = _shelled_judge_key_path(
+        backend=backend,
+        key_file_env=key_file_env,
+        author_backend=author_backend,
+        claude_panel_path=claude_panel_path,
+    )
+    return role_key(key_path, backend)
 
 
 def _panel_lenses_from_args(
@@ -3631,29 +3667,20 @@ def _panel_lenses_from_args(
     return tuple(lenses), tuple(dict.fromkeys(secrets))
 
 
-def _panel_claim_body(
-    benchmark: str, baseline: float, candidate: float, report: str, *, lines: bool
-) -> str:
-    """The synthetic claim the panel judges. On a research-lines target the
-    one-idea mandate is part of the claim itself: the panel is the
-    backstop against a line's accumulated tweaks reaching main as one PR
-    (docs/design/research-lines.md)."""
-    mandate = (
-        "\n\nThis target runs research lines: a PR to main is ONE idea, "
-        "extracted onto the base branch. An idea may bring the few changes "
-        "it needs, such as the hyperparameters it shifts, when the report "
-        "documents each change's own effect. Independent ideas bundled "
-        "together, or a win the report does not attribute, is a BLOCKING "
-        "finding: name the pieces that should be separated."
-        if lines
-        else ""
-    )
-    return (
+def _panel_claim_body(benchmark: str, baseline: float, candidate: float, report: str) -> str:
+    """The synthetic claim the panel judges: the kernel's measured claim plus
+    the author's report and nothing else — this repository's guidance travels
+    in the judges' own prompt (run_panel's `guidance`), never inside this
+    body, which every judge prompt fences as untrusted data. The report
+    budget subtracts the actual header so the body never outgrows the cap
+    the verify prompt fences it under."""
+    header = (
         f"Automated improvement claim (pre-PR): {benchmark} "
-        f"{baseline} -> {candidate}, measured by the orchestrator.{mandate}\n\n"
+        f"{baseline} -> {candidate}, measured by the orchestrator.\n\n"
         f"## Research report\n\n*Session prose, written before "
-        f"the orchestrator measured.*\n\n{report[:MAX_CLAIM_CHARS]}"
+        f"the orchestrator measured.*\n\n"
     )
+    return f"{header}{report[: MAX_CLAIM_CHARS - len(header)]}"
 
 
 def build_panel_runner(
@@ -3670,6 +3697,7 @@ def build_panel_runner(
     exclude: tuple[str, ...] = (),
     claim_body: Callable[[float, float, str], str] | None = None,
     secrets: tuple[str, ...] = (),
+    guidance: str = "",
 ) -> Callable[[float, float, str], PanelVerdict]:
     """The git half of the pre-PR panel: prepare the two read-only checkouts
     and the synthetic claim, then hand off to `run_panel` (which owns no git).
@@ -3681,13 +3709,16 @@ def build_panel_runner(
     round because the tree changes with every revision.
 
     `claim_body` renders the claim the panel judges from (baseline,
-    candidate, report); the default is the credited improvement claim."""
+    candidate, report); the default is the credited improvement claim.
+    `guidance` is this repository's panel guidance, read from the same ref
+    as `contract_text` — carried in the judges' prompt as advisory text,
+    never inside the claim body."""
     from outerloop.review_agent import sanitize_checkout
 
     reads = {"n": start_round}
     render_claim = claim_body or (
         lambda baseline, candidate, report: _panel_claim_body(
-            benchmark, baseline, candidate, report, lines=bool(exclude)
+            benchmark, baseline, candidate, report
         )
     )
 
@@ -3749,7 +3780,9 @@ def build_panel_runner(
                 ),
                 author=bot_login,
             )
-            return run_panel(lenses, panel_ws, claim, contract_text, today, reads["n"])
+            return run_panel(
+                lenses, panel_ws, claim, contract_text, today, reads["n"], guidance=guidance
+            )
         finally:
             for name in ("base", "pr-head"):
                 _best_effort(
@@ -4700,6 +4733,14 @@ def live_attempt(
         _exclude_merge_artifacts(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
+        # guidance is read from the SAME base-branch ref the contract tree
+        # was checked out from, via git objects only (never the working
+        # tree, where a symlink could read outside the repo) — before any
+        # line checkout, so a line cannot shape its own guidance (same rule
+        # as its budgets)
+        author_guidance, panel_guidance = guidance_at(
+            ws, f"origin/{base_branch}", contract.guidance
+        )
         record = dc_replace(
             record,
             verification=contract.benchmark(config.benchmark).verification,
@@ -4915,6 +4956,7 @@ def live_attempt(
                 created[:10],
                 exclude=LINE_MEMORY_PATHS if lines_active else (),
                 secrets=secrets,
+                guidance=panel_guidance,
             )
             if panel_lenses
             else None
@@ -5020,6 +5062,7 @@ def live_attempt(
                 line_ref=line_ref,
                 line_memory=line_memory,
                 line_divergence=line_divergence,
+                guidance=author_guidance,
                 launcher=launcher,
                 watcher=(
                     _make_watcher(dispatch, run_root, run_id, workspace, config)

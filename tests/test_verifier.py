@@ -253,13 +253,20 @@ def test_gather_thread_gates_by_standing_and_orders_chronologically() -> None:
     assert "drive-by" not in authors and "forger" not in authors
 
 
-def test_aggregation_is_a_first_class_verify_category() -> None:
-    # the code owner's standard: a mixture must not clear the floor by
-    # aggregation — the judge's taste names it, the syscall
-    # clamp keeps it (a taxonomy miss would silently demote it to 'other')
+def test_taste_categories_live_only_in_the_panel_pack() -> None:
+    # the kernel rubric is validity-only: aggregation and landscape are
+    # research taste, so under `guidance: none` the judge is left with
+    # validity criteria alone — the standards ship only in the pack, and
+    # PLAIN_STYLE stays (it is the judge's own output formatting)
+    from outerloop.guidance_pack import PANEL
+    from outerloop.style import PLAIN_STYLE
     from outerloop.verifier import CATEGORIES, VERIFY_SYSTEM_PROMPT
 
-    assert "aggregation" in CATEGORIES
-    assert "documents each change's own effect" in VERIFY_SYSTEM_PROMPT
-    assert "landscape" in CATEGORIES
-    assert "picture of the landscape" in VERIFY_SYSTEM_PROMPT
+    for taste in ("aggregation", "landscape"):
+        assert taste not in CATEGORIES
+        assert taste not in VERIFY_SYSTEM_PROMPT
+    assert "confirmed VALIDITY defect" in VERIFY_SYSTEM_PROMPT
+    assert PLAIN_STYLE in VERIFY_SYSTEM_PROMPT
+    # the standards themselves are the pack's, carried as advisory guidance
+    assert "documents each change's own effect" in PANEL
+    assert "picture of the landscape" in PANEL

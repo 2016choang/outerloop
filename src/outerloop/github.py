@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from outerloop.contract import CONTRACT_NAME, find_contract
+from outerloop.contract import CONTRACT_NAME, find_contract, read_guidance
 from outerloop.markers import marker
 
 
@@ -765,7 +765,9 @@ class GitHubClient:
 
         Best-effort by design (reviewer context): directories, submodules,
         files over the API's inline limit, and missing paths all return None
-        rather than raising.
+        rather than raising. A symlink returns None too — its blob text is
+        the link target, not file content (the same refusal the git-object
+        reader applies).
         """
         api_path = (
             f"/repos/{urllib.parse.quote(repo)}/contents/"
@@ -778,6 +780,8 @@ class GitHubClient:
                 log.warning("context fetch failed for %s@%s: %s", path, ref, exc)
             return None
         if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None
+        if data.get("type") != "file":
             return None
         try:
             raw = base64.b64decode(data.get("content", ""))
@@ -1248,9 +1252,11 @@ def ensure_regular_git_dir(root: Path | None) -> None:
     sha = _head_commit_sha(git_dir) or _any_ref_sha(git_dir)
     if sha is not None:
         try:
+            # No root, so no filter-override listing: `cat-file -e` never
+            # converts working-tree files, so no filter driver can run in it.
             _run_git(
                 ["git", "-C", str(root), *SAFE_GIT_FLAGS, "cat-file", "-e", f"{sha}^{{commit}}"],
-                _git_env(None, Path(root)),
+                _git_env(None),
                 timeout=GUARD_GIT_TIMEOUT_S,  # a stalled read is refused, not waited on
             )
         except GitError as exc:
@@ -1775,3 +1781,26 @@ def contract_at(ws: Any, sha: str) -> str:
     if found is None:
         raise GitError(f"no contract at {sha} ({CONTRACT_NAME})")
     return found[1]
+
+
+def guidance_at(ws: Any, sha: str, mode: str) -> tuple[str, str]:
+    """The target's guidance texts at `sha` via Workspace.git — the same git
+    objects `contract_at` reads the contract from (a wake reads guidance at
+    the pinned base sha, never the session's working tree). This is the one
+    reader: every site reads blobs, never a checked-out file, so a symlink
+    (mode 120000 — whose `git show` text is its TARGET, not file content)
+    cannot read outside the repo or into `.outerloop/`; it is refused as
+    empty guidance, like a missing path."""
+
+    def read(name: str) -> str | None:
+        try:
+            # ls-tree names the MODE first: only a regular file is read — a
+            # path through a symlinked directory never resolves in the tree
+            meta = ws.git("ls-tree", sha, "--", name).split()
+            if not meta or meta[0] not in ("100644", "100755"):
+                return None
+            return ws.git("show", f"{sha}:{name}")
+        except GitError:
+            return None
+
+    return read_guidance(read, mode)

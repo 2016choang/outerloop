@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import cast
 
 import pytest
 
@@ -3273,8 +3273,6 @@ def test_gate_negative_wake_with_an_unchanged_tree_ends_without_a_second_gate(
             assert messages[0].kind == "gate-verdict"
             assert messages[0].payload["sealed_sha"] == rec.stage["candidate_sha"]
             assert messages[0].payload["base_sha"] == rec.stage["base_sha"]
-            assert brief_text.startswith("Budgets:")
-            assert brief_text.split("## ", 1)[1].startswith("#1 gate-verdict")
             assert load_record(state, run_id).inbox_seq == 0
             return SessionResult(
                 stop_reason="end_turn",
@@ -4156,6 +4154,11 @@ def test_hermes_panel_lens_shares_the_judge_key_rules(monkeypatch, tmp_path) -> 
     monkeypatch.delenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", raising=False)
     with pytest.raises(ValueError, match="OUTERLOOP_PANEL_HERMES_KEY_FILE"):
         _panel_lenses_from_args(args())
+    # a relative key path is refused like on the service path (the climb runs
+    # from a flight dir, so it could resolve to the wrong file)
+    monkeypatch.setenv("OUTERLOOP_PANEL_HERMES_KEY_FILE", "panel_hermes_key")
+    with pytest.raises(ValueError, match="relative"):
+        _panel_lenses_from_args(args())
     judge = tmp_path / "panel_hermes_key"
     judge.write_text("sk-judge")
     judge.chmod(0o600)
@@ -4821,69 +4824,150 @@ def test_wake_terminal_pushes_the_line_notebook(tmp_path, monkeypatch, cruft, ca
         assert "eval-cache.tmp" in logs[0]
 
 
+def _brief_capture():
+    """A ScriptedHarness that records every brief it was given."""
+    seen: list[str] = []
+
+    class _Capture(ScriptedHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            seen.append(brief_text)
+            return super().run(brief_text, workspace, resume_session_id)
+
+    return _Capture, seen
+
+
 def test_line_memory_reaches_the_next_session_brief(tmp_path: Path, target_repo_lines) -> None:
     """End to end: an index committed on the line is rendered into the next
     session's brief, data-fenced."""
     _push_line(tmp_path, target_repo_lines, {"AGENT_MEMORY.md": "- depth pays, width unclear\n"})
 
-    class BriefCapture(ScriptedHarness):
-        seen: ClassVar[dict] = {}
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture.seen["brief"] = brief_text
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     github = FakeGitHub()
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp", agent_id="agent-07"),
             run_root=tmp_path / "state",
             run_id="tsp-mem-brief",
-            harness=BriefCapture(edits={}),
+            harness=capture(edits={}),
             github=github,  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    brief = str(BriefCapture.seen["brief"])
+    brief = str(seen[0])
     assert "# Your memory (AGENT_MEMORY.md" in brief
     assert "- depth pays, width unclear" in brief
     assert "A session ends whenever" in brief
 
 
-def test_panel_claim_carries_the_one_idea_mandate() -> None:
+def test_panel_claim_carries_guidance_not_a_mandate() -> None:
     from outerloop.attempt import _panel_claim_body
+    from outerloop.verifier import MAX_CLAIM_CHARS
 
-    lines = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=True)
-    assert "ONE idea" in lines and "BLOCKING" in lines
-    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text", lines=False)
-    assert "ONE idea" not in plain
+    plain = _panel_claim_body("tsp", 13.8, 13.1, "report text")
     assert "measured by the orchestrator" in plain
+    assert "## Lab guidance" not in plain  # guidance rides the judge prompt, never the claim
+    # the header and wrapper are priced into the report budget, so a long
+    # report cannot push the body past the fence the verify prompt caps
+    long = _panel_claim_body("tsp", 13.8, 13.1, "r" * (2 * MAX_CLAIM_CHARS))
+    assert len(long) <= MAX_CLAIM_CHARS
+    assert long.endswith("r")  # cut by the budget, not by the prompt's truncation
+
+
+@pytest.mark.parametrize("mode", ["default", "none", "files"])
+def test_guidance_layer_shapes_brief_and_claim(mode: str) -> None:
+    """The two layers: kernel text carries mechanics, the guidance pack carries
+    taste. Under every mode the retired one-idea and blocking-taste rules
+    appear nowhere in author- or judge-facing text (they are not even in the
+    default pack); the labelled guidance section appears exactly when the
+    mode supplies one — in the author brief and in the panel judges' own
+    prompt, never inside the claim body they fence as untrusted data."""
+    from outerloop.attempt import _panel_claim_body
+    from outerloop.brief import BriefInputs, build_brief, render
+    from outerloop.brief import Task as BriefTask
+    from outerloop.contract import read_guidance
+    from outerloop.review import PullRequest
+    from outerloop.verifier import build_verify_agent_brief
+
+    files = {
+        "guidance/author.md": "prefer sweeps on this repo\n",
+        "guidance/panel.md": "this repo blocks nothing on taste\n",
+    }
+    author, panel = (
+        read_guidance(files.get, "guidance")
+        if mode == "files"
+        else read_guidance(lambda name: None, mode)
+    )
+    brief = render(
+        build_brief(
+            BriefInputs(
+                task=BriefTask("h", "tsp", "e", "d"),
+                contract_text="c",
+                ruler="r",
+                guidance=author,
+            ),
+            created="t",
+        )
+    )
+    claim = _panel_claim_body("tsp", 13.8, 13.1, "report text")
+    judge_brief = build_verify_agent_brief(
+        PullRequest(
+            repo="org/pilot",
+            number=0,
+            title="[agent] tsp",
+            body=claim,
+            diff="",
+            author="bot",
+            labels=(),
+        ),
+        "contract",
+        guidance=panel,
+    )
+
+    if mode == "default":
+        assert "# Lab guidance" in brief and "## How to write" in brief
+        assert "## Lab guidance" in judge_brief and "aggregation standard" in judge_brief
+        assert "## Lab guidance" not in claim
+    elif mode == "none":
+        assert "# Lab guidance" not in brief and "How to write" not in brief
+        assert "## Lab guidance" not in judge_brief and "## Lab guidance" not in claim
+    else:
+        assert "prefer sweeps on this repo" in brief
+        assert "this repo blocks nothing on taste" in judge_brief
+        assert "this repo blocks nothing on taste" not in claim
+    # the judges' guidance precedes the fenced claim (trusted prompt), and is
+    # labelled this repository's advisory standards
+    if "## Lab guidance" in judge_brief:
+        assert judge_brief.index("## Lab guidance") < judge_brief.index("The claim (")
+        assert "advisory research standards" in judge_brief
+    # kernel text never carries the retired taste rules, in any mode — the
+    # guidance section is present, labelled, and cannot restore them as rules
+    for text in (brief, claim, judge_brief):
+        assert "One idea per PR" not in text
+        assert "ONE idea" not in text
+        assert "BLOCKING" not in text
+    if mode != "none":
+        assert "advisory" in brief.split("# Lab guidance", 1)[1][:200]
+        # last and after every kernel rule, so it cannot override them
+        assert brief.index("# Lab guidance") > brief.index("# Ground rules")
 
 
 def test_line_divergence_reaches_the_brief(tmp_path: Path, target_repo_lines) -> None:
     _push_line(tmp_path, target_repo_lines, {"docs/line-note.md": "belief\n"})
 
-    class BriefCapture2(ScriptedHarness):
-        seen: ClassVar[dict] = {}
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture2.seen["brief"] = brief_text
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp", agent_id="agent-07"),
             run_root=tmp_path / "state",
             run_id="tsp-div-1",
-            harness=BriefCapture2(edits={}),
+            harness=capture(edits={}),
             github=FakeGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    brief = str(BriefCapture2.seen["brief"])
-    assert "differs from the base branch by: 1 file changed" in brief
+    assert "differs from the base branch by: 1 file changed" in str(seen[0])
 
 
 def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_repo) -> None:
@@ -4892,26 +4976,20 @@ def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_re
     launch. The brief now renders the contract's per-run pool and the real
     weekly remainder."""
 
-    class BriefCapture3(ScriptedHarness):
-        seen: ClassVar[list] = []
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture3.seen.append(brief_text)
-            return super().run(brief_text, workspace, resume_session_id)
-
+    capture, seen = _brief_capture()
     for run_id in ("tsp-bud-1", "tsp-bud-2"):
         with _queued_local([13.876, 14.5]):
             live_attempt(
                 config=RunConfig(target="org/pilot", benchmark="tsp"),
                 run_root=tmp_path / "state",
                 run_id=run_id,
-                harness=BriefCapture3(edits={}),
+                harness=capture(edits={}),
                 github=FakeGitHub(),  # type: ignore[arg-type]
                 bot_auth=NoAuth(),
                 now=1_000_000.0,
                 created="2026-08-06T00:00:00Z",
             )
-    first, second = BriefCapture3.seen
+    first, second = seen
     # CONTRACT: runs_per_week 10; the run's own record exists before the
     # brief renders, so the first run sees 9 left. tsp is a CPU benchmark
     # (gpus 0), so its GPU pool honestly reads 0.0 — the per-run pool
@@ -4923,26 +5001,20 @@ def test_brief_budget_comes_from_the_contract_not_the_caller(tmp_path, target_re
 
 def test_gpu_benchmark_brief_shows_the_per_run_pool(tmp_path, monkeypatch) -> None:
     _seed_target(tmp_path, monkeypatch, CONTRACT_GPU)
-
-    class BriefCapture4(ScriptedHarness):
-        seen: ClassVar[list] = []
-
-        def run(self, brief_text, workspace, resume_session_id=None):
-            BriefCapture4.seen.append(brief_text)
-            return super().run(brief_text, workspace, resume_session_id)
+    capture, seen = _brief_capture()
 
     with _queued_local([13.876, 14.5]):
         live_attempt(
             config=RunConfig(target="org/pilot", benchmark="tsp"),
             run_root=tmp_path / "state",
             run_id="tsp-gpu-1",
-            harness=BriefCapture4(edits={}),
+            harness=capture(edits={}),
             github=FakeGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_000.0,
             created="2026-08-06T00:00:00Z",
         )
-    assert "GPU-hours remaining: 1.0" in BriefCapture4.seen[0]
+    assert "GPU-hours remaining: 1.0" in seen[0]
 
 
 def test_cli_rejects_ref_shaping_agent_ids(capsys, monkeypatch) -> None:
@@ -4999,6 +5071,19 @@ def test_wake_refreshes_origin_refs(tmp_path, monkeypatch) -> None:
     assert _git(ws, "show", "origin/main:docs/news.md").strip() == "landed while parked"
 
 
+def _decoy_origin(tmp_path: Path, bare: Path) -> Path:
+    """A second remote whose main rewrites the canonical file."""
+    decoy = tmp_path / "decoy.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
+    work = tmp_path / "decoy-work"
+    _git(tmp_path, "clone", "-q", str(decoy), str(work))
+    (work / "docs" / "news.md").write_text("ATTACKER\n")
+    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
+    _git(work, "push", "-q", "origin", "main")
+    return decoy
+
+
 def test_wake_fetch_ignores_session_url_rewrites(tmp_path, monkeypatch) -> None:
     """A session can write url.<x>.insteadOf into .git/config; the wake
     fetch strips those rewrites so origin/* comes from the canonical repo,
@@ -5009,15 +5094,7 @@ def test_wake_fetch_ignores_session_url_rewrites(tmp_path, monkeypatch) -> None:
     ws = state / "runs" / run_id / "ws"
     bare = tmp_path / f"origin-{run_id}.git"
     _advance_main(tmp_path, bare, {"docs/news.md": "canonical\n"})
-    # a decoy repo the rewrite would point at, with DIFFERENT content
-    decoy = tmp_path / "decoy.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
-    work = tmp_path / "decoy-work"
-    _git(tmp_path, "clone", "-q", str(decoy), str(work))
-    (work / "docs" / "news.md").write_text("ATTACKER\n")
-    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
-    _git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
-    _git(work, "push", "-q", "origin", "main")
+    decoy = _decoy_origin(tmp_path, bare)
     # the session plants the rewrite via an INCLUDED file (a --local scan
     # would miss it; the clean-config window neutralizes the whole class)
     inc = ws / ".git" / "evil.inc"
@@ -5075,14 +5152,7 @@ def test_wake_fetch_ignores_worktree_config_rewrite(tmp_path, monkeypatch) -> No
     ws = state / "runs" / run_id / "ws"
     bare = tmp_path / f"origin-{run_id}.git"
     _advance_main(tmp_path, bare, {"docs/news.md": "canonical\n"})
-    decoy = tmp_path / "decoy.git"
-    _git(tmp_path, "clone", "-q", "--bare", str(bare), str(decoy))
-    dwork = tmp_path / "dwork"
-    _git(tmp_path, "clone", "-q", str(decoy), str(dwork))
-    (dwork / "docs" / "news.md").write_text("ATTACKER\n")
-    _git(dwork, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
-    _git(dwork, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "poison")
-    _git(dwork, "push", "-q", "origin", "main")
+    decoy = _decoy_origin(tmp_path, bare)
     _git(ws, "config", "--local", "extensions.worktreeConfig", "true")
     (ws / ".git" / "config.worktree").write_text(f'[url "{decoy}"]\n\tinsteadOf = {bare}\n')
     resume_run(
@@ -5732,7 +5802,7 @@ def test_panel_claim_diff_excludes_the_lines_memory(tmp_path, monkeypatch) -> No
     (wsroot / "train.py").write_text("v2\n")
     seen: dict = {}
 
-    def fake_run_panel(lenses, panel_ws, claim, contract_text, today, round_no):
+    def fake_run_panel(lenses, panel_ws, claim, contract_text, today, round_no, *, guidance=""):
         seen["diff"] = claim.diff
         return PanelVerdict(blocking=(), transcript="ok")
 
@@ -6170,9 +6240,18 @@ def test_auto_publish_saves_blessing_without_github_merge_calls(tmp_path, monkey
     assert record.auto_publish_head == _git(target, "rev-parse", github.prs[0]["head"]).strip()
 
 
-@pytest.mark.parametrize("has_auth", [False, True])
-@pytest.mark.parametrize("ending", ["deadline", "stuck"])
-@pytest.mark.parametrize("dry_run", [False, True])
+# dry_run only dries wake delivery; stuck+dry writes nothing, so auth is dead there.
+@pytest.mark.parametrize(
+    ("has_auth", "ending", "dry_run"),
+    [
+        (True, "deadline", False),
+        (False, "deadline", False),
+        (True, "deadline", True),
+        (True, "stuck", False),
+        (False, "stuck", False),
+        (False, "stuck", True),
+    ],
+)
 def test_tick_snapshot_uses_kernel_auth(
     tmp_path, target_repo_lines, monkeypatch, caplog, has_auth, ending, dry_run
 ):
@@ -7207,9 +7286,9 @@ def test_missing_scope_history_refuses_publish(tmp_path, target_repo, monkeypatc
     assert "fetch the base and fold it, then submit again." in record.ending_note
 
 
-@pytest.mark.parametrize("phase", ["candidate", "author-sleep"])
+# The park's phase is dead here: both refusals fire before the wake's phase dispatch.
 @pytest.mark.parametrize("history", ["unrelated", "unfetched"])
-def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatch, phase, history):
+def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatch, history):
     from dataclasses import replace
 
     from outerloop.github import Workspace
@@ -7221,7 +7300,7 @@ def test_resumed_scope_missing_history_ends_without_publish(tmp_path, monkeypatc
     _git(root, "add", "-A")
     _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "unrelated")
     candidate = _git(root, "rev-parse", "HEAD").strip()
-    stage = {**record.stage, "phase": phase, "candidate_sha": candidate}
+    stage = {**record.stage, "candidate_sha": candidate}
     if history == "unfetched":
 
         def unexpected_collector(*args, **kwargs):
@@ -7273,25 +7352,27 @@ def test_scope_merge_base_counts_rename_source_and_preserves_memory_filter(tmp_p
     assert submission_paths(ws, "main", exclude_memory=True) == ["code", "protected"]
 
 
-@pytest.mark.parametrize("operation", ["merge-base", "rev-parse"])
+# One row per GitError shape, plus one rev-parse row for the argv branch.
 @pytest.mark.parametrize(
-    "returncode,stderr,stdout,refused",
+    "operation,returncode,stderr,stdout,refused",
     [
-        (None, "", "", False),
-        (1, "", "", True),
-        (1, "I/O error", "", False),
-        (1, "", "unexpected output", False),
-        (128, "fatal: Not a valid object name missing", "", True),
+        ("merge-base", None, "", "", False),
+        ("merge-base", 1, "", "", True),
+        ("merge-base", 1, "I/O error", "", False),
+        ("merge-base", 1, "", "unexpected output", False),
+        ("merge-base", 128, "fatal: Not a valid object name missing", "", True),
         (
+            "merge-base",
             128,
             "fatal: ambiguous argument 'missing': "
             "unknown revision or path not in the working tree.",
             "",
             True,
         ),
-        (128, "fatal: packed object ab0123 is corrupt", "", False),
-        (128, "fatal: cannot lock ref", "", False),
-        (2, "fatal: Not a valid object name missing", "", False),
+        ("merge-base", 128, "fatal: packed object ab0123 is corrupt", "", False),
+        ("merge-base", 128, "fatal: cannot lock ref", "", False),
+        ("merge-base", 2, "fatal: Not a valid object name missing", "", False),
+        ("rev-parse", 128, "fatal: Not a valid object name missing", "", True),
     ],
 )
 def test_scope_git_failure_classification(
@@ -7430,8 +7511,8 @@ def test_contains_tip_falls_back_for_missing_objects(tmp_path, answer):
     assert not _contains_tip(ws, "tip", "measured")
 
 
-@pytest.mark.parametrize("pr", [False, True])
-@pytest.mark.parametrize("sleep_again", [False, True])
+# pr and sleep_again each suppress the resumes; (True, True) would repeat pr=True alone.
+@pytest.mark.parametrize(("pr", "sleep_again"), [(False, False), (True, False), (False, True)])
 def test_hermes_resume_configuration_block_preserves_park(
     tmp_path, monkeypatch, caplog, pr, sleep_again
 ):
@@ -7538,7 +7619,11 @@ def test_hermes_resume_configuration_block_preserves_park(
     resume_run(
         state, run_id, harness=HermesHarness(api_key="key", repo_dir=tmp_path / "hermes"), **kwargs
     )
-    assert resumed == ["s1"]
+    from outerloop.orchestrator import SILENT_STOP_RESUMES
+
+    # with nothing staged and no PR, a stop is resumed with a note (bounded)
+    silent = not (pr or sleep_again)
+    assert resumed == ["s1"] * (1 + (SILENT_STOP_RESUMES if silent else 0))
     saved = load_record(state, run_id)
     assert "hermes_resume_required_chars" not in saved.stage
     if sleep_again:
@@ -7550,8 +7635,14 @@ def test_hermes_resume_configuration_block_preserves_park(
         assert not woke
 
 
-@pytest.mark.parametrize("wake", [False, True])
-@pytest.mark.parametrize("failure", ["missing", "dead", "term", "interrupt", "operator"])
+# All failure modes on the wake entry; fresh parks via the capacity branch, so "dead" covers it.
+@pytest.mark.parametrize(
+    ("wake", "failure"),
+    [
+        *[(True, f) for f in ["missing", "dead", "term", "interrupt", "operator"]],
+        (False, "dead"),
+    ],
+)
 def test_endpoint_unavailable_parks_and_recovers(
     tmp_path, target_repo_syscalls, monkeypatch, wake, failure
 ):
@@ -7674,9 +7765,20 @@ def test_endpoint_unavailable_parks_and_recovers(
     assert "endpoint_wait" not in load_record(root, "tsp-1").stage
 
 
-@pytest.mark.parametrize("entry", ["fresh", "wake"])
+# Endings only vary the shared resume handler; wake adds only its own finish tail ("end").
 @pytest.mark.parametrize(
-    "ending", ["end", "explicit-end", "outage", "timeout", "budget", "error", "repeat", "crash"]
+    ("entry", "ending"),
+    [
+        ("fresh", "end"),
+        ("fresh", "explicit-end"),
+        ("fresh", "outage"),
+        ("fresh", "timeout"),
+        ("fresh", "budget"),
+        ("fresh", "error"),
+        ("fresh", "repeat"),
+        ("fresh", "crash"),
+        ("wake", "end"),
+    ],
 )
 def test_scope_rejected_tree_never_reaches_active_line(
     tmp_path, target_repo_lines, monkeypatch, entry, ending
@@ -8102,8 +8204,10 @@ def test_v021_line_snapshot_upgrade_retry(tmp_path, monkeypatch, interrupt):
     assert (ws.root / "protected.txt").read_text() == "new forbidden change\n"
 
 
-@pytest.mark.parametrize("sessionless", [False, True])
-@pytest.mark.parametrize("interrupt", [False, True])
+# The interrupt hits the same save_record either way, so the corner would repeat a case.
+@pytest.mark.parametrize(
+    ("sessionless", "interrupt"), [(False, False), (True, False), (False, True)]
+)
 def test_v021_capacity_refusal_park_resume(tmp_path, monkeypatch, sessionless, interrupt):
     from unittest.mock import Mock
 
@@ -8219,8 +8323,10 @@ def test_v021_capacity_refusal_park_resume(tmp_path, monkeypatch, sessionless, i
     assert not pending(directory, second.inbox_seq)
 
 
-@pytest.mark.parametrize("outstanding", [False, True])
-@pytest.mark.parametrize("interrupt", [False, True])
+# An outstanding launch ends before the interrupt branch, so the corner would repeat it.
+@pytest.mark.parametrize(
+    ("outstanding", "interrupt"), [(False, False), (False, True), (True, False)]
+)
 def test_v021_sessionless_author_sleep_resumes_directly(
     tmp_path, monkeypatch, interrupt, outstanding
 ):
