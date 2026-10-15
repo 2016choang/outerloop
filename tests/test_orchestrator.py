@@ -2626,7 +2626,8 @@ def test_scope_refusal_bounded_scope_and_prior_run_notes(tmp_path, history, larg
     assert not evaluator.calls
     note = pending(directory, 0)[-1].payload["text"]
     assert note.startswith("Refused:" if history == "none" else "Refused again:")
-    assert f"Quoted data:\n```\n{note}\n```" in harness.prompts[1]
+    lead = "The kernel reported this result:\nQuoted data:"
+    assert f"{lead}\n```\n{note}\n```" in harness.prompts[1]
     scope = note.split("Authors may change: ", 1)[1]
     assert len(scope) <= 1001
     assert scope.endswith("….")
