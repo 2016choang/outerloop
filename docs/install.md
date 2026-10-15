@@ -861,6 +861,21 @@ measurement integrity containment provides weakens along with key secrecy. Use
 it where the site already confines processes, or where that exposure is
 acceptable to you.
 
+**Multi-node benchmarks.** An uncontained Slurm deployment can measure a
+benchmark across several nodes: `nodes: 4` with `gpus: 8` makes every
+dispatched job of that benchmark (gate evals and the author's launches alike)
+hold 32 GPUs, eight on each of four nodes. The eval job `srun`s one task per
+node; each node checks the snapshot out on its own scratch and runs the
+benchmark command with `NNODES`, `NODE_RANK`, `MASTER_ADDR` and `MASTER_PORT`
+set, plus torchrun's `PET_*` defaults, so a plain
+`torchrun --nproc-per-node=8 train.py` (or just `torchrun train.py`) joins one
+rendezvous. Node 0's output is the measurement; the other nodes' output stays
+beside it as `node-<rank>.stdout` and `.stderr` for debugging. A failing node
+exits nonzero, so `srun` stops the rest rather than leaving them at the
+rendezvous. Budgets, sweep pacing and the operator's GPU ceiling count every
+node. A contained or local deployment refuses to start attempts on a contract
+with a multi-node benchmark and says why.
+
 **One machine with several GPUs.** Local mode shares the machine's GPUs across
 jobs first come first served, and launch arrays run their tasks in parallel as
 GPUs become available. `OUTERLOOP_LOCAL_GPUS` overrides automatic detection via

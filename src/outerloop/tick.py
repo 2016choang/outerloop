@@ -308,7 +308,19 @@ def _gpu_lane_error(contract: Any, benchmark: str, spec: ServiceSpec) -> str:
     park forever on a phantom eval). ANY GPU benchmark in the contract
     counts, not just the climbed one: the suite gate measures siblings.
     A backend without lanes (local compute) runs GPU jobs on the default
-    placement, so the check does not apply."""
+    placement, so the check does not apply. Multi-node benchmarks likewise
+    need an uncontained Slurm deployment: local compute is one machine, and
+    the jail has no cross-node launcher."""
+    multi_node = [
+        b.name for b in getattr(contract, "benchmarks", []) if int(getattr(b, "nodes", 1) or 1) > 1
+    ]
+    if multi_node and (spec.image or not spec.has_lanes):
+        where = "contained (a container image is set)" if spec.has_lanes else "on local compute"
+        return (
+            f"contract has multi-node benchmarks ({', '.join(multi_node)}) but this deployment "
+            f"runs {where}; multi-node jobs need an uncontained Slurm deployment "
+            "(OUTERLOOP_UNCONTAINED=1)"
+        )
     if spec.gpu_partition or spec.target in spec.gpu_lanes or not spec.has_lanes:
         return ""
     gpu_benches = [

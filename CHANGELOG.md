@@ -50,6 +50,19 @@ Versions follow [SemVer](https://semver.org).
   overrides, so a default the tick would refuse (a Codex or Hermes author
   without an image, a Codex author without a Codex model) fails at start
   instead of idling every tick.
+- Multi-node benchmarks: a benchmark's `nodes` (default 1, up to 64) spreads
+  every dispatched job over that many nodes, with `gpus` per node. The eval
+  job `srun`s one task per node; each runs the command in its own checkout
+  with `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT` and torchrun's
+  `PET_*` defaults set, node 0's output is the measurement, and a failing node
+  stops the rest. GPU-hour charges, budget checks, sweep pacing and the
+  operator's GPU ceiling count `nodes x gpus`. Uncontained Slurm deployments
+  only: a contained or local deployment refuses to launch attempts on such a
+  contract. Upgrading: one-node benchmarks keep their measurement signatures,
+  eval slots and cached baselines unchanged; cached baselines now record
+  their node count, and entries without one read as one node. A contract
+  that sets `nodes` fails to load on older kernels (unknown keys are
+  refused), so upgrade every fleet that services a target before adding it.
 - `OUTERLOOP_OPERATOR_HARNESSES` lists harness CLIs the operator supplies, such
   as a site-managed `claude` that authenticates by itself: `outerloop harness
   upgrade` (and the deployment's automatic `--used` run) never replaces them or

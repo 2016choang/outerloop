@@ -987,6 +987,7 @@ def measure_and_decide(
             seed_env=bench.seed_env or "",
             gpus=bench.gpus,
             gpu_type=str(getattr(measurer, "gpu_type", "")),
+            nodes=bench.nodes,
         )
         if bench.baseline == "cached" and cache_dir is not None
         else None
@@ -999,6 +1000,7 @@ def measure_and_decide(
         seed_env,
         seed,
         gpus=bench.gpus,
+        nodes=bench.nodes,
     )
     if cached is not None:
         plan = [m for m in plan if m.name != "baseline"]
@@ -1030,6 +1032,7 @@ def measure_and_decide(
                 seed_env=bench.seed_env or "",
                 gpus=bench.gpus,
                 gpu_type=str(getattr(measurer, "gpu_type", "")),
+                nodes=bench.nodes,
             )
     candidate = main["candidate"]
     if not improved(baseline, candidate, bench.direction, min_relative_improvement):
@@ -1081,6 +1084,7 @@ def measure_and_decide(
             seed_env=b.seed_env or "",
             seed=suite_seed,
             gpus=b.gpus,  # each sibling on ITS lane, not the climbed benchmark's
+            nodes=b.nodes,
         )
         for b in siblings
     )
@@ -1095,6 +1099,7 @@ def measure_and_decide(
             seed,
             siblings=sib_specs,
             gpus=bench.gpus,
+            nodes=bench.nodes,
         )
         if m.name.startswith("sib-")  # baseline/candidate already measured (phase 1)
     ]
@@ -1977,7 +1982,7 @@ def attempt_once(
                 request = SyscallRequest(launches=())
             # suite siblings' paired evals are charged as if measured (the
             # suite phase decides at measurement; a budget over-charges)
-            suite_gpus = tuple(b.gpus for b in contract.benchmarks if b.name != bench.name)
+            suite_gpus = tuple(b.total_gpus for b in contract.benchmarks if b.name != bench.name)
             # a `baseline: cached` gate with a warm cache runs ONE main eval
             # (the candidate); charge what will actually run (terra #178)
             main_evals = 0 if bench.verification == "self_report" else 2
@@ -1997,6 +2002,7 @@ def attempt_once(
                     seed_env=bench.seed_env or "",
                     gpus=bench.gpus,
                     gpu_type=str(getattr(measurer, "gpu_type", "")),
+                    nodes=bench.nodes,
                 ):
                     main_evals = 1
             capacity_refused = False
@@ -2008,7 +2014,7 @@ def attempt_once(
                 sleep_budget=sleep_ceiling,
                 gpu_hours_used=gpu_hours_used,
                 gpu_hour_budget=hour_ceiling,
-                gpus=bench.gpus,
+                gpus=bench.total_gpus,
                 eval_minutes_default=bench.eval_minutes or 0,
                 suite_gpus=suite_gpus,
                 main_evals=main_evals,
@@ -2017,7 +2023,9 @@ def attempt_once(
             # before either path — an author-sleep launch or a submit's sibling
             # launches — submits or records it; clamped, never refused
             request = clamp_concurrency(
-                request, gpus=bench.gpus, max_concurrent_gpus=contract.budgets.max_concurrent_gpus
+                request,
+                gpus=bench.total_gpus,
+                max_concurrent_gpus=contract.budgets.max_concurrent_gpus,
             )
             if not problem:
                 if stale_submit:
@@ -2098,7 +2106,7 @@ def attempt_once(
                     sleeps_used += 1
                     evals_charge = evals_gpu_hours(
                         request,
-                        gpus=bench.gpus,
+                        gpus=bench.total_gpus,
                         eval_minutes_default=bench.eval_minutes or 0,
                         suite_gpus=suite_gpus,
                         main_evals=main_evals,
@@ -2117,7 +2125,7 @@ def attempt_once(
                     problem = str(exc)
                     capacity_refused = True
                 else:
-                    gpu_hours_used += launches_gpu_hours(request, gpus=bench.gpus)
+                    gpu_hours_used += launches_gpu_hours(request, gpus=bench.total_gpus)
                     raise RunParked(
                         phase="author-sleep",
                         judged=failed_gate,
@@ -2368,7 +2376,7 @@ def attempt_once(
                     submitted = dc_replace(submitted, launches=())
                 else:
                     launches_used += len(submitted.launches)
-                    gpu_hours_used += launches_gpu_hours(submitted, gpus=bench.gpus)
+                    gpu_hours_used += launches_gpu_hours(submitted, gpus=bench.total_gpus)
             raise RunParked(
                 phase="candidate",
                 afterany=_merge_afterany(pending.afterany(), launch_afterany),
