@@ -43,6 +43,7 @@ from outerloop.github import (
     TokenProvider,
     Workspace,
     bot_login_from_env,
+    handoff_git_dir,
     is_own_login,
 )
 from outerloop.harness import (
@@ -441,6 +442,8 @@ def live_steward(
             STEWARD_AGENT_ID,
             auth=bot_auth,
         )
+        # the kernel→session hand-off: one check before the steward runs
+        handoff_git_dir(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
         if contract.steward is None:

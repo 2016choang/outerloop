@@ -1469,6 +1469,52 @@ def _filter_override_pairs(root: Path | None) -> list[tuple[str, str]]:
     return pairs
 
 
+# Filter listings a hand-off check remembered, keyed by resolved workspace
+# root: between hand-offs only kernel code runs, so a listing cannot go
+# stale. The entry is also the root's hand-off MARK: its presence is what
+# lets Workspace.git skip the per-call guard. A lookup MISS never populates
+# the cache, so a caller that skipped its hand-off check recomputes per call
+# and re-runs the guard — slow, never unsafe.
+_FILTER_OVERRIDES: dict[Path, list[tuple[str, str]]] = {}
+
+
+def handoff_git_dir(root: Path | None) -> None:
+    """The session-boundary check: the full guard plus the root's filter
+    listing, remembered so the kernel git calls until the next untrusted
+    launch neither re-run the guard nor re-list the filters."""
+    ensure_regular_git_dir(root)
+    if root is not None and (Path(root) / ".git").is_dir():
+        _FILTER_OVERRIDES[Path(root).resolve()] = _filter_override_pairs(root)
+
+
+def _filter_pairs_for(root: Path | None) -> list[tuple[str, str]]:
+    """The filter overrides for a root: the hand-off check's listing when one
+    is remembered (a copy — callers append the credential header), computed
+    fresh otherwise."""
+    if root is None:
+        return _filter_override_pairs(None)
+    remembered = _FILTER_OVERRIDES.get(Path(root).resolve())
+    if remembered is None:
+        return _filter_override_pairs(root)
+    return list(remembered)
+
+
+def forget_filter_overrides(root: Path | None) -> None:
+    """Drop a root's remembered listing AND hand-off mark: untrusted code is
+    about to run on it, so the next git call re-runs the guard and
+    recomputes, never reuses."""
+    if root is not None:
+        _FILTER_OVERRIDES.pop(Path(root).resolve(), None)
+
+
+def _guard_git_dir(root: Path) -> None:
+    """The per-call guard behind Workspace.git: skipped on a root a hand-off
+    checked (only kernel code has run on it since), the full check otherwise,
+    so a path no hand-off covers keeps today's per-call protection."""
+    if Path(root).resolve() not in _FILTER_OVERRIDES:
+        ensure_regular_git_dir(root)
+
+
 def _basic(token: str) -> str:
     """The Basic credential git sends for an installation or PAT token."""
     return base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -1509,7 +1555,7 @@ def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
     # for a real one during post-session verification. The kernel never
     # uses replace refs; disable them on every invocation.
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    pairs = _filter_override_pairs(root)
+    pairs = _filter_pairs_for(root)
     if token is not None:
         pairs.append(
             ("http.https://github.com/.extraheader", f"Authorization: Basic {_basic(token)}")
@@ -1558,18 +1604,20 @@ class Workspace:
     def git(self, *args: str) -> str:
         """Run a local git subcommand: no credential, no child-spawning config,
         repo-defined filter drivers neutralized. A session-reshaped .git is
-        refused before git runs (ensure_regular_git_dir, which also
-        sanitizes the config first)."""
-        ensure_regular_git_dir(self.root)
+        refused at each hand-off into kernel code (handoff_git_dir); with no
+        hand-off remembered for the root the guard runs per call instead
+        (_guard_git_dir), so an unchecked path is covered either way."""
+        _guard_git_dir(self.root)
         return _run_git(
             ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args], _git_env(None, self.root)
         )
 
     def git_network(self, *args: str) -> str:
         """Run a git subcommand that talks to the remote, with credentials.
-        The config is sanitized first (redirect sections stripped), and the
-        fetch/push pass an explicit URL + refspec, so no session-controlled
-        remote or rewrite can steer a credentialed op."""
+        The full guard runs on every call, hand-off or not, since it also
+        sanitizes the config (redirect sections stripped), and the fetch/push
+        pass an explicit URL + refspec, so no session-controlled remote or
+        rewrite can steer a credentialed op."""
         if args and args[0] not in NETWORK_GIT_COMMANDS:
             raise ValueError(f"{args[0]!r} is not a network git command")
         ensure_regular_git_dir(self.root)  # sanitizes the config first, too

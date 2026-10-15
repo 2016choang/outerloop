@@ -8,6 +8,12 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- The git safety checks now run once at each hand-off between a session and
+  kernel code (session start and return, wake start, panel read) instead
+  of on every kernel git call. Kernel git calls after a hand-off reuse its
+  filter-driver listing; launching untrusted code on the workspace drops
+  it. A workspace no hand-off covers keeps the per-call check (#512).
+
 - The advisory-review examples and install guide track the `v0` release tag
   (`@v0` with `reviewer_ref: v0`) instead of `main` or an exact release. `v0`
   moves only when a final release is cut (a new `RELEASING.md` step), so
