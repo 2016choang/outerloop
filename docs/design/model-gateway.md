@@ -33,7 +33,9 @@ author and judge session reaches by URL, whatever the backend.
   Responses support is passed through.
 - **Faithfulness rule**: the request check the bridge applies today becomes a
   gateway rule. A request with a part the gateway cannot translate faithfully
-  is refused with a clear error, the same way on every path.
+  is refused with a clear error, the same way on every path. Upstream failures
+  get the same treatment: an incomplete upstream reply reaches the session as
+  a clear retryable error, never a silent truncation.
 - **Credentials**: the gateway holds the upstream credentials (provider keys,
   self-hosted endpoint keys, cloud service accounts). Sessions receive a
   gateway key scoped to their role (author or judge) and to the models that role
@@ -42,11 +44,20 @@ author and judge session reaches by URL, whatever the backend.
   keeps its meaning.
 - **Accounting**: the gateway logs tokens per model, role and run (from a
   request header the kernel sets), as a second source next to session
-  capture.
+  capture. It is also the natural place to meter model spend against the
+  deployment's budget cap; the cap is load-bearing.
+- **Timeouts**: per route and sized to the model. Long completions from large
+  open models need a much longer request timeout than chat-sized calls; a
+  single gateway-wide limit is the wrong shape either way.
 - **Lifecycle**: an operator service with a health endpoint, pinned like the
   harnesses (`harnesses.toml`), upgraded through `outerloop harness upgrade`.
-  The kernel treats it as an endpoint: a dead gateway parks fresh runs and
-  defers wakes (the existing endpoint-wait path), it is not a session error.
+  A restart or upgrade must not stop the old gateway before in-flight
+  sessions can survive it: it drains until client retry windows have passed,
+  or a successor is up and answering before the old one stops. Harness
+  clients retry for a short window only, so an abrupt stop kills their
+  in-flight sessions. The kernel treats it as an endpoint: a dead gateway
+  parks fresh runs and defers wakes (the existing endpoint-wait path), it is
+  not a session error.
 - **Profiles**: an endpoint profile names the gateway URL and a route, for
   example `OUTERLOOP_ENDPOINT_AUTHOR_URL=http://gateway.internal:4000/v1` with
   `_MODEL=open-model`. `_API` lists the surfaces the gateway offers for that
@@ -67,7 +78,7 @@ author and judge session reaches by URL, whatever the backend.
   the endpoint-wait path already parks runs instead of failing them.
 - **Blast radius of a bad upgrade**: one pinned gateway upgrade reaches every
   session at once. Mitigation: a conformance check (below) before the pin moves,
-  and pinning, never floating.
+  pinning, never floating.
 - **Trust boundary**: today the credential lives inside each session's
   container for the session's lifetime; with a gateway it lives in one
   operator-owned process. A gateway key leaks no upstream credential, and its
@@ -87,13 +98,17 @@ author and judge session reaches by URL, whatever the backend.
 A scripted session per (harness version, upstream server) pair: tool calls,
 freeform `apply_patch`, resume, streaming, and a refused unsupported part. Run
 when either pin changes. It would have caught the Codex 0.160 tool types
-before a fleet did.
+before a fleet did. It also records each harness's client retry window, so a
+restart knows how long it must drain or keep a successor answering.
 
 ## Open questions
 
-1. Where the gateway runs on a cluster without a long-lived service host: a
-   scheduler job managed like a model server (with a successor before its
-   walltime), or a small always-on VM.
+1. Where the gateway runs on a cluster without a long-lived service host.
+   Model servers on such clusters can run as scheduler jobs under a
+   service manager that starts a successor before the current job's walltime
+   and publishes an endpoint file only once the new server answers. The same
+   managed-service pattern works for the gateway; the alternative is a small
+   always-on VM.
 2. Whether Claude Code sessions on an Anthropic-compatible server should also
    go through the gateway (uniform accounting) or stay direct (one hop fewer).
 3. Gateway key scope: per role per deployment, or per run (revoked at the run's
