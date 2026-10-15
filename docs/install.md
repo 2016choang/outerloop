@@ -93,8 +93,10 @@ That's the whole setup. Notes:
   release (never a dev or rc, never a push to `main`), so with `@v0` and
   `reviewer_ref: v0` the code that holds your reviewer key changes only when a
   release is cut. Keep the two refs the same.
-  Left unset, `reviewer_ref` defaults to `main`, which moves on every push. To
-  bump by hand instead, pin an exact release (`v0.3.0`) or a commit SHA.
+  Left unset, `reviewer_ref` defaults to `main`, which moves on every push. A
+  tag is a convention, not a lock: it trusts whoever can push tags to this
+  repository. For code that cannot change under you, pin a full commit SHA in
+  both places (or an exact release such as `v0.3.0`) and bump it by hand.
 - Silence it on one PR with the `outerloop:no-review` label.
 - Fork PRs are skipped by design: they must not reach your API key.
 - Nothing from the pull request is ever executed. The workflow checks out the
