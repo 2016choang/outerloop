@@ -97,6 +97,7 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_APPTAINER_BIN",
     "OUTERLOOP_IMAGE",
     "OUTERLOOP_UNCONTAINED",
+    "OUTERLOOP_OPERATOR_HARNESSES",
     "OUTERLOOP_PANEL",
     "OUTERLOOP_PANEL_UNCONTAINED",
     "OUTERLOOP_PANEL_KEY_FILE",
@@ -666,11 +667,22 @@ def start(args: argparse.Namespace) -> int:
             sbatch_on_path=shutil.which("sbatch") is not None,
             cwd=Path.cwd(),
         )
+        from outerloop.attempt import author_config_error
         from outerloop.author_overrides import validate_overrides
 
         try:
-            # validate with the image the tick this start launches will actually run with
-            validate_overrides({**values, **os.environ}, _tick_image(values, os.environ, plan.mode))
+            # validate with the image the tick this start launches will actually run with:
+            # every override, then the fleet default author the tick falls back to
+            settings = {**values, **os.environ}
+            image = _tick_image(values, os.environ, plan.mode)
+            validate_overrides(settings, image)
+            backend = _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, os.environ) or "claude"
+            model = author_model_setting(
+                backend, _setting_of("OUTERLOOP_AUTHOR_MODEL", values, os.environ), settings
+            )
+            error = author_config_error(backend, model, image, environ=settings)
+            if error:
+                raise StartError(f"author: {error}")
         except ValueError as exc:
             raise StartError(str(exc)) from exc
     except (StartError, ValueError, OSError) as e:

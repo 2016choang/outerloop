@@ -546,6 +546,52 @@ def test_start_validates_with_the_launched_tick_image(
     assert seen and seen[0] == expected
 
 
+@pytest.mark.parametrize("uncontained", [True, False])
+def test_start_refuses_a_default_author_that_needs_the_image(
+    monkeypatch, tmp_path, capsys, uncontained
+):
+    # the fleet default author is checked like an override: a codex default on an
+    # uncontained deployment fails at start instead of idling every tick
+    import contextlib
+
+    from outerloop import cli
+
+    image = tmp_path / "agent.sif"
+    image.write_text("")
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "OUTERLOOP_AUTHOR_BACKEND=codex\nOUTERLOOP_AUTHOR_MODEL=gpt-5.6-terra\n"
+        f"OUTERLOOP_PANEL=\nOUTERLOOP_IMAGE={image}\n"
+        + ("OUTERLOOP_UNCONTAINED=1\n" if uncontained else "")
+    )
+    env_file.chmod(0o600)
+    monkeypatch.setattr(cli, "ENV_FILE", env_file)
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(env_file))
+    for key in (
+        "OUTERLOOP_COMPUTE",
+        "OUTERLOOP_TICK_HOST",
+        "OUTERLOOP_IMAGE",
+        "OUTERLOOP_UNCONTAINED",
+        "OUTERLOOP_AUTHOR_BACKEND",
+        "OUTERLOOP_AUTHOR_MODEL",
+        "OUTERLOOP_AUTHOR_OVERRIDES",
+        "OUTERLOOP_PANEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    real_which = cli.shutil.which
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name, *a, **k: "/usr/bin/sbatch" if name == "sbatch" else real_which(name, *a, **k),
+    )
+    code = None
+    with contextlib.suppress(SystemExit):
+        code = cli.main(["start", "--dry-run", "--root", str(tmp_path / "state")])
+    err = capsys.readouterr().err
+    assert ("author: author-backend codex requires --image" in err) == uncontained
+    assert (code == 2) == uncontained
+
+
 @pytest.mark.parametrize(
     "mode,environ,values,expected",
     [

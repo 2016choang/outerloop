@@ -3623,8 +3623,8 @@ def _service_spec_from_env(
     bot_login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
     image_ok = Path(image).is_file()
     panel = os.environ.get("OUTERLOOP_PANEL", "verify,review")
-    opted_out = uncontained_opt_in()
-    if opted_out or (not image_ok and local_mode()):
+    uncontained = uncontained_opt_in()
+    if uncontained or (not image_ok and local_mode()):
         # No container: sessions run under the harness's own sandbox and
         # evaluations run bare, with the operator's own account and keys. The
         # local loop falls back to this when it has no image; any other
@@ -3641,7 +3641,7 @@ def _service_spec_from_env(
                 "as this account; the panel is %s; a codex or hermes author needs the "
                 "image (docs/install.md, running without a container)",
                 "OUTERLOOP_UNCONTAINED=1: no container"
-                if opted_out
+                if uncontained
                 else f"local mode: no container image at {image}",
                 "on by OUTERLOOP_PANEL_UNCONTAINED=1"
                 if os.environ.get("OUTERLOOP_PANEL_UNCONTAINED") == "1"
