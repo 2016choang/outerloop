@@ -21,6 +21,7 @@ The knobs that shape a climb, all optional:
 | Knob | What it decides |
 | --- | --- |
 | `seed_env`, `min_delta` / `min_delta_rel` | Paired seeding for resampled evals, and the significance floor a delta must clear — calibrate it from seed variance, the gate enforces it |
+| `regression.free_rel`, `max_rel`, `requires_gain_rel` (or absolute `free`, `max`, `requires_gain`) | Per-benchmark sibling regression allowance, independent of its win floor |
 | `eval_minutes`, `gpus` | Evals that need their own job (and GPUs) are dispatched to the cluster rather than run in the author's job |
 | `baseline: paired \| cached` | Re-measure the base tree beside every candidate, or measure it once per base and run only candidates |
 | `depth_k`, `sleep_k` | How many experiments an author may launch and how many times it may sleep for results |
@@ -28,6 +29,7 @@ The knobs that shape a climb, all optional:
 | `max_concurrent_gpus` | The pace ceiling for an author's sweeps, in GPUs: a sweep runs at most this many GPUs' worth of tasks at once (`--array=0-N%K`, K = ceiling / `gpus`). Lenient by design; unset = the author's own pace |
 | `steward.allowed` | Paths a separate stewardship lane may maintain (the ruler, the harness) — never the solver |
 | `merge: manual \| auto` | Whether a gate-and-panel-clean PR waits for a human or merges itself |
+| `guidance: default \| none \| <dir>` | Which research-taste pack the author brief and the panel judges carry, as advisory text: the kernel's default pack, nothing, or a repo-relative directory holding `author.md` and `panel.md` (recommended `.github/outerloop/guidance/`, which agents can never write) |
 | `verification: gate \| self_report` | Per-benchmark verification: kernel measurements by default, or explicitly labelled author claims |
 | `channels.siblings`, `messages`, `shared_reports`, `branches` | Contract-wide switches for kernel-mediated sharing; all default to true |
 
@@ -36,6 +38,19 @@ experiment launches and its gate evals (baseline and candidate when paired)
 draw on it, and the author sets how long its final eval may run
 (`submit --minutes`). Compute is charged to the author that spends it; it
 is never the metric. CPU benchmarks are not metered.
+
+`guidance` selects the research-taste pack: the kernel's agent-facing text
+carries only mechanics, and taste (how to pick directions, how much
+landscape a claim needs) arrives as a labelled advisory section at the end
+of the author brief and in the panel judges' prompt — never inside the
+claim body, which the judges fence as untrusted data. `default` ships the
+kernel's pack, `none` ships nothing, and a directory is read via git
+objects from the same ref as the contract — `author.md` and `panel.md`,
+each capped at 8,000 characters, a missing file meaning empty guidance
+(a symlink blob is refused). The panel never blocks on guidance; it
+blocks only on validity (harness exploitation, ruler/seed fishing, data
+leakage, a confirmed claim-vs-evidence contradiction, and scope and
+measurement facts).
 
 ```bash
 uv run python -m outerloop.contract_cli .outerloop.yaml   # validate before you push
@@ -128,3 +143,47 @@ from either the fleet author or a rebound author. Supported judge backends are
 `kind:backend:model[endpoint=judge-profile]` with their own judge credential.
 Omitted models retain today's author-model inheritance. This existing setting
 needs no additional contract pin; self-report verification bypasses the panel.
+
+### Conditional sibling regressions
+
+When shared code changes, a sibling can opt into a separate regression policy:
+
+```yaml
+- name: rollout-mem
+  command: ./bench --memory --json
+  metric: rollout_mem_bytes_f16
+  direction: min
+  min_delta_rel: 0.05
+  regression:
+    free_rel: 0.005
+    max_rel: 0.5
+    requires_gain_rel: 0.05
+```
+
+A win on this benchmark still requires at least 5% saved. As a sibling,
+regressions up to and including 0.5% are free; larger regressions below 50%
+require at least 5% measured gain on the climbed benchmark. A regression of
+50% or more is refused regardless of gain. Reports and suite verdict rows
+record the applied rule, such as `free-allowance`, `gain-unlocked`,
+`insufficient-gain`, or `hard-cap`.
+
+Use one unit family per block. Relative values are fractions of the absolute
+baseline; `free_rel` defaults to this sibling's `min_delta_rel`, or zero.
+The absolute twins `free`, `max`, and `requires_gain` use sibling metric units
+for losses and climbed metric units for gains; `free` defaults to `min_delta`,
+or zero. An empty block selects relative units when `min_delta_rel` is set,
+otherwise absolute units. The default free allowance must also be at most max.
+
+All values must be finite and nonnegative. `requires_gain_rel` needs `max_rel`
+(and `requires_gain` needs `max`). Without a cap, the free allowance is the
+entire tolerance. With a cap but no gain requirement, every regression below
+the cap is allowed. The cap is exclusive and takes precedence when free equals
+max. Non-regressing siblings pass, including when max is zero. Non-finite
+measurements fail closed. A zero sibling baseline scales relative allowances
+to zero; a zero climbed baseline cannot unlock a relative gain requirement.
+Negative baselines use their absolute magnitude as the scale.
+
+Omitting `regression` preserves the existing gate exactly: a regression is
+refused only when it exceeds the larger of the sibling's absolute and scaled
+relative significance floors. This block changes only sibling checks, not
+whether this benchmark qualifies as the climbed benchmark's improvement.

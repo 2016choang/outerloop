@@ -97,7 +97,9 @@ def test_init_install(tmp_path, monkeypatch, capsys, backend, mode):
 def test_claude_checksum_gate(tmp_path, valid):
     # Substitute only the test copy's pins, never the production verification
     # or hash tool: a small executable stands in for the 227 MB release asset.
-    payload = b"#!/bin/sh\necho '2.1.272 (Claude Code)'\n"
+    from outerloop.harness_pins import pins
+
+    payload = f"#!/bin/sh\necho '{pins('claude')['version']} (Claude Code)'\n".encode()
     asset = tmp_path / "asset"
     asset.write_bytes(payload if valid else b"untrusted")
     script = tmp_path / "installer.sh"
@@ -475,6 +477,7 @@ def test_tampered_binary_reinstalled(tmp_path, name, marker):
     if name == "codex":
         with tarfile.open(asset, "w:gz") as archive:
             archive.add(binary, arcname="codex")
+            archive.add(binary, arcname="codex-code-mode-host-x86_64-unknown-linux-musl")
     else:
         asset.write_text(payload)
     checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
@@ -486,12 +489,15 @@ def test_tampered_binary_reinstalled(tmp_path, name, marker):
         source,
     )
     script = tmp_path / "installer.sh"
+    source = source.replace(
+        'HOST_SHA256="$(pin codex code_mode_host_sha256)"', f'HOST_SHA256="{checksum}"'
+    )
     script.write_text(source)
     binary.write_text(payload + "# tampered\n")
     binary.chmod(0o755)
     sidecar = Path(f"{binary}.verified-sha256")
     sidecar.write_text(checksum if marker == "legacy" else f"{checksum} {digest}")
-    desired = {"version": version, "sha256": checksum}
+    desired = {"version": version, "sha256": checksum, "code_mode_host_sha256": checksum}
     assert not harness_cli.verified(name, binary, desired)
     shim = tmp_path / "shim"
     shim.mkdir()

@@ -35,8 +35,9 @@ jobs:
   advisory:
     # a labeled event only runs for the outerloop:review label (manual re-review)
     if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
-    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
     with:
+      reviewer_ref: v0             # keep on the same ref as the line above
       bot_login: my-bot            # PRs by this login are never reviewed
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
@@ -55,8 +56,9 @@ same reusable, different backend. Each opinion posts its own labeled round:
 ```yaml
   second-opinion:
     if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
-    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
     with:
+      reviewer_ref: v0
       bot_login: my-bot
       backend: hermes
       model: openai/gpt-5.6-terra  # any OpenRouter id
@@ -86,11 +88,17 @@ That's the whole setup. Notes:
   that's how it knows never to review its own (or your bot's) pull requests.
   If you have no bot yet, any placeholder login works.
 - **If you forked this repo**, add `reviewer_repo: your-org/outerloop` under
-  `with:` — otherwise your fork's changes never run.
-- **Pin the version in production**: `reviewer_ref: v0.1.0` (or a commit SHA).
-  The default `main` moves.
-- Silence it on one PR with the `outerloop:no-review` label. (A repo that already
-  uses the `autoresearch:*` labels keeps working — both prefixes are recognized.)
+  `with:` and point `uses:` and `reviewer_ref` at a ref your fork has —
+  otherwise your fork's changes never run.
+- **Track releases with `v0`**: maintainers move the `v0` tag to each final
+  release (never a dev or rc, never a push to `main`), so with `@v0` and
+  `reviewer_ref: v0` the code that holds your reviewer key changes only when a
+  release is cut. Keep the two refs the same.
+  Left unset, `reviewer_ref` defaults to `main`, which moves on every push. A
+  tag is a convention, not a lock: it trusts whoever can push tags to this
+  repository. For code that cannot change under you, pin a full commit SHA in
+  both places (or an exact release such as `v0.3.0`) and bump it by hand.
+- Silence it on one PR with the `outerloop:no-review` label.
 - Fork PRs are skipped by design: they must not reach your API key.
 - Nothing from the pull request is ever executed. The workflow checks out the
   reviewer, not your PR's code.
@@ -122,7 +130,9 @@ permissions:
 concurrency: maintenance
 jobs:
   digest:
-    uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@v0
+    with:
+      reviewer_ref: v0
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
 ```
@@ -301,7 +311,7 @@ Use `--no-install-harness` to skip this step. To install by hand from the
 outerloop checkout, run `bash scripts/install_claude.sh [target_path]` or
 `bash scripts/install_codex.sh [target_path]`, then rerun `outerloop init --force`.
 The default target is `$OUTERLOOP_<BACKEND>_BIN`, else `~/.local/bin/<backend>`.
-Claude 2.1.272 is pinned for Linux x64 (glibc/musl) and ARM64; other platforms
+Claude 2.1.285 is pinned for Linux x64 (glibc/musl) and ARM64; other platforms
 are refused. Installation needs `curl`, `sha256sum`, and a writable target
 directory. Hermes runs authors and reviewers, provisioned with
 `bash scripts/install_hermes.sh [target_dir]`.
@@ -675,8 +685,35 @@ author key file is
 `OUTERLOOP_CODEX_KEY_FILE`; `init` writes the key to
 `~/.config/outerloop/<backend>_key`, 0600). A Codex author always runs contained,
 so it also needs the image
-(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`. On a
-cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
+(`OUTERLOOP_IMAGE`) and a Codex model in `OUTERLOOP_AUTHOR_MODEL`.
+
+The judge and steward keys are separate files, one key per role.
+`OUTERLOOP_PANEL_KEY_FILE` is the key file for the panel's Claude judges —
+the verifier's own key, never the author's. Unset reads the default
+`~/.config/outerloop/verifier_key`; set it to an absolute path (the climb
+runs from a flight directory, so a relative path can resolve to the wrong
+place). A lens on an [endpoint profile](endpoints.md) uses that
+profile's key file instead, still never the author's.
+`OUTERLOOP_PANEL_CODEX_KEY_FILE` and `OUTERLOOP_PANEL_HERMES_KEY_FILE` hold
+the codex and hermes panel lenses' keys; they have no default — a lens
+naming that backend needs the variable set to an absolute path holding that
+judge's own key, never the author's and never the Claude panel key (an
+Anthropic key must not reach another provider's login).
+`OUTERLOOP_STEWARD_KEY_FILE` is the steward's own key; the steward lane
+stays off until it is set and the target's contract declares a steward
+scope.
+
+`OUTERLOOP_CODEX_WEB_SEARCH` governs Codex's built-in web search in every
+Codex session (author, judges, reviewers). `auto` (the default, also when
+the value is empty) keeps Codex's own setting on native provider sessions
+and turns it off on endpoint sessions, where the provider-side tool cannot
+run; anything else means `off` everywhere (`auto` is matched
+case-insensitively, whitespace trimmed). A role whose spec grants WebSearch
+does not override this: the harness appends `web_search="disabled"` after
+the role's own `tools.web_search=true`, so `off` — and `auto` on endpoint
+sessions — always wins over the role grant.
+
+On a cluster, evals run inside the Apptainer image at `OUTERLOOP_IMAGE` (default
 `~/outerloop-images/agent-py312.sif`) in a jail that binds only the
 checked-out tree — an eval that needs data must fetch it into the tree, and
 GPU jobs are requested per node: `--gpus-per-node=N`, or `--gres=gpu:<type>:N`
@@ -718,6 +755,16 @@ waits until GitHub is reachable, so the issue is told. If a session in flight
 ends the run itself first, its own ending stands.
 The slot becomes free, and the next claim uses the current settings, including
 `OUTERLOOP_AUTHOR_OVERRIDES`. A paused loop must resume to process the request.
+
+To tell a run something it cannot see itself (a slot limit, a deployment change),
+use `outerloop message <run-id> (<text> | --file <path>) [--root <root>]`. The
+command appends one message to the run's inbox — the same atomic, deduplicated
+queue a PR comment lands in, so it needs no PR to exist — and renders at the run's
+next wake as a note from the operator, trusted like the kernel's own notes and
+capped like a comment. Unknown and already ended runs are refused. No new wake
+is scheduled: a parked run sees the message at the next tick, one sleeping on
+jobs when they finish, and a paused or wake-disarmed loop delivers when it
+resumes.
 
 **Live operator ceilings.** Create `<root>/limits.toml` to limit this fleet while
 leaving target contracts under their normal review process:

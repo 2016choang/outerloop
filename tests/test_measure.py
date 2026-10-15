@@ -277,7 +277,7 @@ def test_timeout_right_after_submit_is_named(tmp_path):
     submitted: list = []
     m = _measurer(tmp_path, submitted, states={"101": "TIMEOUT"})
     with pytest.raises(EvalError, match=r"hit its walltime \(TIMEOUT\).*more minutes"):
-        m.results(_measures())
+        m.results([_measures()[1]])
     assert len(submitted) == 1
 
 
@@ -577,8 +577,8 @@ def test_dispatched_cache_resource_identity(tmp_path, gpus, gpu_type, reused):
         assert len(submitted) == 1
 
 
-@pytest.fixture
-def legacy_eval_run(tmp_path):
+@pytest.fixture(params=["pre_gpu", "v021"])
+def legacy_eval_run(tmp_path, request):
     """Copy durable output from the previous kernel, without new-code writers."""
     import shutil
 
@@ -587,6 +587,15 @@ def legacy_eval_run(tmp_path):
 
     def copy(state):
         run_dir = tmp_path / state
+        if request.param == "v021":
+            release = Path(__file__).parent / "fixtures/rc1_v021"
+            release_identity = json.loads((release / "identity.json").read_text())
+            shutil.copytree(release / "eval-run", run_dir)
+            if state == "inflight":
+                slot = run_dir / ("eval-" + release_identity["slot"])
+                (slot / "exit-code").unlink()
+                (slot / "stdout").unlink()
+            return run_dir, release_identity
         shutil.copytree(source / state, run_dir)
         return run_dir, identity
 
@@ -649,3 +658,104 @@ def test_legacy_slot_is_miss_and_redispatch_is_idempotent(
     _land(resumed, measure, 0.9)
     assert replace(resumed).results([measure]) == {"candidate": 0.9}
     assert len(submitted) == 1
+
+
+@pytest.mark.parametrize("name", ["baseline", "sib-tsp-base", "candidate"])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_no_result_baseline_retries_then_parks_for_an_operator(
+    tmp_path, name, interrupt, monkeypatch
+):
+    """A dispatched baseline, suite baseline, or cleanly completed candidate
+    that ends with no result is an infrastructure failure, not a negative
+    result: two uncharged re-dispatches — the count survives restarts, and a
+    repeated delivery of one job counts once — then a park whose note names
+    the file an operator deletes."""
+    from outerloop.operator_limits import CapacityError
+
+    measure = Measure(name, "sha", "cmd", "r2")
+    submitted: list = []
+    states = {"100": "COMPLETED"}
+    m = _measurer(tmp_path, submitted, states=states)
+    _dispatched(m, measure, job="100")  # the original dispatch, no journal
+    write_text = Path.write_text
+    marker = m._ev(measure) / "submitted"
+
+    def interrupted_write(path, *args, **kwargs):
+        if path == marker:
+            raise KeyboardInterrupt
+        return write_text(path, *args, **kwargs)
+
+    def rejected_submit(spec):
+        raise CapacityError("submission unavailable")
+
+    for retry in (1, 2):
+        m = _measurer(tmp_path, submitted, states=states)  # a fresh process per wake
+        states[str(100 + retry)] = "PENDING"  # the retry job is in queue
+        with monkeypatch.context() as patch:
+            patch.setattr(m.compute, "submit", rejected_submit)
+            with pytest.raises(MeasurementPending) as waiting:
+                m.results([measure])
+            assert waiting.value.capacity_wait
+        assert len(submitted) == retry - 1
+
+        if interrupt:
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "write_text", interrupted_write)
+                with pytest.raises(KeyboardInterrupt):
+                    m.results([measure])
+        else:
+            with pytest.raises(MeasurementPending) as caught:
+                m.results([measure])
+            assert caught.value.capacity_wait  # an infra retry is not charged
+            assert caught.value.job_ids == (str(100 + retry),)
+        # a repeated delivery while the retry job is live spends nothing
+        live = {m._job_name(measure): str(100 + retry)}
+        with pytest.raises(MeasurementPending) as repeat:
+            _measurer(tmp_path, submitted, states=states, live=live).results([measure])
+        assert repeat.value.capacity_wait
+        assert "results could not be written" in repeat.value.note
+        assert len(submitted) == retry
+        states[str(100 + retry)] = "COMPLETED"  # the retry also loses its result
+    with pytest.raises(MeasurementPending) as parked:
+        _measurer(tmp_path, submitted, states=states).results([measure])
+    assert parked.value.capacity_wait
+    assert "2 retries exhausted" in parked.value.note
+    assert "infra-retries.json" in parked.value.note  # what an operator deletes
+    with pytest.raises(MeasurementPending):  # later wakes stay parked
+        _measurer(tmp_path, submitted, states=states).results([measure])
+    assert len(submitted) == 2  # the original dispatch plus exactly two retries
+    # a journal that cannot be written parks the run; it never aborts it
+    _dispatched(m, measure, job="102")
+    infra = m._infra_retry_path(measure)
+    infra.unlink()  # the operator cleared the journal…
+    infra.mkdir()  # …but the path cannot hold a file, so every write fails
+    with pytest.raises(MeasurementPending) as unsaved:
+        _measurer(tmp_path, submitted, states=states).results([measure])
+    assert unsaved.value.capacity_wait  # parked uncharged, not an OSError
+    assert "could not be saved" in unsaved.value.note
+    assert len(submitted) == 2  # parked now — nothing was re-dispatched
+
+
+def test_no_result_candidate_death_is_still_an_eval_error(tmp_path, monkeypatch):
+    """Only baselines and cleanly completed jobs are retried: a candidate that
+    died (here OOM) fails the climb, and is never resubmitted. A journal that
+    already recorded this delivery as an infra retry — a crash may leave one
+    before the re-dispatch — outranks a scheduler status that is unavailable."""
+    submitted: list = []
+    m = _measurer(tmp_path, submitted, states={"100": "OUT_OF_MEMORY"})
+    _dispatched(m, _measures()[1], job="100")
+    with pytest.raises(EvalError, match="OUT_OF_MEMORY"):
+        m.results([_measures()[1]])
+    assert not submitted
+    # the crash-resume case: the journal names THIS job, so the scheduler's
+    # silence is not new evidence against the candidate
+    m._infra_retry_path(_measures()[1]).write_text(json.dumps({"retries": 1, "job_id": "100"}))
+
+    def unavailable(job_id: str) -> str:
+        raise RuntimeError("sacct did not run")
+
+    monkeypatch.setattr(m.compute, "status", unavailable)
+    with pytest.raises(MeasurementPending) as caught:
+        m.results([_measures()[1]])
+    assert caught.value.capacity_wait
+    assert len(submitted) == 1  # the re-dispatch the crash cut short

@@ -24,6 +24,8 @@ from outerloop.session_evidence import (
     usage,
 )
 
+pytestmark = pytest.mark.usefixtures("codex_host")
+
 
 @pytest.mark.parametrize(
     "backend,data,expected",
@@ -481,6 +483,44 @@ def test_codex_failed_invocation_has_unknown_cost(tmp_path, monkeypatch, failure
     assert result.tokens == {}
     assert result.cost_usd is None
     assert json.loads(Path(result.session_record_path).read_text())["cost_usd"] is None
+
+
+def test_resumed_codex_thread_totals_to_its_last_leg(tmp_path, monkeypatch):
+    """A codex resume reports the thread's cumulative usage as each leg's
+    usage (#479), so three legs of one thread price the thread once, at the
+    newest leg. Claude legs are summed instead: the CLI version that ran a
+    session is not recorded, and only Claude Code 2.1.277+ reports
+    cumulative resume totals, so newest-leg pricing could undercount an
+    older CLI."""
+    monkeypatch.setenv(
+        "OUTERLOOP_TOKEN_PRICES",
+        json.dumps({"test-model": {"input_tokens": 2, "output_tokens": 10}}),
+    )
+    legs = [
+        {"input_tokens": 100_000, "output_tokens": 5_000},
+        {"input_tokens": 300_000, "output_tokens": 9_000},
+        {"input_tokens": 600_000, "output_tokens": 12_000},
+    ]
+
+    class Adapter:
+        api_key = "synthetic-secret"
+        model = "test-model"
+
+        @capture_session("codex")
+        def run(self, brief, workspace, resume_session_id=None):
+            events = [
+                {"type": "thread.started", "thread_id": "session-1"},
+                {"type": "turn.completed", "usage": legs.pop(0)},
+            ]
+            return _parse_codex_result("\n".join(map(json.dumps, events)), "done", 0)
+
+    adapter = Adapter()
+    adapter.run("brief", tmp_path / "ws")
+    adapter.run("wake", tmp_path / "ws", "session-1")
+    adapter.run("wake again", tmp_path / "ws", "session-1")
+    totals = session_totals(tmp_path)
+    assert totals["session_cost_usd"] == pytest.approx((600_000 * 2 + 12_000 * 10) / 1_000_000)
+    assert totals["captured_sessions"] == 3
 
 
 def test_resumed_hermes_hash_identifies_delivered_prompt(tmp_path):

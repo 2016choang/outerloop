@@ -740,7 +740,6 @@ def cmd_siblings(root: Path, _args) -> str:
         lines.append(f"  - {who} ({label}): {what}" if what else f"  - {who} ({label})")
         if pr_url:
             lines.append(f"    in review: {pr_url}")
-    lines.append("prefer a direction no sibling is on, unless you have a distinct angle.")
     return "\n".join(lines)
 
 

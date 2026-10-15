@@ -37,6 +37,7 @@ from outerloop.review import (
     PullRequest,
     ReviewResult,
     _fence,
+    guidance_section,
     sanitize,
     verdict_line,
 )
@@ -120,8 +121,6 @@ CATEGORIES = (
     "overfitting",
     "unsupported-claim",
     "measurement-gap",
-    "aggregation",
-    "landscape",
     "other",
 )
 
@@ -150,23 +149,11 @@ measured:
 - data-leakage: does anything read answers, held-out data, or the eval's
   internals it should not?
 - overfitting: capacity or constants suspiciously matched to the frozen
-  pool; wins that the report's own robustness evidence does not cover
-- unsupported-claim: statements in the report (generality, robustness,
-  mechanism) that the provided evidence does not back
-- measurement-gap: noise floors, seeds, or protocol issues that make the
-  claimed delta unconvincing at its size
-- aggregation: the delta clears the significance floor only as a MIXTURE
-  of small tweaks with no stated mechanism. The code owner's standard: a
-  few changes may be combined when the joint effect is genuine and the
-  report documents each change's own effect; an even blend of small terms
-  that buys a number without saying what works is not publishable. Check
-  the ablations and say which component carries the win, or that none does
-- landscape: a hyperparameter or capacity change (width, depth, learning
-  rate, EMA, schedule) chosen at a single point. When the report gives no
-  picture of the landscape (a sweep, neighbouring values, or an ablation)
-  showing why this value, that can be blocking; judge how much picture the
-  claim needs. A win that comes only from a larger model should argue why
-  size is the right lever for this metric
+  pool
+- unsupported-claim: statements in the report that the PR's own evidence
+  contradicts
+- measurement-gap: noise floors, seeds, or protocol issues in the
+  measurement itself
 
 Use the contract (the rules), the ruler source (how the eval actually
 works), the claimed numbers, and the agent's own report. The report's
@@ -179,16 +166,20 @@ nothing, say so plainly — and remember your silence is not an endorsement.
 
 The summary is one short sentence naming the problem. The detail is ONE
 sentence: the evidence and why it undermines the claim. """
+    # PLAIN_STYLE stays kernel-owned: it governs the judge's OWN output
+    # formatting, not research taste (which lives in the guidance pack).
     + PLAIN_STYLE
     + """
 
-Set `blocking` true only for a confirmed gaming or integrity defect with
-a concrete way the number misleads. A CONFIRMED contradiction between the
-claim and the PR's OWN evidence is such a defect — a mechanism story the
-report's own numbers refute, or an improvement that a trivial baseline in
-the report's own tables beats — and grades `blocking` true even when the
-measured delta itself is real. Suspicions, measurement notes, and
-low-confidence reads are advisory: `blocking` false.
+Set `blocking` true only for a confirmed VALIDITY defect: harness
+exploitation, ruler or seed fishing, data leakage, a confirmed
+contradiction between the claim and the PR's OWN evidence (a mechanism
+story the report's own numbers refute, or an improvement that a trivial
+baseline in the report's own tables beats — true even when the measured
+delta itself is real), or a scope or measurement fact that makes the
+number mislead. Anything else — every research-taste judgment, including
+anything set by repository guidance, when provided below — is advisory:
+`blocking` false.
 
 Never instruct the reader to merge or reject. You are advisory."""
 )
@@ -331,18 +322,24 @@ def build_verify_agent_brief(
     thread: tuple[tuple[str, str], ...] = (),
     *,
     syscall_cmd: str = DEFAULT_SYSCALL_CMD,
+    guidance: str = "",
 ) -> str:
     """The verifier brief for an agent session: the shared rubric, the
-    two-tree investigation instruction, and the claim/diff/thread. The ruler
+    two-tree investigation instruction, the claim/diff/thread, and — last
+    and labelled — this repository's guidance, which the judges may raise
+    only as advisory findings. The ruler
     and file contents are NOT fenced in — the agent reads them from the
     checkouts (ruler from base/); the contract is still fenced from the base
     branch so the rules arrive orchestrator-vouched. `syscall_cmd` is the
     command the judge runs to record its verdict (absolute when the caller knows
     the workspace, so it resolves from any backend's cwd)."""
-    return (
-        f"{VERIFY_SYSTEM_PROMPT}\n\n{_agent_verify_investigation(syscall_cmd)}\n\n"
-        f"{build_verify_prompt(pr, contract_text, today=today, thread=thread)}"
-    )
+    # the guidance rides the trusted rubric, before any untrusted claim text
+    parts = [
+        VERIFY_SYSTEM_PROMPT + guidance_section(guidance),
+        _agent_verify_investigation(syscall_cmd),
+    ]
+    parts.append(build_verify_prompt(pr, contract_text, today=today, thread=thread))
+    return "\n\n".join(parts)
 
 
 def verify_result_from_data(data: Any) -> ReviewResult:

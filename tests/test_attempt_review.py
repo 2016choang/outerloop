@@ -47,6 +47,13 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout
 
 
+def commit(cwd: Path, message: str) -> str:
+    """Stage and commit everything under the test identity; the new head."""
+    _git(cwd, "add", "-A")
+    _git(cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message)
+    return _git(cwd, "rev-parse", "HEAD").strip()
+
+
 def member(cid: int, body: str, author: str = "renmengye", assoc: str = "MEMBER") -> dict:
     return {"id": cid, "body": body, "user": {"login": author}, "author_association": assoc}
 
@@ -87,6 +94,23 @@ class FakeGitHub(LedgerGitHub):
 
     def update_candidate_row(self, repo, number, candidate, digits=None):
         self.row_updates.append(candidate)
+        return True
+
+
+@dataclass
+class ReviewGitHub(FakeGitHub):
+    """Answers branch tips and PR ancestry from the bare remote — the review
+    client that answers preflight from real git history."""
+
+    bare: Path = field(default_factory=Path)
+
+    def branch_sha(self, repo, branch):
+        return _git(self.bare, "rev-parse", f"refs/heads/{branch}").strip()
+
+    def head_contains(self, repo, base, head):
+        return _git(self.bare, "merge-base", base, head).strip() == base
+
+    def disable_auto_merge(self, *args):
         return True
 
 
@@ -149,8 +173,7 @@ def review_run(tmp_path: Path, monkeypatch):
     (seed / "docs" / "roadmap.md").write_text("# roadmap\n")
     (seed / "src" / "pilot" / "solvers" / "tsp.py").write_text("v1\n")
     _git(seed, "init", "-q", "-b", "main")
-    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
-    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed")
+    commit(seed, "seed")
     bare = tmp_path / "origin.git"
     _git(tmp_path, "clone", "-q", "--bare", str(seed), str(bare))
 
@@ -243,19 +266,6 @@ def test_comment_gate() -> None:
     assert all("old reply" not in c[2] for c in picked)
 
 
-STEWARD_CONTRACT = """\
-benchmarks:
-  - name: tsp
-    command: uv run python -m pilot.eval --env tsp --json
-    metric: mean_tour_length
-    direction: min
-budgets: {gpu_hours_per_run: 1, runs_per_week: 10}
-scope: {allowed: [src/pilot/solvers/]}
-steward: {allowed: [src/pilot/instances.py, tests/]}
-roadmap: docs/roadmap.md
-"""
-
-
 def test_context_excludes_drive_by_and_forged_marker_comments(review_run) -> None:
     """Only identity-verified machine rounds ride as context: a drive-by
     comment and a marker forgery from an ordinary account are excluded, and so
@@ -280,7 +290,7 @@ def test_context_excludes_drive_by_and_forged_marker_comments(review_run) -> Non
         "id": 105,
         # a real outage stub from the Actions bot: right identity, but its
         # own marker — "the API was down" is a notice, not a review round
-        "body": "<!-- autoresearch:round-skipped -->\n*The verification round could not run*",
+        "body": "<!-- outerloop:round-skipped -->\n*The verification round could not run*",
         "user": {"login": "github-actions[bot]"},
         "author_association": "NONE",
     }
@@ -312,17 +322,18 @@ def test_context_excludes_drive_by_and_forged_marker_comments(review_run) -> Non
     assert "advisory finding text" not in prompt  # advisory rounds stay out too
 
 
-AUTO_CONTRACT = CONTRACT + "merge: auto\n"
-
-GPU_CONTRACT = CONTRACT.replace(
-    "    direction: min\n", "    direction: min\n    gpus: 1\n    eval_minutes: 30\n"
-)
-
 PR_BRANCH = "feat/auto/agent-01/tsp-r1"
 
 
-@pytest.mark.parametrize("pr_url,number", [("https://github.com/org/pilot/pull/7", 7), ("", 42)])
-@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize(
+    "pr_url,number,failed",
+    [
+        # one case per axis: a missing pr_url falls back to the issue number,
+        # and a failed session still flushes its staged replies
+        ("https://github.com/org/pilot/pull/7", 7, True),
+        ("", 42, False),
+    ],
+)
 def test_reply_syscall_posts_on_run_thread_once(review_run, pr_url, number, failed) -> None:
     from outerloop.attempt import run_author_leg
     from outerloop.github import Workspace
@@ -452,10 +463,7 @@ def test_review_launch_checks_committed_edits(review_run, monkeypatch):
         def run(self, brief_text, workspace, resume_session_id=None):
             if not self.calls:
                 (workspace / "docs/roadmap.md").write_text("out of scope")
-                _git(workspace, "add", "docs/roadmap.md")
-                _git(
-                    workspace, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "edit"
-                )
+                commit(workspace, "edit")
             else:
                 assert (
                     "Refused:" in brief_text
@@ -508,9 +516,7 @@ def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatc
     ws = run_dir(root, "tsp-r1") / "ws"
     contract_text = CONTRACT + "merge: auto\n"
     (ws / ".outerloop.yaml").write_text(contract_text)
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "contract")
-    base = _git(ws, "rev-parse", "HEAD").strip()
+    base = commit(ws, "contract")
     _git(ws, "push", "origin", f"{base}:main")
     write_progress(
         ws,
@@ -527,9 +533,7 @@ def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatc
         },
         "org/pilot",
     )
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "prior")
-    head = _git(ws, "rev-parse", "HEAD").strip()
+    head = commit(ws, "prior")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     (ws / "src/pilot/solvers/tsp.py").write_text("submitted\n")
     workspace = Workspace(root=ws, url=str(bare))
@@ -585,19 +589,40 @@ def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatc
     assert "submit addendum failed" in caplog.text
 
 
-@pytest.mark.parametrize("candidate,expected", [(11.4, 11.4), (11.8, 12.0), (12.5, 12.0)])
-@pytest.mark.parametrize("unchanged", [False, True])
-@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
+HYPOTHESIS = "Hypothesis: " + ("Improve the solver. " * 80).strip()
+
+
 @pytest.mark.parametrize(
-    "submit_report",
-    ["", "Hypothesis: " + ("Improve the solver. " * 80).strip()],
-    ids=["no-report", "hypothesis"],
+    "candidate,unchanged,panel_skip,submit_report",
+    [
+        # one case per distinct path: a clearing improvement is pushed; a
+        # within-floor improvement names the unchanged row; a worse number
+        # names it too; a reportless publish survives a crash after the push;
+        # a report-only publish never pushes; a reportless report-only publish
+        # recovers from an interruption before the blessing is recorded; a
+        # skipped panel read withholds the blessing
+        (11.4, False, "", HYPOTHESIS),
+        (11.8, False, "", HYPOTHESIS),
+        (12.5, False, "", HYPOTHESIS),
+        (11.4, False, "", ""),
+        (11.4, True, "", HYPOTHESIS),
+        (11.4, True, "", ""),
+        (11.4, False, "insufficient panel time", HYPOTHESIS),
+    ],
+    ids=[
+        "improved",
+        "floor",
+        "worse",
+        "no-report",
+        "report-only",
+        "report-only-no-report",
+        "panel-skip",
+    ],
 )
 def test_publish_review_fast_forwards_and_applies_floor(
     review_run,
     monkeypatch,
     candidate,
-    expected,
     unchanged,
     submit_report,
     panel_skip,
@@ -622,9 +647,7 @@ def test_publish_review_fast_forwards_and_applies_floor(
         + "merge: auto\n"
     )
     (ws / ".outerloop.yaml").write_text(contract_text)
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "contract")
-    base = _git(ws, "rev-parse", "HEAD").strip()
+    base = commit(ws, "contract")
     _git(ws, "push", "origin", f"{base}:main")
     from outerloop.progress import LeaderEntry, load_leader, write_progress
 
@@ -644,12 +667,9 @@ def test_publish_review_fast_forwards_and_applies_floor(
         },
         "org/pilot",
     )
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "prior")
+    commit(ws, "prior")
     (ws / "src/pilot/solvers/tsp.py").write_text("submitted\n")
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "existing code")
-    head = _git(ws, "rev-parse", "HEAD").strip()
+    head = commit(ws, "existing code")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     if not unchanged:
         (ws / "src/pilot/solvers/tsp.py").write_text("updated\n")
@@ -799,6 +819,10 @@ def test_publish_review_fast_forwards_and_applies_floor(
     assert github.row_updates and set(github.row_updates) == {candidate}
     if candidate > 12:
         assert "Worse" in github.posted[0]
+    elif candidate > 11.4:
+        # inside the cross-seed floor (best 12.0, min_delta 0.5): the
+        # addendum names the unchanged ledger row rather than crediting it
+        assert "the ledger row is unchanged" in github.body_addenda[0]
     assert "## Pre-PR verification\n\nLatest panel verdict" in github.body_addenda[0]
     assert (submit_report or "no report was given") in github.body_addenda[0]
     assert bool(ready_calls) == (draft and not (panel_skip or blocking or degraded))
@@ -859,15 +883,12 @@ def test_publish_refusal_is_a_message(review_run, monkeypatch, reason):
     if reason == "human":
         _git(ws, "checkout", "--", ".")
         (ws / "src/pilot/solvers/tsp.py").write_text("human\n")
-        _git(ws, "add", "-A")
-        _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "human")
-        head = _git(ws, "rev-parse", "HEAD").strip()
+        head = commit(ws, "human")
         _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     if reason == "contract":
         _git(ws, "checkout", "-f", "-B", "main", base)
         (ws / ".outerloop.yaml").write_text(CONTRACT.replace("mean_tour_length", "new_metric"))
-        _git(ws, "add", "-A")
-        _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "new ruler")
+        commit(ws, "new ruler")
         _git(ws, "push", "origin", "main")
 
     class GitHub(FakeGitHub):
@@ -964,11 +985,22 @@ def test_unsubmitted_review_edit_is_not_measured_or_pushed(review_run, monkeypat
     assert load_record(root, "tsp-r1").state == PARKED
 
 
-@pytest.mark.parametrize("credited", [False, True, None])
-@pytest.mark.parametrize("gpus", [0, 1])
-@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
+@pytest.mark.parametrize(
+    "credited,panel_skip,gpus",
+    [
+        # one case per distinct path: the gate credits the change (publish,
+        # bless, both verdicts delivered), it does not, the gate itself
+        # fails, and a skipped panel read rides the credited path. A CPU
+        # submit keeps the charge at zero — the GPU axis moves the accounting
+        (True, "", 1),
+        (False, "", 1),
+        (None, "", 1),
+        (True, "insufficient panel time", 1),
+        (True, "", 0),
+    ],
+)
 def test_review_submit_parks_and_delivers_verdict(
-    review_run, monkeypatch, credited, gpus, panel_skip
+    review_run, monkeypatch, credited, panel_skip, gpus
 ):
     import json
 
@@ -986,28 +1018,16 @@ def test_review_submit_parks_and_delivers_verdict(
         f"    direction: min\n    gpus: {gpus}\n    eval_minutes: 30\n    seed_env: PRIVATE_SEED\n",
     )
     (ws / ".outerloop.yaml").write_text(text)
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "meter")
+    commit(ws, "meter")
     _git(ws, "push", "origin", "HEAD:main")
     (ws / "src/pilot/solvers/pr.py").write_text("existing PR change\n")
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR change")
-    head = _git(ws, "rev-parse", "HEAD").strip()
+    head = commit(ws, "PR change")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     record = load_record(root, "tsp-r1")
     save_record(root, replace(record, stage={"base_sha": head}), NOW)
 
-    class GitHub(FakeGitHub):
-        def branch_sha(self, repo, branch):
-            return _git(_bare, "rev-parse", f"refs/heads/{branch}").strip()
-
-        def head_contains(self, repo, base, head):
-            return _git(_bare, "merge-base", base, head).strip() == base
-
-        def disable_auto_merge(self, *args):
-            return True
-
-    github = GitHub(
+    github = ReviewGitHub(
+        bare=_bare,
         pr={"state": "open", "head": {"sha": head, "ref": PR_BRANCH}, "base": {"ref": "main"}},
         comments=[member(101, "submit this")],
     )
@@ -1164,15 +1184,12 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     _git(ws, "checkout", "-B", "advance", old_base)
     (ws / ".outerloop.yaml").write_text(CONTRACT.replace("mean_tour_length", "fresh_metric"))
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fresh base")
-    base = _git(ws, "rev-parse", "HEAD").strip()
+    base = commit(ws, "fresh base")
     _git(ws, "push", "origin", "HEAD:main")
     _git(ws, "checkout", "-B", PR_BRANCH, head)
     # The PR already has the contract, but only a merge carries base ancestry.
     _git(ws, "cherry-pick", "--no-commit", base)
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "copy contract")
-    head = _git(ws, "rev-parse", "HEAD").strip()
+    head = commit(ws, "copy contract")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     record = load_record(root, "tsp-r1")
     save_record(root, replace(record, stage={"base_sha": old_base}), NOW)
@@ -1188,17 +1205,8 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
 
     monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
 
-    class GitHub(FakeGitHub):
-        def branch_sha(self, repo, branch):
-            return _git(bare, "rev-parse", f"refs/heads/{branch}").strip()
-
-        def head_contains(self, repo, base, head):
-            return _git(bare, "merge-base", base, head).strip() == base
-
-        def disable_auto_merge(self, *args):
-            return True
-
-    github = GitHub(
+    github = ReviewGitHub(
+        bare=bare,
         pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
         comments=[member(101, "submit with the fresh ruler")],
     )
@@ -1261,14 +1269,7 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
 
 
 @pytest.mark.parametrize("edit", ["none", "working", "committed"])
-@pytest.mark.parametrize(
-    "panel_skip",
-    [
-        "",
-        "a panel judge key is this run's author key (role separation)",
-        "the job's walltime cap left 1 min for a read that needs 10",
-    ],
-)
+@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
 def test_review_submit_scope_includes_existing_pr_changes(
     review_run, monkeypatch, edit, panel_skip
 ):
@@ -1281,14 +1282,10 @@ def test_review_submit_scope_includes_existing_pr_changes(
     root, bare = review_run
     ws = run_dir(root, "tsp-r1") / "ws"
     (ws / ".outerloop.yaml").write_text(CONTRACT + "merge: auto\n")
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "auto")
+    base = commit(ws, "auto")
     _git(ws, "push", "origin", "HEAD:main")
-    base = _git(ws, "rev-parse", "HEAD").strip()
     (ws / "src/pilot/solvers/tsp.py").write_text("existing PR change\n")
-    _git(ws, "add", "-A")
-    _git(ws, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "PR")
-    head = _git(ws, "rev-parse", "HEAD").strip()
+    head = commit(ws, "PR")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     measured = []
     published = []
@@ -1305,20 +1302,12 @@ def test_review_submit_scope_includes_existing_pr_changes(
     monkeypatch.setattr(DispatchSettings, "measurer", lambda *a, **k: Measurer())
     monkeypatch.setattr("outerloop.attempt.publish", capture_publish)
 
-    class GitHub(FakeGitHub):
-        def branch_sha(self, repo, branch):
-            return _git(bare, "rev-parse", f"refs/heads/{branch}").strip()
-
-        def head_contains(self, repo, base, head):
-            return _git(bare, "merge-base", base, head).strip() == base
-
-        def disable_auto_merge(self, *args):
-            return True
-
+    class NoArmedMerge(ReviewGitHub):
         def enable_auto_merge(self, *args, **kwargs):
             pytest.fail("skipped panel armed auto-merge")
 
-    github = GitHub(
+    github = NoArmedMerge(
+        bare=bare,
         pr={"state": "open", "base": {"ref": "main"}, "head": {"sha": head, "ref": PR_BRANCH}},
         comments=[member(101, "submit")],
     )
@@ -1332,17 +1321,7 @@ def test_review_submit_scope_includes_existing_pr_changes(
                 if edit != "none":
                     (workspace / path).write_text("one new edit\n")
                     if edit == "committed":
-                        _git(workspace, "add", "-A")
-                        _git(
-                            workspace,
-                            "-c",
-                            "user.name=t",
-                            "-c",
-                            "user.email=t@t",
-                            "commit",
-                            "-qm",
-                            "edit",
-                        )
+                        commit(workspace, "edit")
                 assert main(["submit"], root=workspace) == 0
                 assert main(["sleep"], root=workspace) == 0
             return session
@@ -1461,8 +1440,16 @@ def test_review_outage_refunds_attempt_and_preserves_delivery(review_run):
     assert outage_active(root, NOW)
 
 
-@pytest.mark.parametrize("ending", ["merged", "rejected", "operator"])
-@pytest.mark.parametrize("during", ["session", "post"])
+@pytest.mark.parametrize(
+    "ending,during",
+    [
+        # one case per interleaving: the run ends inside the author session,
+        # or while the reply is being posted. The ending value only
+        # round-trips through the record, so one value per path suffices.
+        ("merged", "session"),
+        ("rejected", "post"),
+    ],
+)
 def test_reply_return_preserves_concurrent_ending(review_run, ending, during):
     from outerloop.attempt import finish_run
     from outerloop.runstate import ENDED
@@ -1538,8 +1525,8 @@ def test_terminal_releases_snapshot_when_notebook_fails(review_run, monkeypatch,
         raise RuntimeError("notebook unavailable")
 
     monkeypatch.setattr(
-        attempt,
-        {"contract": "load_contract", "benchmark": "_benchmark", "seal": "_push_line_snapshot"}[
+        attempt.Contract if failure == "benchmark" else attempt,
+        {"contract": "load_contract", "benchmark": "benchmark", "seal": "_push_line_snapshot"}[
             failure
         ],
         fail,
@@ -1583,8 +1570,7 @@ def _author_folded_base_scope(
     (seed / "BENCHMARKS.md").write_text("main's ledger\n")
     if rollback_to:
         (seed / "docs/roadmap.md").write_text("reviewed ruler B1\n")
-    _git(seed, "add", "-A")
-    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ledger")
+    commit(seed, "ledger")
     _git(seed, "push", str(bare), "main")
     launched = []
     seen = []
@@ -1621,8 +1607,7 @@ def _author_folded_base_scope(
                     if rollback_to:
                         (seed / "docs/roadmap.md").write_text("reviewed ruler B2\n")
                     (seed / "BENCHMARKS.md").write_text("main's next ledger\n")
-                    _git(seed, "add", "-A")
-                    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "B2")
+                    commit(seed, "B2")
                     _git(seed, "push", str(bare), "main")
                     _git(workspace, "fetch", "origin")
                 if rollback_to:
@@ -1696,17 +1681,12 @@ def _publish_folded(review_run, monkeypatch, *, contained=False, refusal=""):
     ws = Workspace(root=path, url=str(bare))
     original = ws.git("rev-parse", "HEAD").strip()
 
-    def commit(name):
-        ws.git("add", "-A")
-        ws.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", name)
-        return ws.git("rev-parse", "HEAD").strip()
-
     (path / "src/pilot/solvers/pr.py").write_text("prior PR change\n")
-    head = commit("PR")
+    head = commit(path, "PR")
     ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
     ws.git("checkout", "--detach", original)
     (path / "docs/main-only.md").write_text("landed in main\n")
-    base = commit("main advanced")
+    base = commit(path, "main advanced")
     ws.git("push", "origin", f"{base}:main")
     ws.git("checkout", "--detach", head)
     if refusal != "unfolded":
@@ -1718,12 +1698,12 @@ def _publish_folded(review_run, monkeypatch, *, contained=False, refusal=""):
     snap = snapshot_tree(ws, ws.git("rev-parse", "HEAD").strip())
     if refusal == "moved-head":
         (path / "src/pilot/solvers/human.py").write_text("human edit\n")
-        head = commit("human moved PR")
+        head = commit(path, "human moved PR")
         ws.git("push", "origin", f"{head}:refs/heads/{PR_BRANCH}")
     if refusal == "moved-base":
         ws.git("checkout", "-f", "--detach", base)
         (path / "docs/later.md").write_text("later\n")
-        latest = commit("later base")
+        latest = commit(path, "later base")
         ws.git("push", "origin", f"{latest}:main")
 
     class GitHub(FakeGitHub):
@@ -1794,7 +1774,7 @@ def _publish_folded(review_run, monkeypatch, *, contained=False, refusal=""):
     assert not diff & set(PROGRESS_PATHS)
 
 
-def test_publish_folded_candidate_retains_measured_base(review_run, monkeypatch):
+def test_publish_folded_candidate_retains_measured_pr_diff(review_run, monkeypatch):
     _publish_folded(review_run, monkeypatch)
 
 
@@ -1802,18 +1782,24 @@ def test_publish_uses_one_parent_when_base_already_contained(review_run, monkeyp
     _publish_folded(review_run, monkeypatch, contained=True)
 
 
-def test_publish_folded_pr_diff_excludes_main_changes(review_run, monkeypatch):
-    _publish_folded(review_run, monkeypatch)
-
-
 @pytest.mark.parametrize("refusal", ["unfolded", "moved-head", "moved-base", "ancestry-error"])
 def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeypatch, refusal):
     _publish_folded(review_run, monkeypatch, refusal=refusal)
 
 
-@pytest.mark.parametrize("base", ["main", "release"])
 @pytest.mark.parametrize(
-    "history", ["equal", "ancestor", "divergent", "old-pin", "rewound", "unknown-pin"]
+    "base,history",
+    [
+        # one case per distinct history path; one non-main base proves the
+        # preflight reads the configured branch's tip, not a hardcoded main
+        ("main", "equal"),
+        ("main", "ancestor"),
+        ("main", "divergent"),
+        ("main", "old-pin"),
+        ("main", "rewound"),
+        ("main", "unknown-pin"),
+        ("release", "equal"),
+    ],
 )
 def test_submit_fetch_detects_move_during_author_leg(review_run, base, history):
     from outerloop.attempt import _submit_preflight
@@ -1916,7 +1902,6 @@ def test_steward_followup_publishes_pending_reset(review_run, monkeypatch):
         review_run,
         monkeypatch,
         candidate=11.8,
-        expected=12.0,
         unchanged=False,
         submit_report="",
         panel_skip="",
@@ -2014,12 +1999,13 @@ def test_review_withdraw_parks_then_sweep_closes_with_one_redacted_comment(
 @pytest.mark.parametrize(
     "draft,blocking,degraded,ready_fails",
     [
+        # one case per distinct path: the PR is marked ready; marking fails;
+        # a blocking or degraded panel withholds both the marking and the
+        # blessing. A non-draft PR takes the same withheld path.
         (True, False, False, False),
         (True, False, False, True),
         (True, True, False, False),
         (True, False, True, False),
-        (False, True, False, False),
-        (False, False, True, False),
     ],
 )
 def test_report_only_panel_updates_draft(
@@ -2028,11 +2014,10 @@ def test_report_only_panel_updates_draft(
     test_publish_review_fast_forwards_and_applies_floor(
         review_run,
         monkeypatch,
-        11.4,
-        11.4,
-        True,
-        "Revised report",
-        "",
+        candidate=11.4,
+        unchanged=True,
+        submit_report="Revised report",
+        panel_skip="",
         draft=draft,
         blocking=blocking,
         degraded=degraded,

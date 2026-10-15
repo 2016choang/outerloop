@@ -296,7 +296,7 @@ def flight_checkout(home: Path, name: str, now: float) -> Path:
 
 
 def _benchmark_gpus(contract: Any, benchmark: str) -> int:
-    bench = next((b for b in getattr(contract, "benchmarks", []) if b.name == benchmark), None)
+    bench = contract.benchmark(benchmark)
     return int(getattr(bench, "gpus", 0) or 0)
 
 
@@ -738,7 +738,7 @@ def _merge_blessed_pr(
         reason = why_not(record, pr, dial, tip, contains_base)
         if reason:
             from outerloop.github import is_own_login
-            from outerloop.markers import has_marker, legacy_marker, marker
+            from outerloop.markers import has_marker, marker
 
             reason = redact(reason, _client_secrets(github))
             log.info("merge of %s#%s waits: %s", record.target, number, reason)
@@ -765,11 +765,7 @@ def _merge_blessed_pr(
                 )
                 return False
             status = f"Self-merge waiting: {reason}."
-            previous = (
-                latest.replace(marker("self-merge-status"), "")
-                .replace(legacy_marker("self-merge-status"), "")
-                .strip()
-            )
+            previous = latest.replace(marker("self-merge-status"), "").strip()
             if previous != status:
                 github.comment(record.target, number, f"{marker('self-merge-status')}\n{status}")
             return False
@@ -2655,8 +2651,8 @@ def _panel_preflight_error(
     try:
         from outerloop.attempt import (
             PANEL_KEY_DEFAULT,
+            _shelled_judge_key_path,
             effective_author_credential,
-            resolve_author_key_file,
         )
         from outerloop.endpoints import author_model_setting
         from outerloop.github import FileTokenProvider
@@ -2733,32 +2729,17 @@ def _panel_preflight_error(
                     f"a {lens_backend} panel lens requires a real container image "
                     f"(OUTERLOOP_IMAGE={spec.image!r})"
                 )
-            key_raw = os.environ.get(key_env, "").strip()
-            if not key_raw:
-                return (
-                    f"a {lens_backend} panel lens needs {key_env} "
-                    "(role separation: the judge's own key, never the author's)"
+            # the key rules live with the climb's own builder, so the paths
+            # cannot drift
+            try:
+                key_path = _shelled_judge_key_path(
+                    backend=lens_backend,
+                    key_file_env=key_env,
+                    author_backend=author_backend,
+                    claude_panel_path=Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser(),
                 )
-            key_path = Path(key_raw).expanduser()
-            if not key_path.is_absolute():
-                return (
-                    f"{lens_backend} panel key path {key_path} is relative; only absolute paths fly"
-                )
-            for author_backend_name in dict.fromkeys((author_backend, "claude", "codex", "hermes")):
-                author = Path(resolve_author_key_file(author_backend_name)).expanduser()
-                if key_path.resolve() == author.resolve():
-                    return (
-                        f"{lens_backend} panel key file {key_path} is the "
-                        f"{author_backend_name} author "
-                        "key (role separation: the judge needs its own key)"
-                    )
-            claude_panel = Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
-            if key_path.resolve() == claude_panel.resolve():
-                return (
-                    f"{lens_backend} panel key file {key_path} is the claude panel "
-                    "key file (an anthropic key must never reach another "
-                    "provider's login)"
-                )
+            except ValueError as exc:
+                return str(exc)
             key = FileTokenProvider(key_path).token()
             if key_path.resolve() == author_path.resolve() or (
                 key and key == author_credential.key()

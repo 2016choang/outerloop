@@ -33,8 +33,8 @@ Native log lookup uses identifiers, never newest-file selection:
 
 | Backend | Native evidence | Usage |
 | --- | --- | --- |
-| Claude Code | `$HOME/.claude/projects/*/<session-id>.jsonl`; fresh invocations supply a UUID with `--session-id`, allowing lookup after timeout | Final JSON `usage.input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`; reported `total_cost_usd` |
-| Codex | `$HOME/.codex/sessions/**/rollout-*-<thread-id>.jsonl`, using `thread.started.thread_id` | Sum `turn.completed.usage.input_tokens`, `cached_input_tokens`, `output_tokens` across this invocation |
+| Claude Code | `$HOME/.claude/projects/*/<session-id>.jsonl`; fresh invocations supply a UUID with `--session-id`, allowing lookup after timeout | Final JSON `usage.input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`; reported `total_cost_usd` (cumulative across a resumed session since Claude Code 2.1.277, per invocation on older CLIs) |
+| Codex | `$HOME/.codex/sessions/**/rollout-*-<thread-id>.jsonl`, using `thread.started.thread_id` | Sum `turn.completed.usage.input_tokens`, `cached_input_tokens`, `output_tokens` across this invocation; a resumed thread reports the whole thread's cumulative usage per leg (#479) |
 | Hermes | `$HOME/evidence-<session-id>-<invocation-id>.json`, an explicit transcript export from the existing `run_conversation` result | Reported agent `session_prompt_tokens`, `session_completion_tokens`, `session_cache_read_tokens`, `session_cache_write_tokens`; absent usage remains unknown |
 
 Hermes's pinned legacy CLI omits usage from its sample. A small wrapper invokes
@@ -42,9 +42,15 @@ that same CLI, retaining all returned messages (including tools), the native
 Hermes session ID, and the counters before returning the original result.
 It does not estimate tokens. The existing sample remains the author-result parsing channel,
 not an identifier for evidence. Interrupted sessions may have no native transcript
-or only partial usage; timeouts retain unknown dollars. Claude/Codex resumed native
-logs can contain prior turns; their usage counters come from the current
-invocation's stdout, so history is not billed again.
+or only partial usage; timeouts retain unknown dollars. Claude and codex
+resumed native logs can contain prior turns. Codex reports the whole
+thread's cumulative usage as each leg's usage (#479), so a thread is
+priced once, at its newest leg — see the totals below. Claude Code reports
+the session's saved cost and usage totals on resume only since 2.1.277,
+and the CLI version that ran a session is not recorded (an author override
+can pin an older CLI), so each claude leg keeps its own reported cost and
+the legs are summed; that can overstate a resumed session on a current
+CLI but never undercounts one on an older CLI.
 
 `OUTERLOOP_NATIVE_LOG_MAX_BYTES` caps the stored native log (default 33554432,
 32 MiB). A cutoff sets `truncated: true` and records `cap_bytes`; truncated logs
@@ -91,8 +97,18 @@ authority, so those persisted totals can be altered by the author.
 
 `known_session_cost_usd` sums priced sessions, `unpriced_sessions` counts unknown
 costs, and `session_cost_usd` is null if any captured session is unpriced or no
-indexed records exist. Missing or unreadable indexes report unknown totals and
-`verified: false`; status never reconstructs them from sidecars. Pre-upgrade
+indexed records exist. A resumed codex thread reports cumulative
+usage per leg, so totals count only the newest leg of each indexed codex
+`session_id` — earlier legs of the same thread are never summed over
+the same tokens (#479). Claude Code is cumulative on resume only since
+2.1.277 and the CLI version that ran a session is not recorded (an author
+override can pin an older CLI), so claude legs are summed as they were
+before; that can overstate a resumed session on a current CLI but never
+undercounts one on an older CLI. Hermes usage is per invocation and is
+summed as before. Entries written before session ids were indexed carry no
+grouping and contribute their recorded cost as before. Missing or unreadable
+indexes report unknown totals and `verified: false`; status never reconstructs
+them from sidecars. Pre-upgrade
 sidecars are not imported, so history before the index has unknown coverage.
 Do not interpret the known subtotal as total historical spend.
 

@@ -6,6 +6,171 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+
+- The advisory-review examples and install guide track the `v0` release tag
+  (`@v0` with `reviewer_ref: v0`) instead of `main` or an exact release. `v0`
+  moves only when a final release is cut (a new `RELEASING.md` step), so
+  callers follow releases without hand bumps and never run the moving branch
+  with their reviewer key (#494).
+
+- Research taste moved out of the kernel and into a configurable GUIDANCE
+  layer. Kernel agent-facing text (the author brief, the panel claim, the
+  verifier rubric) now carries only mechanics; a new top-level contract key
+  `guidance` selects the pack: `default` (the moved texts minus the
+  one-idea rule), `none`, or a repo-relative directory holding `author.md`
+  and `panel.md` (recommended location `.github/outerloop/guidance/`).
+  Guidance is read via git objects from the same ref as the contract
+  (never the working tree; a symlink blob is refused), capped at 8,000
+  characters per file, carried last in the author brief and in the panel
+  judges' prompt — outside the fence that holds the claim as untrusted
+  data — and labelled advisory; it may never point into `.outerloop/`.
+  The panel now blocks only on validity — harness
+  exploitation, ruler/seed fishing, data leakage, a confirmed claim-vs-evidence
+  contradiction, and scope and measurement facts; aggregation and landscape
+  live only in the pack (so `none` leaves validity criteria only), and the
+  taste halves of the overfitting/unsupported-claim/measurement-gap rubric
+  are advisory-only. Upgrading: the one-idea rule is no longer enforced
+  anywhere — a repository that wants it writes it into its guidance files
+  (the panel will not block on it); the default hypothesis, done criteria,
+  PR body and brief wording changed accordingly, and stored briefs from
+  earlier versions still load unchanged.
+- A second pass moved the remaining research advice out of the kernel brief
+  into the default guidance pack (when to check the sibling view, budgeting
+  experiments against the final eval, running the repo's checks before a
+  submit) and deleted the divergence-debt aside from the research-line
+  section; under `guidance: none` the brief now states mechanics only.
+### Added
+
+- Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
+  note to a run's inbox, delivered at the run's next wake — no PR needed.
+  Reuses the existing `note`/`kernel` message shape, so older kernels read it
+  without a compatibility change.
+
+### Documentation
+
+- Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
+  files (`OUTERLOOP_STEWARD_KEY_FILE`, `OUTERLOOP_PANEL_KEY_FILE`,
+  `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
+  install guide, and mark the verification-loop and dispatcher design notes
+  as built (#337).
+
+### Changed
+
+- Refreshed locked dependencies to current releases admitted by the existing
+  bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
+- The `.git` guard's object read no longer derives filter-driver overrides
+  (`cat-file -e` never converts working-tree files), dropping one
+  `git config --get-regexp` subprocess from every guarded kernel git call
+  with no change to what is refused or neutralized (#512).
+- A review round refused because the pinned harness is too old for the model,
+  or because the runner's harness install is missing or stale, now says which
+  and how to fix it instead of calling it an API outage (#475).
+
+### Fixed
+
+- Reserve infrastructure retries before submission so a crash before recording
+  the job id cannot exceed the two-retry cap; undo the reservation only on a
+  capacity rejection before submission. Upgrading: a measure that was between
+  infrastructure retries when the kernel was upgraded may get one extra retry,
+  once, because older journals counted failures rather than reserved retries.
+- A dispatched baseline or cleanly completed eval that ends with no result is
+  now an infrastructure failure: two uncharged retries, then a park naming the
+  `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
+  missing journal or `stage.wait_note` reads as zero retries / no note.
+- A codex run that slept and resumed was priced once per leg: `exec resume`
+  reports the thread's cumulative token usage as each leg's usage, so
+  `outerloop status` overstated a resumed session's cost by roughly the
+  number of legs (#479). Session totals now price a codex thread once, at
+  its newest leg. Claude Code sessions keep summing each leg's reported
+  cost: cumulative resume totals arrived only in Claude Code 2.1.277, and
+  the CLI version that ran a session is not recorded — an author override
+  can pin an older CLI whose legs are per invocation — so summing, which
+  can overstate a resumed session on a current CLI, never undercounts one
+  on an older CLI.
+  Upgrading: index entries written before this change carry no session id
+  and keep contributing their recorded cost, so resumed codex sessions
+  captured before the upgrade still overstate; totals are accurate for
+  sessions captured after upgrading.
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
+- A session that ends in error while an out-of-memory kill happens in the job
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
+- An author session that stops without staging anything (an empty reply after
+  long reasoning, or a line of narration with no command) no longer ends its
+  run as "ended without a submit". The kernel resumes the session with a note
+  that nothing ran and the run is still open, up to three times per leg. A stop
+  after a kernel note, a gate verdict, or with a PR open is still taken as the
+  agent's answer, and `end` still ends the run.
+- A Codex session that recovers from a transient error no longer ends its run
+  as aborted. Codex reports a dropped or timed-out model stream as an `error`
+  event ("Reconnecting... 1/5") and carries on; the kernel now counts an error
+  as fatal only when no completed turn follows it, the turn fails, or Codex
+  exits non-zero (#491).
+- Codex installed from npm (the review workflow's install) runs through a
+  script launcher whose vendored binary carries its own code-mode host; the
+  session no longer refuses it for lacking a host beside the launcher. A
+  contained session refuses a launcher up front (the image has no Node.js).
+- `examples/review.yml` referenced a nonexistent `@v1` tag; it now pins the
+  current release (`v0.3.0`, with a matching `reviewer_ref`) (#475).
+- Native Codex sessions failed on the first turn because Codex 0.160's code-mode
+  host was not installed. The installer now installs and verifies it, and a
+  session refuses to start without it.
+  Upgrading: run `outerloop harness upgrade codex`; deploys that run harness
+  upgrades do this automatically. Existing single-binary installs are detected
+  as drift and replaced with a verified pair.
+
+### Changed
+
+- A run whose benchmark is no longer in its contract (renamed or removed)
+  stops with one clear message naming the benchmarks the contract has,
+  instead of continuing on default settings (no GPU budget, default eval
+  walltime, research lines off). A contract that fails to load still leaves
+  parked runs parked until it is fixed.
+
+### Removed
+
+- Upgrading: labels and comment markers are recognized only under the
+  `outerloop:` prefix. Rename any `autoresearch:*` labels on target repos
+  (`gh label edit autoresearch:review --name outerloop:review`), update
+  workflow `if:` conditions that match the old label, and change an open
+  research-log issue's `<!-- autoresearch:research-log -->` marker to
+  `<!-- outerloop:research-log -->`, or the kernel opens a new one.
+- Upgrading: the contract budget key `climb_job_minutes` is no longer read; a
+  contract that still uses it fails validation. Rename it to
+  `attempt_job_minutes` before upgrading.
+
+### Added
+
+- Add optional per-benchmark `regression` allowances with a free tolerance,
+  exclusive hard cap, and optional measured climbed-gain requirement, in
+  relative or absolute units. Suite rows and reports identify the applied rule.
+  Upgrading: no action for existing contracts; their gate behavior and measurement
+  signatures are unchanged. Legacy suite rows without `rule` default to
+  `legacy-floor`; the new row field is additive. Contracts using the new block
+  require this kernel version and must remove it before rolling back.
+
+### Changed
+
+- Codex sessions never get Codex's built-in sub-agent tools; multi-agent work
+  goes through the kernel's channels. `OUTERLOOP_CODEX_WEB_SEARCH` controls
+  Codex's built-in web search: `auto` (default) leaves it to Codex on native
+  provider sessions and turns it off on endpoint sessions, where it cannot run;
+  `off` turns it off everywhere. This fixes Codex sessions on chat-only
+  endpoints, which failed with "unsupported bridge request" after the 0.160 pin.
+  Upgrading: no action.
 - `OUTERLOOP_TOKEN_PRICES` in the deployment `.env` now reaches ticks and the
   jobs they submit, so session cost is priced from the operator table instead of
   staying unknown. Upgrading: no action.
@@ -13,9 +178,10 @@ Versions follow [SemVer](https://semver.org).
   `OUTERLOOP_EVAL_MEM_GB_PER_GPU` (defaults 8 and 64) set the per-GPU core and
   memory floor for GPU evals and author launches, for nodes with fewer cores or
   less memory per GPU. Upgrading: no action; unset keeps the defaults.
-- Apply current contract verification and channel settings before wake message
-  delivery or workspace fetches. Allow measured results to replace an earlier
-  self-reported leader without inheriting its claimed baseline.
+- Apply the current contract's channel settings before wake message delivery or
+  workspace fetches; a run keeps the verification mode it started with, so a
+  contract change applies to runs that start after it. Allow measured results to
+  replace an earlier self-reported leader without inheriting its claimed baseline.
 
 - Bump the pinned Codex CLI from 0.130.0 to 0.160.0 and update its Linux
   archive digest. All contained Codex roles bind a kernel-owned, read-only
@@ -71,14 +237,50 @@ Versions follow [SemVer](https://semver.org).
   exist: older strict ledger readers cannot read explicit self-reported
   provenance, and older kernels cannot enforce the new contract settings.
 
-- Include GPU count and resolved GPU type in dispatched eval and baseline cache identity, including budget discounts. Legacy eval slots and baseline entries are cache misses. Upgrading: An eval dispatched by the previous kernel and still in flight at upgrade is measured again once under the new cache key (no extra budget charge). To avoid the extra run, upgrade when no evals are in flight: `touch <root>/PAUSE` (stops wakes, so no new evals are dispatched), wait until no eval jobs remain in the queue, upgrade, then `rm <root>/PAUSE` and run `outerloop start`.
+
+## [0.3.0] - 2026-10-05
+
+### Upgrading
+
+Operator actions (everything else needs no action; details in each entry):
+
+- Claude Code is pinned at 2.1.285: run `outerloop harness upgrade claude`
+  (deploys that run harness upgrades do this on their own).
+- Before selecting a chat-only Codex endpoint profile, install the bridge:
+  `outerloop harness upgrade --used`.
+- Existing Hermes source-only installs: run `bash scripts/install_hermes.sh
+  "$REVIEW_HERMES_REPO"` (or full `outerloop init`) before Hermes sessions launch.
+- Harness version overrides now need matching SHA-256 settings.
+- Evals and baselines recorded by the previous kernel are measured again once
+  under the new cache key, with no extra charge.
+- Parked authors keep the instructions they started with; judges use the new
+  rubric at once.
+- Runs parked by the previous kernel resume after the upgrade.
+- Before rolling back: consume pending rebind requests, finish capacity-parked
+  runs, runs with extended session limits, overridden and endpoint-routed runs,
+  and chat-only Codex sessions, and stop additional instances.
+
+- A PR tests one idea. It may include the few changes that idea needs, and the
+  report states the effect of each change. Authors test several values in one
+  array launch and report the results around the chosen value; the panel may
+  block a single-value tuning change without them (new `landscape` finding
+  category). Upgrading: no action. Judges use the new rubric at once. An author
+  parked across the upgrade keeps the instructions it started with. Older readers
+  treat `landscape` as `other`. (This was listed under 0.2.1 by mistake; it
+  shipped after that tag.)
+
+- Include GPU count and resolved GPU type in dispatched eval and baseline cache identity, including budget discounts. Legacy eval slots and baseline entries are cache misses. Upgrading: no action. An eval or baseline recorded by the previous kernel, in flight or finished, is measured again once under the new cache key, with no extra budget charge; pausing or draining before the upgrade does not avoid it.
 
 - Park launch capacity refusals in capacity wait when an immediate resume is
   unavailable or already refused, instead of ending the run. The next wake
   delivers the refusal and a retry note, resuming the same session when supported
   or starting a fresh session with the run context otherwise. Meters are
   preserved and capacity waits do not exhaust stuck retries.
-  Existing records need no migration.
+  Upgrading: no action; existing records need no migration. A run parked by the
+  previous kernel in author-sleep with no session and no pending job starts a
+  fresh author leg on its next wake instead of ending as a session error.
+  Finish capacity-parked runs before rolling back; older kernels cannot resume
+  them.
 
 - Add operator `outerloop rebind <run-id> [--root <root>] [--note <text>]` to
   explicitly move an existing run to its slot's current author at the next leg,
@@ -154,7 +356,9 @@ Versions follow [SemVer](https://semver.org).
   dropped from the seal (tracked paths retain their parent content), while
   admitted work and line memory survive normal endings and crashes after
   scope refusals. Filtering leaves working files and the real index untouched
-  and logs a bounded list of dropped paths. No persisted-state format changes.
+  and logs a bounded list of dropped paths. Upgrading: no action; existing line
+  branches are left as they are, and the next snapshot drops out-of-scope paths.
+  Rollback is safe.
 
 - Support separate instances on one cluster account: process-only absolute
   `OUTERLOOP_ENV_FILE`, with the existing ownership/write-permission checks,
@@ -287,13 +491,15 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- Claude Code pin 2.1.272 -> 2.1.285, the current stable release;
+  `claude-opus-5-5` refuses Claude Code older than 2.1.280.
 - Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
 
 - Upgrading: version overrides now require matching SHA-256 settings; legacy Codex installs without hash markers are reprovisioned. New retry state and hash markers are ignored by older kernels; the first successfully synced tick verifies configured harnesses and records new paths only when needed. Legacy `.env` paths and Hermes runtimes remain readable; old artifacts are retained. See `docs/install.md` for rollback across kernel pins.
 
 - Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
 
-### Upgrading
+### Upgrading notes for the entries above
 
 - No action needed; OUTERLOOP_GPU_LANES is optional.
 
@@ -306,7 +512,6 @@ Versions follow [SemVer](https://semver.org).
 
 ### Upgrading
 
-- No action needed; the panel's new `landscape` category is additive, and a reader that does not know it treats it as `other`.
 - No action needed; an author's report-only answer to the panel now updates the PR, and a PR whose panel clears is marked ready for review.
 - No action needed; a PR held only by a base-moved blessing heals on the next tick.
 - No contract change; existing contract files need no edits.
@@ -342,8 +547,6 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
-- A PR is one idea, not one knob: an idea may bring the few changes it needs when the report gives each change's own effect, and a larger idea touching several places is welcome.
-- Authors are told to sweep a hyperparameter or size in one array launch and show the landscape around the chosen value; the panel may block a single-point tuning change that gives no such picture.
 - An idea with a clear mechanism that does not yet beat the best is reported as a success and kept on the author's research line.
 - The sweep rechecks ancestry for PRs held only by a base-moved blessing.
 - Merges performed by the sweep are observed and confirmed in the same tick.

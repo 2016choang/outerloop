@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from outerloop import posting
 from outerloop.github import GitHubError
 
@@ -98,6 +100,34 @@ def test_skip_stub_carries_its_own_marker_and_reason() -> None:
     (stub,) = [c["body"] for c in client.posted]
     assert stub.lstrip().startswith(posting.SKIP_MARKER)
     assert "could not run" in stub and "credit balance" in stub
+
+
+@pytest.mark.parametrize(
+    ("error", "expect"),
+    [
+        (
+            "API Error: 400 Claude Code 2.1.229 does not support this model; "
+            "version 2.1.280 or newer is required",
+            "too old for the requested model",
+        ),
+        (
+            "request failed " * 30 + "version 2.1.280 or newer is required",
+            "too old for the requested model",
+        ),
+        ("run outerloop harness upgrade codex", "missing or does not match"),
+        (
+            "codex-code-mode-host-missing: run outerloop harness upgrade codex",
+            "missing or does not match",
+        ),
+        ("credit balance too low", "Treat this as an outage"),
+    ],
+)
+def test_skip_stub_tells_a_stale_harness_from_an_outage(error: str, expect: str) -> None:
+    client = _FakeClient()
+    posting.post_skip_stub(client, "org/repo", 1, "advisory review", RuntimeError(error))  # type: ignore[arg-type]
+    (stub,) = [c["body"] for c in client.posted]
+    assert expect in stub
+    assert ("not an outage" in stub) == (expect != "Treat this as an outage")
 
 
 def test_post_round_posts_one_numbered_stamped_comment() -> None:
@@ -192,6 +222,47 @@ def test_rounds_count_per_reviewer() -> None:
     # terra's next round increments ITS OWN count and sees its own same-head re-run
     stamp, label = _round_stamp(_C(), "o/r", 1, "<!-- m -->", pr_data, "hermes/terra")  # type: ignore[arg-type]
     assert "**Round 2**" in label and "(re-run on the same head)" in label
+
+
+def test_summarizer_and_single_reviewer_share_one_count() -> None:
+    # the summarizer posts as "summarizer:<backend> over lens+lens" while a
+    # label-triggered round posts as plain "<backend>": the SAME underlying
+    # reviewer must keep counting (regression: two "Round 1" verdicts minutes
+    # apart on one PR)
+    who = "hermes/gpt-5.6-terra"
+    summarizer = f"summarizer:{who} over coverage+credentials+deployment"
+
+    class _C:
+        def __init__(self, prior_stamp: str) -> None:
+            self.prior_stamp = prior_stamp
+
+        def list_comments(self, repo, number):
+            return [{"body": f"<!-- m -->\n{self.prior_stamp}\nx"}]
+
+        def list_pr_reviews(self, repo, number):
+            return []
+
+    pr_data = {"head": {"sha": "bbbb2222cccc"}}
+    # a single-reviewer round after a summarizer round is Round 2, not Round 1
+    _stamp, label = posting._round_stamp(
+        _C(f"**Round 1** — reviewed head `aaaa1111` — reviewer `{summarizer}`."),  # type: ignore[arg-type]
+        "o/r",
+        1,
+        "<!-- m -->",
+        pr_data,
+        who,
+    )
+    assert label == "**Round 2**"
+    # and the reverse: a summarizer round after a single-reviewer round
+    _stamp, label = posting._round_stamp(
+        _C(f"**Round 1** — reviewed head `aaaa1111` — reviewer `{who}`."),  # type: ignore[arg-type]
+        "o/r",
+        1,
+        "<!-- m -->",
+        pr_data,
+        summarizer,
+    )
+    assert label == "**Round 2**"
 
 
 def test_round_stamp_fits_a_panel_attribution_without_mid_word_cut() -> None:

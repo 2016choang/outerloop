@@ -99,7 +99,7 @@ jobs:
           ssh-key: ${{ secrets.checkout_ssh_key }}
           path: .autoresearch
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: .autoresearch/uv.lock
@@ -211,7 +211,7 @@ jobs:
           ssh-key: ${{ secrets.checkout_ssh_key }}
           path: .autoresearch
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: .autoresearch/uv.lock

@@ -46,6 +46,14 @@ def _terminal_run(root: Path, run_id: str, *, state="ended", ending="negative-re
     (run_dir(root, run_id) / "report.md").write_text(REPORT)
 
 
+def _eval_dir(run_directory: Path, name: str, stdout: str) -> Path:
+    """One eval directory with its job's stdout, as the measurer leaves it."""
+    ev = run_directory / name
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "stdout").write_text(stdout)
+    return ev
+
+
 def test_collect_rows_reads_terminal_records_and_reports(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     _terminal_run(tmp_path, "speedrun-2", ending="merged")
@@ -107,10 +115,9 @@ def test_views_render_the_rows_and_respect_direction(tmp_path: Path) -> None:
     assert "best candidate: **0.7** (max)" in render_md("org/repo", two, {"acc": "max"})
     assert "best candidate: **0.3** (min)" in render_md("org/repo", two, {"acc": "min"})
     # the chart data is EMBEDDED (fetch() is blocked on a file:// page) and
-    # carries the direction
+    # carries the direction; the one fetch in the page is the optional live
+    # strip, which fails silently there
     html = render_html("org/repo", boards, {"speedrun": "min"})
-    # the CHART data is embedded (fetch is blocked on a file:// page); the one
-    # fetch in the page is the optional live strip, which fails silently there
     assert '"boards"' in html and "38146" in html
     assert html.count("fetch('") == 1 and "climb/status.json" in html
     # agent-written text cannot break out of the inline script: "<" is
@@ -271,6 +278,36 @@ class _BoardGitHub:
         return True
 
 
+def _blackout(gh: _BoardGitHub, *paths: str) -> set[str]:
+    """Make gh.get_file raise 500 on `paths`; emptying the set ends the outage."""
+    dead = set(paths)
+    real = gh.get_file
+
+    def flaky(repo, path, ref):
+        if path in dead:
+            raise _GitHubError(500)
+        return real(repo, path, ref)
+
+    gh.get_file = flaky  # type: ignore[method-assign]
+    return dead
+
+
+class _NoPublishedCurves:
+    """get_file 404s: no curves on the branch yet."""
+
+    def get_file(self, repo, path, ref):
+        raise _GitHubError(404)
+
+
+def _remembered_benchmark(gh: _BoardGitHub) -> None:
+    """A benchmark published long ago, its local records reaped since: the
+    branch index is the board's only memory of it."""
+    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
+    gh.files["climb/data/old-bench.json"] = json.dumps(
+        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
+    )
+
+
 def test_service_publishes_once_per_change(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
@@ -298,10 +335,7 @@ def test_board_remembers_benchmarks_whose_local_records_are_gone(tmp_path: Path)
     long ago (records reaped since) keeps its place in every view when a
     different benchmark publishes."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    gh.files["climb/data/old-bench.json"] = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
+    _remembered_benchmark(gh)
     _terminal_run(tmp_path, "speedrun-1")
     assert service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"}) >= 3
     md = gh.files["CLIMB.md"]
@@ -316,20 +350,8 @@ def test_transient_json_read_failure_never_orphans_an_indexed_benchmark(tmp_path
     index (its history is still on the branch), and the views render it
     again once a later read succeeds."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    old_rows = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
-    gh.files["climb/data/old-bench.json"] = old_rows
-    real_get = gh.get_file
-    blackout = {"climb/data/old-bench.json"}
-
-    def flaky_get(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    _remembered_benchmark(gh)
+    blackout = _blackout(gh, "climb/data/old-bench.json")
     _terminal_run(tmp_path, "speedrun-1")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert "## old-bench" not in gh.files["CLIMB.md"]  # skipped this pass...
@@ -349,15 +371,7 @@ def test_unreadable_board_json_is_never_overwritten(tmp_path: Path) -> None:
         [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 9472}]
     )
     _terminal_run(tmp_path, "speedrun-1")
-    real_get = gh.get_file
-    blackout = {"climb/data/speedrun.json"}
-
-    def flaky(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky  # type: ignore[method-assign]
+    blackout = _blackout(gh, "climb/data/speedrun.json")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert json.loads(gh.files["climb/data/speedrun.json"])[0]["run_id"] == "old-1"  # untouched
     assert json.loads(gh.files["climb/index.json"]) == {"speedrun": "min"}
@@ -596,9 +610,7 @@ def test_curves_come_from_eval_stdout_downsampled(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_POINTS, _curve_from_eval
 
     _terminal_run(tmp_path, "speedrun-1")
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc-def"
-    ev.mkdir()
-    (ev / "stdout").write_text(STDOUT_WITH_CURVE)
+    ev = _eval_dir(run_dir(tmp_path, "speedrun-1"), "eval-candidate-abc-def", STDOUT_WITH_CURVE)
     # eval output is job output: a malformed number must not abort collection
     with open(ev / "stdout", "a") as fh:
         fh.write("step 9999 val loss 1.2.3 (fp32)\n")
@@ -617,12 +629,8 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 
     _terminal_run(tmp_path, "speedrun-3")
     rd = run_dir(tmp_path, "speedrun-3")
-    worse = rd / "eval-launch-wide"
-    worse.mkdir()
-    (worse / "stdout").write_text("step 128 val loss 5.0\nstep 256 val loss 4.8\n")
-    better = rd / "eval-launch-deep"
-    better.mkdir()
-    (better / "stdout").write_text("step 128 val loss 4.9\nstep 256 val loss 3.9\n")
+    _eval_dir(rd, "eval-launch-wide", "step 128 val loss 5.0\nstep 256 val loss 4.8\n")
+    _eval_dir(rd, "eval-launch-deep", "step 128 val loss 4.9\nstep 256 val loss 3.9\n")
     # no candidate eval -> the best (lowest final) launch is used
     assert _curve_from_eval(rd) == [[128, 4.9], [256, 3.9]]
 
@@ -630,15 +638,13 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 def test_merge_curves_caps_five_per_agent(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)  # no published curves yet
-
     rows = [{"run_id": f"a{i}", "agent": "agent-01"} for i in range(8)] + [
         {"run_id": f"b{i}", "agent": "agent-02"} for i in range(3)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, [])
+    )
     assert merged is not None
     kept = merged["data"]
     a_kept = [k for k in kept if k.startswith("a")]
@@ -653,16 +659,14 @@ def test_curveless_rows_do_not_consume_the_per_agent_quota(tmp_path: Path) -> No
     the fifth CURVE should still be kept even behind curveless newer rows."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     # newest four rows have no curve; the five older rows do
     rows = [{"run_id": f"c{i}", "agent": "agent-01"} for i in range(5)] + [
         {"run_id": f"n{i}", "agent": "agent-01"} for i in range(4)
     ]
     have = {f"c{i}": [[1, 1.0]] for i in range(5)}  # only the c-rows have curves
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: have.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: have.get(rid, [])
+    )
     assert merged is not None
     assert set(merged["data"]) == {"c0", "c1", "c2", "c3", "c4"}  # all five curves kept
 
@@ -672,15 +676,11 @@ def test_quiet_agent_curve_survives_a_busy_agent(tmp_path: Path) -> None:
     curve — the per-agent cap is applied across ALL rows, not a global slice."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [{"run_id": "quiet", "agent": "agent-09"}] + [
         {"run_id": f"busy{i}", "agent": "agent-01"} for i in range(300)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     assert "quiet" in merged["data"]  # not buried by 300 busy rows
 
@@ -690,17 +690,13 @@ def test_every_agent_is_kept_beyond_any_total_ceiling(tmp_path: Path) -> None:
     all kept (the per-agent cap is the only bound)."""
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [
         {"run_id": f"a{a}-r{i}", "agent": f"agent-{a:02d}"}
         for a in range(40)
         for i in range(6)  # six each; the cap keeps five
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     agents_kept = {k.split("-r")[0] for k in merged["data"]}
     assert len(agents_kept) == 40  # every agent represented
@@ -713,9 +709,9 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
     from outerloop.climbboard import _curve_from_eval
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
+    _eval_dir(
+        rd,
+        "eval-candidate-x",
         "step 1 val loss 4.5\n"
         f"step 2 val loss {'9' * 400}\n"
         f"step {'9' * 400} val loss 4.4\n"
@@ -723,34 +719,31 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
         "step 5 val loss 1e999\n"
         "step 3 val loss 4.3\n"
         "step 4 val loss 3.2e0\n"
-        "step 5 val loss 3.1"  # no trailing newline: the point still counts
+        "step 5 val loss 3.1",  # no trailing newline: the point still counts
     )
     assert _curve_from_eval(rd) == [[1, 4.5], [3, 4.3], [4, 3.2], [5, 3.1]]
 
 
-def test_cap_truncation_never_publishes_a_partial_number(tmp_path: Path, monkeypatch) -> None:
+def test_curve_stdout_scan_stops_at_the_byte_cap(tmp_path: Path, monkeypatch) -> None:
+    """A verbose eval must not exhaust the tick: the scan stops at the byte
+    cap, keeping the points before it and never publishing a number the cap
+    cut in half; the cap is bytes, not characters."""
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)  # cuts inside 4.4444
+    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
+    _eval_dir(
+        rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
+    )
+    assert cb._curve_from_eval(rd) == [[1, 4.5]]  # the point beyond the cap is dropped
+    # the cut can land inside a number: the partial tail line is dropped
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
-    # the cap is bytes, not characters: 4-byte emoji count 4x
-    (ev / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
+    # one giant line without newlines must not buffer past the cap either
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "x" * 100_000)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
-
-
-def test_fresh_curve_bounds_a_newline_free_stdout(tmp_path: Path, monkeypatch) -> None:
-    """One giant line without newlines must not buffer past the cap."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\n" + "x" * 100_000)
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 64)
+    # 4-byte emoji count 4x
+    (rd / "eval-candidate-x" / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
@@ -772,21 +765,6 @@ def test_published_curves_cost_no_stdout_scan(tmp_path: Path) -> None:
     assert merged is not None
     assert asked == ["r2"]  # r1 is published: no scan
     assert merged["data"] == {"r1": [[1, 4.0]], "r2": [[2, 3.5]]}
-
-
-def test_fresh_curve_abandons_oversized_stdout(tmp_path: Path, monkeypatch) -> None:
-    """A verbose eval must not exhaust the tick: scanning stops at the
-    byte cap, keeping the points already parsed."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
-        "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
-    )
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
-    assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
 def test_curves_publish_capped_and_never_clobbered(tmp_path: Path) -> None:
@@ -841,9 +819,11 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
     the page rewrite instead of publishing a curveless page."""
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.1\n")
+    _eval_dir(
+        run_dir(tmp_path, "speedrun-1"),
+        "eval-candidate-abc",
+        "step 1 val loss 4.5\nstep 2 val loss 4.1\n",
+    )
 
     gh.batch_fail = True
     assert service_climb_board(tmp_path, gh, "org/repo") == 0
@@ -857,14 +837,7 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
 
     # curve-file outage: CLIMB.md may still refresh, index.html sits out
     html_before = gh.files["index.html"]
-    real_get = gh.get_file
-
-    def flaky_get(repo, path, ref):
-        if path.startswith("climb/curves/"):
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    _blackout(gh, "climb/curves/speedrun.json")
     _terminal_run(tmp_path, "speedrun-2")
     service_climb_board(tmp_path, gh, "org/repo")
     assert gh.files["index.html"] == html_before
@@ -879,9 +852,7 @@ def test_curve_survives_a_vanishing_eval_dir(tmp_path: Path, monkeypatch) -> Non
 
     rd = tmp_path / "r"
     for name in ("eval-candidate-a", "eval-candidate-b"):
-        d = rd / name
-        d.mkdir(parents=True)
-        (d / "stdout").write_text("step 1 val loss 3.0\n")
+        _eval_dir(rd, name, "step 1 val loss 3.0\n")
     orig = Path.stat
 
     def vanishing(self, **kw):

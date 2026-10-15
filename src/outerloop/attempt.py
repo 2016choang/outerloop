@@ -34,6 +34,7 @@ from outerloop.brief import BudgetState, distill_lessons
 from outerloop.compute import LocalCompute
 from outerloop.contract import (
     Benchmark,
+    BenchmarkNotFoundError,
     Contract,
     contract_text_in_tree,
     load_contract,
@@ -62,6 +63,7 @@ from outerloop.github import (
     contract_at,
     ensure_regular_git_dir,
     git_identity,
+    guidance_at,
 )
 from outerloop.harness import (
     ClaudeModelUnset,
@@ -94,7 +96,6 @@ from outerloop.orchestrator import (
     RunConfig,
     RunParked,
     SubmitPreflight,
-    _benchmark,
     attempt_once,
     benchmark_floor,
     clears_min_delta,
@@ -708,6 +709,7 @@ def _park_run(
         **{k: latest.stage[k] for k in STAGE_RETAINED_KEYS if k in latest.stage},
         "phase": parked.phase,
         "capacity_wait": parked.capacity_wait,
+        "wait_note": redact(parked.wait_note, secrets),
         "base_sha": parked.base_sha,
         "candidate_sha": parked.candidate_sha,
         "candidate_authors": authors,
@@ -1349,12 +1351,13 @@ def run_author_leg(
     dispatch: DispatchSettings | None,
     github: GitHubClient,
     secrets: tuple[str, ...],
+    guidance: str = "",
     **kwargs: Any,
 ) -> AttemptResult:
     """Prepare the author channel and run a resumed leg through the orchestrator."""
     directory = run_root / "runs" / record.run_id
     contract = load_contract(contract_text, record.target)
-    bench = _benchmark(contract, record.benchmark)
+    bench = contract.benchmark(record.benchmark)
     record = dc_replace(
         record,
         verification=bench.verification,
@@ -1437,6 +1440,8 @@ def run_author_leg(
         if line_ref and memory.is_file() and not memory.is_symlink():
             with memory.open("rb") as stream:
                 kwargs.setdefault("line_memory", stream.read(65_536).decode("utf-8", "replace"))
+        # guidance reaches only a fresh brief; a resume keeps its first pass's
+        kwargs.setdefault("guidance", guidance)
     result = attempt_once(
         config,
         contract_text,
@@ -1506,6 +1511,8 @@ def _wake_author_sleep(
     panel_lenses: tuple[PanelLens, ...],
     issue_number: int,
     eval_minutes: int | None,
+    author_guidance: str = "",
+    panel_guidance: str = "",
     judged: tuple[str, str, AttemptResult] | None = None,
 ) -> AttemptOutcome:
     """Wake a syscall park and resume the AUTHOR: deliver the launches' results
@@ -1611,6 +1618,16 @@ def _wake_author_sleep(
                 drop_snapshot(ws, Snapshot(commit="", tree="", ref=ref))
         return outcome
 
+    # Old jobless checkpoints can predate capacity_wait and have no native
+    # session. Their saved workspace/inbox is enough to start a fresh author.
+    sessionless_checkpoint = (
+        record.stage.get("phase") == "author-sleep"
+        and not record.resume_session_id
+        and not record.stage.get("afterany")
+        and not record.stage.get("syscall_launches")
+        and not stage_launch_job_ids(record)
+        and not record.experiment_job_id
+    )
     # A capacity park starts fresh before the first session or without resume support.
     # Other wakes NEED the author harness and saved session. Fail as a
     # named ending, not a crash: the run cannot proceed and re-waking will not
@@ -1623,8 +1640,13 @@ def _wake_author_sleep(
             not record.resume_session_id
             and not record.author_rebind_id
             and not record.stage.get("capacity_wait")
+            and not sessionless_checkpoint
         )
-        or (not getattr(harness, "supports_resume", True) and not record.stage.get("capacity_wait"))
+        or (
+            not getattr(harness, "supports_resume", True)
+            and not record.stage.get("capacity_wait")
+            and not sessionless_checkpoint
+        )
     ):
         return _end(
             AttemptResult(
@@ -1791,6 +1813,7 @@ def _wake_author_sleep(
             _utc_date(now),
             exclude=LINE_MEMORY_PATHS if wake_line else (),
             secrets=secrets,
+            guidance=panel_guidance,
         )
         if panel_lenses
         else None
@@ -1820,6 +1843,7 @@ def _wake_author_sleep(
             changed_paths=changed_paths,
             spec=spec,
             panel_runner=panel_runner,
+            guidance=author_guidance,
             on_inbox_delivered=acknowledge,
             tree_of=lambda sha: ws.git("rev-parse", f"{sha}^{{tree}}").strip(),
             on_stop=(lambda session: AttemptResult(outcome="review", session=session))
@@ -2725,8 +2749,9 @@ def _end_refused_wake(
     auth: TokenProvider | None = None,
     snapshot_attempted: bool = False,
 ) -> AttemptOutcome:
-    """End a parked run whose workspace the wake refused (a session altered
-    .git): ABORTED with the tampering as the note. The candidate snapshot's
+    """End a refused run with the reason recorded as its note.
+
+    For an altered .git, the candidate snapshot's
     retaining ref lives inside that same, now untrusted, repository and is
     deliberately not touched: deleting it would mean writing through the
     very structure the guard refused (a symlinked refs dir carries the write
@@ -2752,6 +2777,42 @@ def _end_refused_wake(
 
 
 def resume_run(
+    run_root: Path,
+    run_id: str,
+    *,
+    dispatch: DispatchSettings,
+    github: GitHubClient,
+    bot_auth: TokenProvider,
+    now: float,
+    secrets: tuple[str, ...] = (),
+    base_branch: str = "main",
+    panel_lenses: tuple[PanelLens, ...] = (),
+    panel_skip: str = "",
+    harness: Harness | None = None,
+    spec: RoleSpec | None = None,
+) -> AttemptOutcome:
+    try:
+        return _resume_run(
+            run_root,
+            run_id,
+            dispatch=dispatch,
+            github=github,
+            bot_auth=bot_auth,
+            now=now,
+            secrets=secrets,
+            base_branch=base_branch,
+            panel_lenses=panel_lenses,
+            panel_skip=panel_skip,
+            harness=harness,
+            spec=spec,
+        )
+    except BenchmarkNotFoundError as exc:
+        return _end_refused_wake(
+            run_root, load_record(run_root, run_id), exc, now, secrets, bot_auth
+        )
+
+
+def _resume_run(
     run_root: Path,
     run_id: str,
     *,
@@ -2850,6 +2911,7 @@ def resume_run(
                 single_branch=policy_branch,
             )
             current_contract = load_contract(contract_at(policy_ws, "HEAD"), record.target)
+            current_contract.benchmark(record.benchmark)
     except GitError:
         # A deleted base ends the wake as before; transport failures stay retryable.
         refs = ws.git_network(
@@ -2923,7 +2985,8 @@ def resume_run(
 
     base_sha = str(stage["base_sha"])
     candidate_sha = str(stage["candidate_sha"])
-    candidate_ref = str(stage["candidate_ref"])
+    # v0.2.1 author-sleep parks carry no candidate_ref; the current writer uses ""
+    candidate_ref = str(stage.get("candidate_ref") or "")
     issue_number = record.issue_number
     # the run's target branch rides the stage, so a wake opens its PR against
     # the branch the ORIGINAL climb selected — not the CLI's default (the wake
@@ -2936,7 +2999,7 @@ def resume_run(
     # its contract must not have the wake gate on the doctored rules.
     contract_text = contract_at(ws, base_sha)
     contract = load_contract(contract_text, record.target)
-    bench = _benchmark(contract, record.benchmark)
+    bench = contract.benchmark(record.benchmark)
     if contract.channels != current_contract.channels:
         # Keep the sealed scope, evaluation and verification rules, applying only
         # the current channels. Leave default contract bytes untouched.
@@ -2946,16 +3009,17 @@ def resume_run(
         data["channels"] = current_contract.channels.model_dump(exclude_defaults=True)
         contract_text = yaml.safe_dump(data)
         contract = load_contract(contract_text, record.target)
-        bench = _benchmark(contract, record.benchmark)
+        bench = contract.benchmark(record.benchmark)
+    # guidance rides the SAME pinned base sha the contract read above used —
+    # never the session's working tree
+    author_guidance, panel_guidance = guidance_at(ws, base_sha, contract.guidance)
     config = RunConfig(
         target=record.target,
         benchmark=record.benchmark,
         agent_id=record.agent_id,
         author_history=record.author_history,
     )
-    eval_minutes = next(
-        (b.eval_minutes for b in contract.benchmarks if b.name == record.benchmark), None
-    )
+    eval_minutes = contract.benchmark(record.benchmark).eval_minutes
     # a submitted park carries the author's declared eval walltime: the
     # wake's measurer (a re-dispatch) and deadline floor honor it
     declared = int(record.stage.get("eval_minutes", 0) or 0)  # type: ignore[call-overload]
@@ -3010,6 +3074,8 @@ def resume_run(
             panel_lenses=panel_lenses,
             issue_number=issue_number,
             eval_minutes=eval_minutes,
+            author_guidance=author_guidance,
+            panel_guidance=panel_guidance,
         )
 
     # rebuild the session from what the park saved: the (redacted) write-up and
@@ -3195,6 +3261,7 @@ def resume_run(
                     _dt.fromtimestamp(now, _UTC).strftime("%Y-%m-%d"),
                     exclude=(LINE_MEMORY_PATHS if _line_ref_for(bench, config.agent_id) else ()),
                     secrets=secrets,
+                    guidance=panel_guidance,
                 )(baseline, candidate, str(stage.get("report", "")))
             except Exception as exc:
                 if isinstance(exc, GitError) and _is_git_tamper(exc):
@@ -3411,26 +3478,20 @@ def resume_run(
     return outcome
 
 
-def _judge_lens_key(
+def _shelled_judge_key_path(
     *,
     backend: str,
     key_file_env: str,
     author_backend: str,
     claude_panel_path: Path,
-    image: str,
-) -> str:
-    """Resolve a non-claude judge lens's OWN key file, enforcing the three
-    separations every shelled judge shares (codex, hermes, any future
-    backend): the image is required (a judge never runs uncontained next to
-    key files), the key must be named explicitly, and it must differ from BOTH
-    the author's key of the same provider AND the claude panel key (a
-    cross-provider send would leak an anthropic credential to another login).
-    Returns the redacted key (or "" under an ADC-covered deployment)."""
-    if not image:
-        raise ValueError(
-            f"a {backend} panel lens requires --image (a shelled judge only "
-            "ever runs inside the container)"
-        )
+) -> Path:
+    """The ONE owner of the key-separation rules every shelled (codex, hermes)
+    panel judge shares — the manual climb and the tick preflight both call it:
+    the key is named explicitly, absolute (a climb runs from a flight directory,
+    so a relative path can resolve to the wrong file), and neither an author
+    key nor the claude panel key (a cross-provider send would leak an anthropic
+    credential to another login). Returns the expanded (not resolved) path;
+    callers resolve where they compare; raises ValueError on a violation."""
     raw = os.environ.get(key_file_env, "").strip()
     if not raw:
         raise ValueError(
@@ -3438,6 +3499,8 @@ def _judge_lens_key(
             "(role separation: the judge's own key, never the author's)"
         )
     path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{backend} panel key path {path} is relative; only absolute paths fly")
     for author in dict.fromkeys((author_backend, "claude", "codex", "hermes")):
         author_path = Path(resolve_author_key_file(author)).expanduser()
         if path.resolve() == author_path.resolve():
@@ -3450,7 +3513,32 @@ def _judge_lens_key(
             f"{backend} panel key file {path} is the claude panel key file "
             "(an anthropic key must never reach another provider's login)"
         )
-    return role_key(raw, backend)
+    return path
+
+
+def _judge_lens_key(
+    *,
+    backend: str,
+    key_file_env: str,
+    author_backend: str,
+    claude_panel_path: Path,
+    image: str,
+) -> str:
+    """A non-claude judge lens's OWN key: the image requirement plus the
+    shared separation rules above. Returns the redacted key (or "" under an
+    ADC-covered deployment)."""
+    if not image:
+        raise ValueError(
+            f"a {backend} panel lens requires --image (a shelled judge only "
+            "ever runs inside the container)"
+        )
+    key_path = _shelled_judge_key_path(
+        backend=backend,
+        key_file_env=key_file_env,
+        author_backend=author_backend,
+        claude_panel_path=claude_panel_path,
+    )
+    return role_key(key_path, backend)
 
 
 def _panel_lenses_from_args(
@@ -3579,29 +3667,20 @@ def _panel_lenses_from_args(
     return tuple(lenses), tuple(dict.fromkeys(secrets))
 
 
-def _panel_claim_body(
-    benchmark: str, baseline: float, candidate: float, report: str, *, lines: bool
-) -> str:
-    """The synthetic claim the panel judges. On a research-lines target the
-    one-idea mandate is part of the claim itself: the panel is the
-    backstop against a line's accumulated tweaks reaching main as one PR
-    (docs/design/research-lines.md)."""
-    mandate = (
-        "\n\nThis target runs research lines: a PR to main is ONE idea, "
-        "extracted onto the base branch. An idea may bring the few changes "
-        "it needs, such as the hyperparameters it shifts, when the report "
-        "documents each change's own effect. Independent ideas bundled "
-        "together, or a win the report does not attribute, is a BLOCKING "
-        "finding: name the pieces that should be separated."
-        if lines
-        else ""
-    )
-    return (
+def _panel_claim_body(benchmark: str, baseline: float, candidate: float, report: str) -> str:
+    """The synthetic claim the panel judges: the kernel's measured claim plus
+    the author's report and nothing else — this repository's guidance travels
+    in the judges' own prompt (run_panel's `guidance`), never inside this
+    body, which every judge prompt fences as untrusted data. The report
+    budget subtracts the actual header so the body never outgrows the cap
+    the verify prompt fences it under."""
+    header = (
         f"Automated improvement claim (pre-PR): {benchmark} "
-        f"{baseline} -> {candidate}, measured by the orchestrator.{mandate}\n\n"
+        f"{baseline} -> {candidate}, measured by the orchestrator.\n\n"
         f"## Research report\n\n*Session prose, written before "
-        f"the orchestrator measured.*\n\n{report[:MAX_CLAIM_CHARS]}"
+        f"the orchestrator measured.*\n\n"
     )
+    return f"{header}{report[: MAX_CLAIM_CHARS - len(header)]}"
 
 
 def build_panel_runner(
@@ -3618,6 +3697,7 @@ def build_panel_runner(
     exclude: tuple[str, ...] = (),
     claim_body: Callable[[float, float, str], str] | None = None,
     secrets: tuple[str, ...] = (),
+    guidance: str = "",
 ) -> Callable[[float, float, str], PanelVerdict]:
     """The git half of the pre-PR panel: prepare the two read-only checkouts
     and the synthetic claim, then hand off to `run_panel` (which owns no git).
@@ -3629,13 +3709,16 @@ def build_panel_runner(
     round because the tree changes with every revision.
 
     `claim_body` renders the claim the panel judges from (baseline,
-    candidate, report); the default is the credited improvement claim."""
+    candidate, report); the default is the credited improvement claim.
+    `guidance` is this repository's panel guidance, read from the same ref
+    as `contract_text` — carried in the judges' prompt as advisory text,
+    never inside the claim body."""
     from outerloop.review_agent import sanitize_checkout
 
     reads = {"n": start_round}
     render_claim = claim_body or (
         lambda baseline, candidate, report: _panel_claim_body(
-            benchmark, baseline, candidate, report, lines=bool(exclude)
+            benchmark, baseline, candidate, report
         )
     )
 
@@ -3697,7 +3780,9 @@ def build_panel_runner(
                 ),
                 author=bot_login,
             )
-            return run_panel(lenses, panel_ws, claim, contract_text, today, reads["n"])
+            return run_panel(
+                lenses, panel_ws, claim, contract_text, today, reads["n"], guidance=guidance
+            )
         finally:
             for name in ("base", "pr-head"):
                 _best_effort(
@@ -3951,7 +4036,12 @@ def publish(
     record = dc_replace(
         record, stage={**record.stage, "base_sha": base_sha, "base_branch": base_branch}
     )
-    bench = _benchmark(contract, config.benchmark)
+    try:
+        bench = contract.benchmark(config.benchmark)
+    except BenchmarkNotFoundError as exc:
+        return _end_refused_wake(
+            run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+        )
 
     def refuse(
         text: str, head: str = "", *, moved: bool = False, quoted_text: str = ""
@@ -4025,16 +4115,20 @@ def publish(
     try:
         ws.fetch_origin()
         pinned = load_contract(contract_at(ws, base_sha), config.target)
-        pinned_bench = _benchmark(pinned, config.benchmark)
+        pinned_bench = pinned.benchmark(config.benchmark)
         current = load_contract(contract_at(ws, f"origin/{base_branch}"), config.target)
-        current_bench = next((b for b in current.benchmarks if b.name == bench.name), None)
-
-        if (
-            current_bench is None
-            or _publish_signature(current_bench) != _publish_signature(pinned_bench)
-            or _publish_signature(pinned_bench) != _publish_signature(bench)
-        ):
+        if bench.name not in [b.name for b in current.benchmarks]:
             return refuse("Publish refused: the base contract's measurement signature changed.")
+        current_bench = current.benchmark(bench.name)
+
+        if _publish_signature(current_bench) != _publish_signature(
+            pinned_bench
+        ) or _publish_signature(pinned_bench) != _publish_signature(bench):
+            return refuse("Publish refused: the base contract's measurement signature changed.")
+    except BenchmarkNotFoundError as exc:
+        return _end_refused_wake(
+            run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+        )
     except Exception as exc:
         return refuse(
             "Publish refused: cannot confirm the base contract.",
@@ -4297,7 +4391,7 @@ def publish(
         branch = f"{config.branch_prefix}/{run_id}"
         if result.baseline is None or result.candidate is None or not result.candidate_sha:
             raise EvalError("improved result missing measurements or the sealed sha")
-        bench = next(b for b in contract.benchmarks if b.name == config.benchmark)
+        bench = contract.benchmark(config.benchmark)
         baseline, candidate = result.baseline, result.candidate
         # IDEMPOTENCY: a wake may have opened the PR and died before
         # recording it (the run stays PARKED and is woken again). If a PR
@@ -4639,9 +4733,17 @@ def live_attempt(
         _exclude_merge_artifacts(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
+        # guidance is read from the SAME base-branch ref the contract tree
+        # was checked out from, via git objects only (never the working
+        # tree, where a symlink could read outside the repo) — before any
+        # line checkout, so a line cannot shape its own guidance (same rule
+        # as its budgets)
+        author_guidance, panel_guidance = guidance_at(
+            ws, f"origin/{base_branch}", contract.guidance
+        )
         record = dc_replace(
             record,
-            verification=_benchmark(contract, config.benchmark).verification,
+            verification=contract.benchmark(config.benchmark).verification,
             channels=contract.channels.model_dump(exclude_defaults=True),
         )
         # Default policy retains the existing best-effort record-write behavior.
@@ -4691,14 +4793,12 @@ def live_attempt(
             if float(marker.get("submitted_at", 0) or 0) >= week_ago
             and str(marker.get("job_id", "")) not in recorded_jobs
         )
-        _budget_bench = next((b for b in contract.benchmarks if b.name == config.benchmark), None)
+        _budget_bench = contract.benchmark(config.benchmark)
         config = dc_replace(
             config,
             budget=BudgetState(
                 gpu_hours_remaining=(
-                    float(contract.budgets.gpu_hours_per_run or 0.0)
-                    if _budget_bench is not None and _budget_bench.gpus
-                    else 0.0
+                    float(contract.budgets.gpu_hours_per_run or 0.0) if _budget_bench.gpus else 0.0
                 ),
                 runs_remaining_this_week=max(0, int(contract.budgets.runs_per_week) - used_week),
             ),
@@ -4712,13 +4812,13 @@ def live_attempt(
         # untracked `.outerloop/` file must be staged and judged like any
         # other agent edit, not silently hidden by a magic dir name (the off
         # state stays byte-identical).
-        _bench = next((b for b in contract.benchmarks if b.name == config.benchmark), None)
+        _bench = contract.benchmark(config.benchmark)
         # Research lines: move HEAD to the agent's own branch BEFORE anything
         # reads the tree — the contract above came from the base branch (a
         # line must not shape its own budgets), and the syscall-channel check
         # below must see the line's tree. A failed checkout falls back to the
         # base branch: a run is never lost to its notebook.
-        lines_active = _bench is not None and _bench.lines and bool(config.agent_id)
+        lines_active = _bench.lines and bool(config.agent_id)
         line_ref = ""
         if lines_active:
             try:
@@ -4757,10 +4857,9 @@ def live_attempt(
                     ).strip()
             except Exception:
                 line_divergence = ""
-        author_syscalls = _bench is not None and (
-            (dispatch is not None and getattr(harness, "supports_resume", True))
-            or _bench.verification == "self_report"
-        )
+        author_syscalls = (
+            dispatch is not None and getattr(harness, "supports_resume", True)
+        ) or _bench.verification == "self_report"
         # The `.outerloop/` channel must be KERNEL-OWNED. In a fresh clone,
         # anything already at that path was committed by the TARGET — a symlink
         # (install would write through it to a host path with our permissions),
@@ -4783,7 +4882,6 @@ def live_attempt(
             else []
         )
         if author_syscalls:
-            assert _bench is not None
             syscall_excluded(workspace)
             # the author's interface is the TOOL (`python .outerloop/syscall
             # launch ... -- <cmd>`; `... sleep`), never the raw ABI file —
@@ -4826,9 +4924,7 @@ def live_attempt(
         # is the benchmark's eval-time hint against the in-job runway, decided
         # ONCE here so the baseline setup, the measurer, and the park deadline
         # all agree on it.
-        eval_minutes = next(
-            (b.eval_minutes for b in contract.benchmarks if b.name == config.benchmark), None
-        )
+        eval_minutes = contract.benchmark(config.benchmark).eval_minutes
         wants_dispatch = should_dispatch(eval_minutes)
         dispatched = dispatch is not None and wants_dispatch
         if wants_dispatch and dispatch is None:
@@ -4860,6 +4956,7 @@ def live_attempt(
                 created[:10],
                 exclude=LINE_MEMORY_PATHS if lines_active else (),
                 secrets=secrets,
+                guidance=panel_guidance,
             )
             if panel_lenses
             else None
@@ -4965,6 +5062,7 @@ def live_attempt(
                 line_ref=line_ref,
                 line_memory=line_memory,
                 line_divergence=line_divergence,
+                guidance=author_guidance,
                 launcher=launcher,
                 watcher=(
                     _make_watcher(dispatch, run_root, run_id, workspace, config)
@@ -5970,7 +6068,7 @@ def finish_run(
                 contract_at(ws, str(record.stage.get("base_sha") or f"origin/{base_branch}")),
                 record.target,
             )
-            bench = _benchmark(contract, record.benchmark)
+            bench = contract.benchmark(record.benchmark)
             line_ref = _line_ref_for(bench, record.agent_id)
             _push_line_snapshot(
                 ws,

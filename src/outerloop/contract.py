@@ -21,12 +21,20 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from outerloop import guidance_pack
+
 SELF_REPO = "outerloop-science/outerloop"
 # The contract file in the target repo; never a writable path for the agent.
 CONTRACT_NAME = ".outerloop.yaml"
 ALWAYS_FORBIDDEN: tuple[str, ...] = (".github", CONTRACT_NAME)
 MAX_CONTRACT_BYTES = 64 * 1024
 _GLOB_CHARS = set("*?[]!")
+
+# Guidance texts are advisory and base-reviewed (same trust as the contract),
+# so they are not fenced — but they are capped like every brief input.
+MAX_GUIDANCE_CHARS = 8_000
+# The two files a directory-mode contract reads under its guidance directory.
+GUIDANCE_FILES = ("author.md", "panel.md")
 
 
 def find_contract(read: Callable[[str], str | None]) -> tuple[str, str] | None:
@@ -49,8 +57,61 @@ def contract_text_in_tree(tree: Path) -> str:
     return found[1]
 
 
+def _guidance_dir(mode: str) -> PurePosixPath:
+    """The repo-relative guidance directory a contract's `guidance` names —
+    `default` and `none` never reach here (they need no files). The path
+    normalizer rejects escapes, globs and the git dir; `.outerloop/` is
+    refused on top because it is the workspace syscall channel, which
+    nothing may ever read guidance from."""
+    path = normalize_path(mode)
+    if path.parts[0].casefold() == ".outerloop":
+        raise ScopeError(
+            f"guidance must not point into .outerloop/ (the workspace syscall channel): {mode!r}"
+        )
+    # a research line's memory is the agent's own writable notebook, exempt
+    # from the forbidden-path check (attempt.LINE_MEMORY_PATHS)
+    if path.parts[0].casefold() in ("agent_memory", "agent_memory.md"):
+        raise ScopeError(f"guidance must not live in the agent's line memory: {mode!r}")
+    return path
+
+
+def _capped(text: str) -> str:
+    if len(text) <= MAX_GUIDANCE_CHARS:
+        return text
+    marker = "\n[truncated to the guidance budget]"
+    return text[: MAX_GUIDANCE_CHARS - len(marker)].rstrip() + marker
+
+
+def read_guidance(read: Callable[[str], str | None], mode: str) -> tuple[str, str]:
+    """The (author, panel) guidance texts for a contract's `guidance` mode.
+
+    `read` fetches a repo-relative file's blob from the SAME ref/sha the
+    contract was read at — guidance is base-reviewed text with the
+    contract's trust, never workspace state, so an agent cannot influence
+    it (the reader must go through git objects, never the working tree, and
+    refuses a symlink blob, whose text is its target rather than file
+    content). `default` is the in-kernel pack (guidance_pack); `none` is
+    empty; a directory mode reads `<dir>/author.md` and `<dir>/panel.md`,
+    where a missing file is empty guidance — advisory, never a contract
+    error. Each text is capped at MAX_GUIDANCE_CHARS."""
+    if mode == "none":
+        return ("", "")
+    if mode == "default":
+        return (guidance_pack.AUTHOR, guidance_pack.PANEL)
+    base = _guidance_dir(mode)
+    texts = [
+        raw if raw is None else _capped(raw)
+        for raw in (read(f"{base}/{name}") for name in GUIDANCE_FILES)
+    ]
+    return (texts[0] or "", texts[1] or "")
+
+
 class ContractError(ValueError):
     """Base class for contract rejections."""
+
+
+class BenchmarkNotFoundError(ContractError):
+    """The run's benchmark is not in the contract (renamed or removed)."""
 
 
 class SelfTargetError(ContractError):
@@ -82,6 +143,42 @@ class _SafeLoader(yaml.SafeLoader):
 class _StrictModel(BaseModel):
     # Typos in a contract must fail loudly, never be silently ignored.
     model_config = ConfigDict(extra="forbid")
+
+
+class Regression(_StrictModel):
+    """Sibling regression allowance, in one unit family per block.
+
+    free_rel: fraction of the sibling's absolute baseline always allowed;
+    defaults to its min_delta_rel (or zero). max_rel: optional exclusive
+    hard cap. requires_gain_rel: climbed benchmark's minimum relative gain
+    to unlock the interval above free_rel; requires max_rel. The absolute
+    twins free/max/requires_gain use sibling/climbed metric units respectively.
+    Without a cap, free is the entire allowance. All values must be finite
+    and nonnegative; fractions may exceed one for unbounded metrics.
+    """
+
+    free_rel: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_rel: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    requires_gain_rel: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    free: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    requires_gain: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _bounds(self) -> Regression:
+        relative = any(v is not None for v in (self.free_rel, self.max_rel, self.requires_gain_rel))
+        absolute = any(v is not None for v in (self.free, self.max, self.requires_gain))
+        if relative and absolute:
+            raise ValueError("regression must use either relative or absolute units, not both")
+        for free, cap, gain in (
+            (self.free_rel, self.max_rel, self.requires_gain_rel),
+            (self.free, self.max, self.requires_gain),
+        ):
+            if gain is not None and cap is None:
+                raise ValueError("regression requires_gain requires max in the same units")
+            if free is not None and cap is not None and free > cap:
+                raise ValueError("regression free must be <= max")
+        return self
 
 
 class Benchmark(_StrictModel):
@@ -168,6 +265,8 @@ class Benchmark(_StrictModel):
         so a future field joins the signature by default and the base-sync
         skip fails toward re-measuring."""
         data = self.model_dump()
+        if self.regression is None:
+            data.pop("regression")
         # Preserve existing gate ledger signatures across the schema addition.
         if self.verification == "gate":
             data.pop("verification")
@@ -208,6 +307,23 @@ class Benchmark(_StrictModel):
                 "min_delta_rel (> 0) from a seed-variance calibration"
             )
         return self
+
+    @model_validator(mode="after")
+    def _regression_defaults(self) -> Benchmark:
+        r = self.regression
+        if r is not None and r.free is None and r.free_rel is None:
+            absolute = r.max is not None or r.requires_gain is not None
+            relative = r.max_rel is not None or r.requires_gain_rel is not None
+            if relative or (not absolute and self.min_delta_rel is not None):
+                defaults = {"free_rel": self.min_delta_rel or 0.0}
+            else:
+                defaults = {"free": self.min_delta or 0.0}
+            self.regression = Regression.model_validate(r.model_dump() | defaults)
+        return self
+
+    # Optional sibling-only policy; never changes this benchmark's win floor.
+    # Omission preserves the legacy gate and measurement signature.
+    regression: Regression | None = None
 
     # Cross-seed noise floor. A comparison against the RECORDED best was
     # measured under a different seed, so a delta inside the floor is noise,
@@ -298,19 +414,6 @@ class Budgets(_StrictModel):
     # in. Unset: the author's own pace, the whole array by default.
     max_concurrent_gpus: int | None = Field(default=None, ge=1)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _accept_legacy_climb_job_minutes(cls, data: Any) -> Any:
-        # TRANSITIONAL: the field was `climb_job_minutes`. Map the legacy key
-        # to the new name before validation (new name wins if BOTH appear, so
-        # a mid-migration contract never fails), and consume it so extra=forbid
-        # does not reject it. Drop this once the (two) live contracts migrate.
-        if isinstance(data, dict) and "climb_job_minutes" in data:
-            data = dict(data)
-            legacy = data.pop("climb_job_minutes")
-            data.setdefault("attempt_job_minutes", legacy)
-        return data
-
 
 class Scope(_StrictModel):
     allowed: list[str] = Field(min_length=1)
@@ -368,9 +471,33 @@ class Contract(_StrictModel):
     #     freshness check and a direct merge: GitHub itself refuses a
     #     stale-base merge); NO required review. The gate is the whole
     #     conscience in auto mode — the floor (min_delta), the suite
-    #     no-regression phase, and the panel's taste rubric all bind
-    #     BEFORE publish.
+    #     no-regression phase, and the panel's VALIDITY findings all bind
+    #     BEFORE publish; the panel's taste findings are advisory guidance
+    #     and never block.
     merge: Literal["manual", "auto"] = "manual"
+    # GUIDANCE (docs/design/agent-environment.md): which research-taste pack
+    # the author brief and the panel claim carry, as advisory text labelled
+    # and placed last. `default` (the in-kernel pack), `none`, or a
+    # repo-relative directory holding author.md and panel.md — recommended
+    # location `.github/outerloop/guidance/`, which agents can never write.
+    # Read via git objects from the same ref as the contract (a symlink
+    # blob is refused); a missing file is empty guidance, never a contract
+    # error. Never into `.outerloop/`.
+    guidance: str = "default"
+
+    @field_validator("guidance")
+    @classmethod
+    def _guidance_mode(cls, value: str) -> str:
+        if value not in ("default", "none"):
+            _guidance_dir(value)  # raises ScopeError on anything unsafe
+        return value
+
+    def benchmark(self, name: str) -> Benchmark:
+        for bench in self.benchmarks:
+            if bench.name == name:
+                return bench
+        names = [bench.name for bench in self.benchmarks]
+        raise BenchmarkNotFoundError(f"benchmark {name!r} not in contract ({names})")
 
     @field_validator("benchmarks")
     @classmethod
@@ -421,9 +548,13 @@ def normalize_path(entry: str) -> PurePosixPath:
 
 
 def forbidden_paths(contract: Contract) -> tuple[str, ...]:
-    """Write paths forbidden for this contract: the hard-coded set plus the
-    target's roadmap."""
-    return (*ALWAYS_FORBIDDEN, str(normalize_path(contract.roadmap)))
+    """Write paths forbidden for this contract: the hard-coded set, the
+    target's roadmap, and a guidance directory — trusted text, so agents can
+    never write it, wherever the repository keeps it (like the contract)."""
+    guidance = (
+        () if contract.guidance in ("default", "none") else (str(_guidance_dir(contract.guidance)),)
+    )
+    return (*ALWAYS_FORBIDDEN, str(normalize_path(contract.roadmap)), *guidance)
 
 
 def _fold(path: PurePosixPath) -> PurePosixPath:

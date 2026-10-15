@@ -28,6 +28,7 @@ from outerloop.harness import (
     Harness,
     HermesHarness,
     SessionResult,
+    budget_exhausted,
     default_claude_model,
     vertex_from_env,
 )
@@ -217,6 +218,36 @@ def redact_role_result(result: RoleResult, harness: Harness) -> RoleResult:
     return replace(result, data=clean(result.data), error=clean(result.error))
 
 
+# Where to read this process's cgroup v2 memory.events; None resolves it from
+# /proc (tests point it at a temp file).
+_MEMORY_EVENTS: Path | None = None
+
+
+def _oom_kills() -> int | None:
+    """The oom_kill count of this process's cgroup, or None when it cannot
+    be read (no cgroup v2, a missing file, a local run)."""
+    events = _MEMORY_EVENTS
+    if events is None:
+        try:
+            # cgroup v2 lists one hierarchy per line, v2's as "0::<rel path>"
+            rel = next(
+                line.split(":", 2)[2]
+                for line in Path("/proc/self/cgroup").read_text().splitlines()
+                if line.startswith("0::")
+            )
+            events = Path("/sys/fs/cgroup", rel.lstrip("/"), "memory.events")
+        except (OSError, StopIteration):
+            return None
+    try:
+        for line in events.read_text().splitlines():
+            key, _, count = line.partition(" ")
+            if key == "oom_kill":
+                return int(count)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def run_role(
     spec: RoleSpec,
     harness: Harness,
@@ -246,8 +277,32 @@ def run_role(
         from outerloop.syscall import tool_command
 
         brief_text = brief_text.replace("python .outerloop/syscall", tool_command(workspace))
+    oom_before = _oom_kills()
     session = harness.run(brief_text, workspace, resume_session_id)
     if session.is_error:
+        after = _oom_kills()
+        if (
+            not budget_exhausted(session)
+            and oom_before is not None
+            and after is not None
+            and (killed := after - oom_before) > 0
+        ):
+            # An OOM kill leaves the session only a symptom (the bridge's
+            # blanket "unavailable or interrupted"); the cgroup's oom_kill
+            # counter records it, so the observation goes ahead of that
+            # symptom. The counter counts any kill in the cgroup — the job's
+            # limit, a global OOM, or another process sharing it — so the
+            # cause names only what was seen, not who did it. A budget ending
+            # keeps its own detail — an experiment the session OOM-killed
+            # mid-run must not turn "caps hit" into an error.
+            cause = (
+                "an out-of-memory kill happened in this job during the "
+                f"session (oom_kill +{killed})"
+            )
+            session = replace(
+                session,
+                error_detail=f"{cause}; {session.error_detail}" if session.error_detail else cause,
+            )
         return RoleResult(
             ok=False, session=session, error=session.error_detail or session.stop_reason
         )
