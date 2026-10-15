@@ -747,8 +747,12 @@ def test_multi_node_eval_runs_on_every_node_and_reports_node_zero(tmp_path):
     [
         ('[ "$NODE_RANK" = 1 ] && exit 7; echo "{}"', "7"),  # only node 1 failed
         ('[ "$NODE_RANK" = 0 ] && exit 3; exit 9', "3"),  # node 0 first
-        # node 0 was killed (143) after node 1 failed: node 1 is the failure
+        # node 0 was stopped (143) after node 1 failed: node 1 is the failure
         ('[ "$NODE_RANK" = 0 ] && exit 143; exit 5', "5"),
+        # node 0 was killed outright and left no code: still node 1's failure
+        ('[ "$NODE_RANK" = 0 ] && kill -9 $PPID; exit 5', "5"),
+        # only a killed node: srun's code
+        ('[ "$NODE_RANK" = 1 ] && kill -9 $PPID; echo "{}"', "137"),
     ],
 )
 def test_multi_node_eval_reports_the_failing_node(tmp_path, command, expected):

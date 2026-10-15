@@ -355,8 +355,9 @@ def write_eval_job(
     set, writing `node-<rank>.{stdout,stderr,exit-code,setup.log}` in the job
     dir. Node 0's stdout and stderr become the eval's; its exit code is the
     eval's unless another node failed, in which case the first failing
-    node's code is (a node that left none reads as srun's code, else 1; a
-    node srun killed after another failed is not the failure). A failing
+    node's code is (a node srun stopped because another failed, which reads
+    143 or leaves no code, is not the failure; when every failure is such a
+    stop, its code or srun's is the eval's). A failing
     node exits nonzero, so srun stops the rest instead of letting them wait
     at the rendezvous.
     Artifacts are copied from node 0's tree only.
@@ -656,8 +657,9 @@ def _node_lines(body: list[str], copy_out: list[str]) -> list[str]:
 def _coordinator_lines(node_script: Path) -> list[str]:
     """The batch step of a multi-node eval: name node 0 the rendezvous host,
     run `node_script` once per node, then publish node 0's output and the
-    first failing node's exit code (node 0 first; a node killed because
-    another failed does not count as the failure) as the eval's."""
+    first failing node's exit code (node 0 first; a node srun stopped because
+    another failed, which reads 143 or left no code, does not count as the
+    failure) as the eval's."""
     return [
         "export EV REPO",
         '[ -s "$EV/command.txt" ] || { echo 96 > "$EV/exit-code"; exit 0; }',
@@ -676,16 +678,19 @@ def _coordinator_lines(node_script: Path) -> list[str]:
         'cp "$EV/node-0.stdout" "$EV/stdout" 2>/dev/null || : > "$EV/stdout"',
         'cp "$EV/node-0.stderr" "$EV/stderr" 2>/dev/null || : > "$EV/stderr"',
         'cat "$EV"/node-*.setup.log > "$EV/setup.log" 2>/dev/null || true',
-        # a node srun killed after another failed reads 143: report the
-        # failure, and 143 only when no node failed any other way
-        'RC=""; KILLED=""; R=0',
+        # srun stops the other nodes when one fails: a stopped node reads 143
+        # (terminated) or leaves no code at all (killed after the grace
+        # period). Report the node that failed; a stopped node's code only
+        # when no node failed any other way
+        'RC=""; STOPPED=""; R=0',
         'while [ "$R" -lt "$OUTERLOOP_NNODES" ]; do '
         'C=$(cat "$EV/node-$R.exit-code" 2>/dev/null || echo missing); '
-        'if [ "$C" = missing ]; then C=$SRUN_RC; [ "$C" = 0 ] && C=1; fi; '
-        'if [ "$C" = 143 ]; then KILLED=143; '
+        'if [ "$C" = missing ]; then [ "$SRUN_RC" = 0 ] && C=1 || C=$SRUN_RC; '
+        '[ -z "$STOPPED" ] && STOPPED=$C; '
+        'elif [ "$C" = 143 ]; then [ -z "$STOPPED" ] && STOPPED=143; '
         'elif [ -z "$RC" ] && [ "$C" != 0 ]; then RC=$C; fi; '
         "R=$((R + 1)); done",
-        'echo "${RC:-${KILLED:-0}}" > "$EV/exit-code"',
+        'echo "${RC:-${STOPPED:-0}}" > "$EV/exit-code"',
         "exit 0",
     ]
 
