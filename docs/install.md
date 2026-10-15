@@ -88,7 +88,8 @@ That's the whole setup. Notes:
   that's how it knows never to review its own (or your bot's) pull requests.
   If you have no bot yet, any placeholder login works.
 - **If you forked this repo**, add `reviewer_repo: your-org/outerloop` under
-  `with:` — otherwise your fork's changes never run.
+  `with:` and point `uses:` and `reviewer_ref` at a ref your fork has —
+  otherwise your fork's changes never run.
 - **Track releases with `v0`**: maintainers move the `v0` tag to each final
   release (never a dev or rc, never a push to `main`), so with `@v0` and
   `reviewer_ref: v0` the code that holds your reviewer key changes only when a
