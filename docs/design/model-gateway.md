@@ -76,7 +76,9 @@ every author and judge session reaches by URL, whatever the backend.
   sessions: a session reads the endpoint file once, at start, so the old
   gateway keeps serving until every session that started on it has ended.
   Start the new gateway, republish the endpoint file (new sessions move),
-  then stop the old one when its last session ends or its walltime nears.
+  then stop the old one when its last session ends. Where the gateway runs
+  as a scheduler job, its walltime must exceed the longest session it
+  admits; a session still on it at walltime gets a retryable error.
 
 ## What changes for sessions
 
@@ -114,7 +116,8 @@ every author and judge session reaches by URL, whatever the backend.
 
 A scripted session per (harness version, gateway version, upstream server)
 triple: tool calls, freeform `apply_patch`, resume, streaming, and a refused
-unsupported part. Run before any of the three pins moves. It would have
+unsupported part, plus an author key refused on a judge route and model. Run
+before any of the three pins moves. It would have
 caught the Codex 0.160 tool types before it reached all deployments, and it
 records each harness's client retry window so a restart knows how long the
 old gateway must keep answering.
