@@ -8,7 +8,8 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    # vX.Y.Z only: the moving v0 alias (RELEASING.md) must not republish
+    tags: ["v*.*.*"]
 
 permissions: {}
 

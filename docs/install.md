@@ -35,8 +35,9 @@ jobs:
   advisory:
     # a labeled event only runs for the outerloop:review label (manual re-review)
     if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
-    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
     with:
+      reviewer_ref: v0             # keep on the same ref as the line above
       bot_login: my-bot            # PRs by this login are never reviewed
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
@@ -55,8 +56,9 @@ same reusable, different backend. Each opinion posts its own labeled round:
 ```yaml
   second-opinion:
     if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
-    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
     with:
+      reviewer_ref: v0
       bot_login: my-bot
       backend: hermes
       model: openai/gpt-5.6-terra  # any OpenRouter id
@@ -86,9 +88,16 @@ That's the whole setup. Notes:
   that's how it knows never to review its own (or your bot's) pull requests.
   If you have no bot yet, any placeholder login works.
 - **If you forked this repo**, add `reviewer_repo: your-org/outerloop` under
-  `with:` — otherwise your fork's changes never run.
-- **Pin the version in production**: `reviewer_ref: v0.1.0` (or a commit SHA).
-  The default `main` moves.
+  `with:` and point `uses:` and `reviewer_ref` at a ref your fork has —
+  otherwise your fork's changes never run.
+- **Track releases with `v0`**: maintainers move the `v0` tag to each final
+  release (never a dev or rc, never a push to `main`), so with `@v0` and
+  `reviewer_ref: v0` the code that holds your reviewer key changes only when a
+  release is cut. Keep the two refs the same.
+  Left unset, `reviewer_ref` defaults to `main`, which moves on every push. A
+  tag is a convention, not a lock: it trusts whoever can push tags to this
+  repository. For code that cannot change under you, pin a full commit SHA in
+  both places (or an exact release such as `v0.3.0`) and bump it by hand.
 - Silence it on one PR with the `outerloop:no-review` label.
 - Fork PRs are skipped by design: they must not reach your API key.
 - Nothing from the pull request is ever executed. The workflow checks out the
@@ -121,7 +130,9 @@ permissions:
 concurrency: maintenance
 jobs:
   digest:
-    uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@main
+    uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@v0
+    with:
+      reviewer_ref: v0
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
 ```

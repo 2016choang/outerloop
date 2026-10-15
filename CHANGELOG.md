@@ -8,6 +8,12 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- The advisory-review examples and install guide track the `v0` release tag
+  (`@v0` with `reviewer_ref: v0`) instead of `main` or an exact release. `v0`
+  moves only when a final release is cut (a new `RELEASING.md` step), so
+  callers follow releases without hand bumps and never run the moving branch
+  with their reviewer key (#494).
+
 - Research taste moved out of the kernel and into a configurable GUIDANCE
   layer. Kernel agent-facing text (the author brief, the panel claim, the
   verifier rubric) now carries only mechanics; a new top-level contract key
