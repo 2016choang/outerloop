@@ -1483,7 +1483,7 @@ def handoff_git_dir(root: Path | None) -> None:
     listing, remembered so the kernel git calls until the next untrusted
     launch neither re-run the guard nor re-list the filters."""
     ensure_regular_git_dir(root)
-    if root is not None:
+    if root is not None and (Path(root) / ".git").is_dir():
         _FILTER_OVERRIDES[Path(root).resolve()] = _filter_override_pairs(root)
 
 
@@ -1614,12 +1614,13 @@ class Workspace:
 
     def git_network(self, *args: str) -> str:
         """Run a git subcommand that talks to the remote, with credentials.
-        The config is sanitized at each hand-off (redirect sections stripped),
-        and the fetch/push pass an explicit URL + refspec, so no
-        session-controlled remote or rewrite can steer a credentialed op."""
+        The full guard runs on every call, hand-off or not, since it also
+        sanitizes the config (redirect sections stripped), and the fetch/push
+        pass an explicit URL + refspec, so no session-controlled remote or
+        rewrite can steer a credentialed op."""
         if args and args[0] not in NETWORK_GIT_COMMANDS:
             raise ValueError(f"{args[0]!r} is not a network git command")
-        _guard_git_dir(self.root)
+        ensure_regular_git_dir(self.root)  # sanitizes the config first, too
         token = self.auth.token() if self.auth is not None else None
         return _run_git_with_credential(
             ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args],

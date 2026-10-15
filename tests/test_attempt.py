@@ -5881,8 +5881,10 @@ def test_one_handoff_check_covers_a_leg_of_kernel_git_calls(tmp_path, monkeypatc
     """The tamper check runs at each hand-off, not on every git call. An
     agent-made worktree and research branch pass it (agent freedom), and the
     kernel git calls after one check reuse its single filter listing."""
+    import shutil
+
     import outerloop.github as github_mod
-    from outerloop.github import Workspace, handoff_git_dir
+    from outerloop.github import GitError, Workspace, forget_filter_overrides, handoff_git_dir
 
     root = tmp_path / "ws"
     root.mkdir()
@@ -5911,6 +5913,14 @@ def test_one_handoff_check_covers_a_leg_of_kernel_git_calls(tmp_path, monkeypatc
         ws.git("rev-parse", "HEAD")
         ws.git("log", "--oneline", "-1")
     assert len(listings) == 1
+
+    # untrusted code launches: the mark goes, so a reshaped .git is refused again
+    forget_filter_overrides(root)
+    pack = root / ".git" / "objects" / "pack"
+    shutil.rmtree(pack)
+    pack.symlink_to(tmp_path)
+    with pytest.raises(GitError, match="symlink"):
+        ws.git("rev-parse", "HEAD")
 
 
 def test_with_seed_fills_the_seed_from_the_records_target(tmp_path) -> None:
