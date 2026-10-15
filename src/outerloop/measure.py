@@ -403,7 +403,9 @@ class DispatchedMeasurer:
         the original attempt and retries reserved before submission;
         re-dispatch up to the original attempt plus two retries, then park
         until an operator fixes the cause and deletes the journal. Anything
-        else is the measure's own failure."""
+        else is the measure's own failure.
+        A crash between reserving and submitting spends that retry, erring
+        toward fewer retries, never more."""
         prior = self._retry_journal(m)
         job_id = self._marker(m) or prior.get("job_id", "")
         baseline = m.name == "baseline" or (m.name.startswith("sib-") and m.name.endswith("-base"))
@@ -470,7 +472,7 @@ class DispatchedMeasurer:
             extra=self.gpu_extra if m.gpus and self.compute.has_lanes else (),
         )
         from outerloop.harness_cli import write_atomic
-        from outerloop.operator_limits import run_target, state_root, submit_batch
+        from outerloop.operator_limits import CapacityError, run_target, state_root, submit_batch
 
         prior = self._retry_journal(m)
         if prior:
@@ -491,7 +493,7 @@ class DispatchedMeasurer:
                 self.compute,
                 [spec],
             )[0]
-        except Exception:
+        except CapacityError:
             if prior:
                 write_atomic(self._infra_retry_path(m), json.dumps(prior))
             raise
