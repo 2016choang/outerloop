@@ -62,8 +62,10 @@ from outerloop.github import (
     Workspace,
     contract_at,
     ensure_regular_git_dir,
+    forget_filter_overrides,
     git_identity,
     guidance_at,
+    handoff_git_dir,
 )
 from outerloop.harness import (
     ClaudeModelUnset,
@@ -2890,12 +2892,13 @@ def _resume_run(
     )
     # A session reshaped .git (symlinked object store, gitdir file, FIFO) is
     # refused BEFORE anything writes through it: the exclude below opens
-    # .git/info/exclude, and every ws.git call re-checks. The refusal ENDS
+    # .git/info/exclude, and this hand-off check covers every kernel git call
+    # until the author session resumes. The refusal ENDS
     # the parked run with the tampering as its note — the tree cannot be
     # trusted, and a record left waiting would only be re-woken into the
     # same refusal.
     try:
-        ensure_regular_git_dir(workspace)
+        handoff_git_dir(workspace)
     except GitError as exc:
         return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
     # Discover CURRENT policy outside the author's object store before fetching
@@ -3723,6 +3726,9 @@ def build_panel_runner(
     )
 
     def runner(baseline: float, candidate: float, report: str) -> PanelVerdict:
+        # a hand-off back into kernel git: the gate's dispatched jobs ran
+        # since the author session ended
+        handoff_git_dir(ws.root)
         # the claim is author text (the report at submit, or the session's
         # last words): redacted before any lens sees it, like the record and
         # the PR body
@@ -3780,6 +3786,9 @@ def build_panel_runner(
                 ),
                 author=bot_login,
             )
+            # judge sessions run in worktrees of this repo: the git calls
+            # after them re-check
+            forget_filter_overrides(ws.root)
             return run_panel(
                 lenses, panel_ws, claim, contract_text, today, reads["n"], guidance=guidance
             )
@@ -4725,6 +4734,9 @@ def live_attempt(
             config.agent_id,
             auth=bot_auth,
         )
+        # the kernel→session hand-off: one check before the author runs, and
+        # the pre-session git calls reuse its filter listing
+        handoff_git_dir(workspace)
         # Build ON the requested PR base: the clone checks out the remote
         # DEFAULT branch, which need not be `base_branch` — the session must
         # edit, and the gate must measure, the tree the PR will land on.
