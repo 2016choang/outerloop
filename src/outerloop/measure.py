@@ -399,23 +399,25 @@ class DispatchedMeasurer:
     def _retry_no_result(self, m: Measure, state: str) -> tuple[str, bool]:
         """A dispatched eval that ended without a result. A baseline (its tree
         is the fixed comparison base) or a cleanly completed job points at the
-        infrastructure, not the code: journal the failure (a journal naming
-        THIS job is a delivery already counted — the count survives restarts),
+        infrastructure, not the code: journal the failure. The count includes
+        the original attempt and retries reserved before submission;
         re-dispatch up to the original attempt plus two retries, then park
         until an operator fixes the cause and deletes the journal. Anything
-        else is the measure's own failure."""
-        job_id = self._marker(m)
+        else is the measure's own failure.
+        A crash between reserving and submitting spends that retry, erring
+        toward fewer retries, never more."""
+        prior = self._retry_journal(m)
+        job_id = self._marker(m) or prior.get("job_id", "")
         baseline = m.name == "baseline" or (m.name.startswith("sib-") and m.name.endswith("-base"))
         code_file = self._ev(m) / "exit-code"
         clean = state.startswith("COMPLETED") or (
             code_file.exists() and code_file.read_text().strip() == "0"
         )
-        prior = self._retry_journal(m)
         # a journal naming THIS job means this delivery was already classified
         # as infra before a crash — an unavailable status must not fail it
         if not (baseline or clean or prior.get("job_id") == job_id):
             raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
-        failures = prior.get("retries", 0) + (prior.get("job_id") != job_id)
+        failures = prior.get("retries", 0) or 1
         note = (
             f"measure {m.name}: job {job_id} ended {state or 'UNKNOWN'}; "
             "results could not be written (infrastructure failure)"
@@ -469,14 +471,32 @@ class DispatchedMeasurer:
             gpu_type=self.gpu_type if m.gpus and self.compute.has_lanes else "",
             extra=self.gpu_extra if m.gpus and self.compute.has_lanes else (),
         )
-        from outerloop.operator_limits import run_target, state_root, submit_batch
+        from outerloop.harness_cli import write_atomic
+        from outerloop.operator_limits import CapacityError, run_target, state_root, submit_batch
 
-        job_id = submit_batch(
-            state_root(self.run_dir),
-            run_target(self.run_dir),
-            self.compute,
-            [spec],
-        )[0]
+        prior = self._retry_journal(m)
+        if prior:
+            # Reserve the retry before submission, even if its marker is lost.
+            try:
+                write_atomic(
+                    self._infra_retry_path(m),
+                    json.dumps({**prior, "retries": prior["retries"] + 1}),
+                )
+            except OSError:
+                raise MeasurementPending(
+                    (), capacity_wait=True, note="retry state could not be saved; parked uncharged"
+                ) from None
+        try:
+            job_id = submit_batch(
+                state_root(self.run_dir),
+                run_target(self.run_dir),
+                self.compute,
+                [spec],
+            )[0]
+        except CapacityError:
+            if prior:
+                write_atomic(self._infra_retry_path(m), json.dumps(prior))
+            raise
         (self._ev(m) / "submitted").write_text(job_id)
         log.info("dispatched measure %s (sha %s) as job %s", m.name, m.tree_sha[:12], job_id)
         return job_id
@@ -487,10 +507,10 @@ class DispatchedMeasurer:
         never just the local marker — so a submitter that died before writing
         its id cannot cause a duplicate submit. Per not-yet-done measure:
           * a live job with this name -> park on its id (authoritative);
-          * a marker but NO live job -> the job ran and vanished without a
+          * a marker or retry journal but NO live job -> vanished without a
             result: baseline or clean completion -> infrastructure retry;
             unknown / signal death of a candidate -> EvalError, never resubmit;
-          * no live job and no marker -> never dispatched -> dispatch;
+          * no live job, marker, or retry journal -> dispatch;
           * squeue unavailable -> park (marker id if any) rather than risk a
             duplicate; the wake set may be empty -> the sweep deadline retries.
         """
@@ -508,9 +528,6 @@ class DispatchedMeasurer:
                 # lost, it parks for an operator instead of dispatching again
                 capacity_wait = True
                 infra_notes[m.name] = str(prior.get("note", ""))
-                if prior.get("retries", 0) >= 3:
-                    blind = True
-                    continue
             try:
                 live = self.compute.job_id_for_name(self._job_name(m))
             except Exception:
@@ -525,7 +542,7 @@ class DispatchedMeasurer:
             if live:
                 pending.append(live)  # queued or running — the real job id
                 continue
-            if self._marker(m):
+            if self._marker(m) or prior:
                 # was dispatched, not live, no result -> died before result,
                 # unless the files are merely late on the shared filesystem
                 if self._settled(m):
@@ -535,14 +552,7 @@ class DispatchedMeasurer:
                 if exhausted:
                     blind = True
                     continue
-            # No marker, not live, no result -> never dispatched -> dispatch.
-            # RESIDUAL (bounded, accepted): if a prior process died in the
-            # microsecond gap between sbatch returning and _dispatch writing
-            # the marker, AND that orphaned job then ran and died without a
-            # result, its name is gone from squeue and this redispatches once
-            # (never loops — the redispatch writes a marker). Cost is one
-            # wasted eval in a triple-failure conjunction; fully closing it
-            # needs sacct-by-name over job history, not worth that surface.
+            # A first submission has no retry journal to preserve a lost marker.
             from outerloop.operator_limits import CapacityError
 
             try:

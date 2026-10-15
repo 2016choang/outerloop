@@ -68,6 +68,11 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Reserve infrastructure retries before submission so a crash before recording
+  the job id cannot exceed the two-retry cap; undo the reservation only on a
+  capacity rejection before submission. Upgrading: a measure that was between
+  infrastructure retries when the kernel was upgraded may get one extra retry,
+  once, because older journals counted failures rather than reserved retries.
 - A dispatched baseline or cleanly completed eval that ends with no result is
   now an infrastructure failure: two uncharged retries, then a park naming the
   `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
