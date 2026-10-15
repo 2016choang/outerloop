@@ -45,8 +45,10 @@ every author and judge session reaches by URL, whatever the backend.
   client cannot choose the upstream. Sessions receive a gateway key scoped
   to their role. Today only the per-session bridge hides the upstream
   credential; direct endpoint profiles pass it into the session. The
-  gateway's new guarantee is that no session, on any path, holds an
-  upstream credential. Author/judge separation moves from distinct key
+  gateway's new guarantee is that no session routed through it holds an
+  upstream credential. Claude Code sessions stay direct in the first build
+  and keep today's key until the Anthropic surface lands (open question 2).
+  Author/judge separation moves from distinct key
   files (today's preflight only checks the two files differ) into this rule.
 - **Accounting**: the gateway meters spend per gateway key — per role per
   deployment — against the deployment's budget cap; the cap is
@@ -71,8 +73,10 @@ every author and judge session reaches by URL, whatever the backend.
   the harnesses (`harnesses.toml`). `outerloop harness upgrade` knows only
   claude, codex, hermes and bridge today, so the gateway needs its own pin
   entry and installer; that is part of the build. Restart without killing
-  sessions: start the new gateway, republish the endpoint file, then stop
-  the old gateway once the longest request timeout has passed.
+  sessions: a session reads the endpoint file once, at start, so the old
+  gateway keeps serving until every session that started on it has ended.
+  Start the new gateway, republish the endpoint file (new sessions move),
+  then stop the old one when its last session ends or its walltime nears.
 
 ## What changes for sessions
 
