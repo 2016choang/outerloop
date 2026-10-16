@@ -1,0 +1,151 @@
+# Public docs site, built from docs/ by scripts/docs/build.sh
+# (mkdocs build --strict). Staging by default until the launch: noindex plus
+# robots.txt, both off with OUTERLOOP_DOCS_STAGING=false (scripts/docs/hooks.py).
+site_name: Outerloop
+site_url: https://docs.outerloop.science/
+site_description: Autoresearch agents that improve your benchmark.
+
+repo_url: https://github.com/outerloop-science/outerloop
+repo_name: outerloop-science/outerloop
+edit_uri: edit/main/docs/
+
+copyright: Agentic Learning AI Lab, NYU
+
+hooks:
+  - scripts/docs/hooks.py
+
+watch:
+  - README.md
+  - CHANGELOG.md
+  - CONTRIBUTING.md
+  - SECURITY.md
+  - RELEASING.md
+  - scripts/docs/hooks.py
+
+# The validation logs are working notes, not site pages.
+not_in_nav: |
+  validation/
+
+theme:
+  name: material
+  custom_dir: overrides
+  font: false
+  favicon: assets/icon.svg
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.action.edit
+    - content.action.view
+    - content.code.copy
+  icon:
+    search: bi/search
+  # Same three-state theme cycle as agenticlearning.ai: system, light, dark.
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: bi/circle-half
+        name: "Theme: system (switch to light)"
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: blue
+      toggle:
+        icon: bi/sun
+        name: "Theme: light (switch to dark)"
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: blue
+      toggle:
+        icon: bi/moon
+        name: "Theme: dark (switch to system)"
+
+extra_css:
+  - https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap
+  - https://agenticlearning.ai/css/lab-tokens.css
+  - stylesheets/lab.css
+  - stylesheets/site.css
+
+extra:
+  generator: false
+  social:
+    - icon: lab/github
+      link: https://github.com/outerloop-science/outerloop
+      name: GitHub
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Get started:
+    - Overview: overview.md
+    - Install: install.md
+    - The contract: contract.md
+    - Self-hosted model endpoints: endpoints.md
+    - Where it runs: compute.md
+    - Add the Outerloop reviewer to your repo: reviewer.md
+    - Session capture: session-capture.md
+    - Community channels: community.md
+  - Design:
+    - Architecture: design/architecture.md
+    - Roles and flow: design/roles.md
+    - "The run lifecycle: states, messages, and what the kernel decides": design/lifecycle.md
+    - The resident tick: design/resident-tick.md
+    - The experiment dispatcher: design/dispatcher.md
+    - "Environment, not workflow": design/agent-environment.md
+    - "Agent substrate: tools, skills, memory": design/agent-substrate.md
+    - "Agent protocols: what A2A and MCP would give Outerloop": design/agent-protocols.md
+    - "The role CLI: one tool surface per agentic role": design/role-cli.md
+    - One model gateway per deployment: design/model-gateway.md
+    - Cloud compute and the run-artifact store: design/compute-cloud.md
+    - Outerloop on several clusters: design/multi-cluster.md
+    - "Accelerators: metering and placement beyond GPUs": design/accelerators.md
+    - "Dependency caches for evals, and the target image": design/eval-cache.md
+    - "The session watcher, the queue view, and sweeps as throttled arrays": design/session-watcher.md
+    - Where review compute runs: design/review-placement.md
+    - Reviewer and verifier infrastructure: design/reviewer-infra.md
+    - "Where the judges live, and how their output flows": design/judge-placement.md
+    - The pre-PR verification loop: design/orchestrator-verify.md
+    - "GitHub App auth: installation tokens replace the bot PAT": design/github-app-auth.md
+    - "The research loop: breadth, depth, and one substrate": design/research-loop.md
+    - "Building out the research loop: the author-directed syscall": design/research-loop-buildout.md
+    - "Research lines: per-agent branches, selfness, and clean main PRs": design/research-lines.md
+    - Research planning and multi-agent scaling: design/scaling.md
+    - "Consolidation: the kernel as a multi-agent OS": design/consolidation.md
+    - "Base reintegration: keeping a running line current, and reconciling its PR": design/base-reintegration.md
+    - "Onboarding: the simplest path from zero to a climbing fleet": design/onboarding.md
+    - "The public surface: threat model for open target repos": design/public-surface.md
+    - External-facing evolution: design/external.md
+    - Benchmarking autoresearch itself: design/meta.md
+    - "Outerloop: the headline result and the public flip": design/headline.md
+  - Project:
+    - Roadmap: roadmap.md
+    - Changelog: changelog.md
+    - Contributing: contributing.md
+    - Security and repo hygiene: security.md
+    - Releasing: releasing.md

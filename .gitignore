@@ -5,6 +5,10 @@ __pycache__/
 dist/
 build/
 
+# Docs site (scripts/docs/build.sh; dist/ is the Python build)
+dist-docs/
+site/
+
 # Environments
 .venv/
 

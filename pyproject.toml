@@ -47,6 +47,13 @@ dev = [
     "pytest-testmon>=2",
 ]
 
+# The docs site (mkdocs.yml, scripts/docs/build.sh); pinned, so a docs build
+# never moves with a transitive Material update.
+docs = [
+    "mkdocs==1.6.1",
+    "mkdocs-material==9.6.14",
+]
+
 [project.urls]
 Homepage = "https://outerloop.science"
 Repository = "https://github.com/outerloop-science/outerloop"
