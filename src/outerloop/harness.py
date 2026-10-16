@@ -17,13 +17,30 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import signal
 import stat
 import subprocess
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
+
+from outerloop.endpoint_wait import session_url as endpoint_session_url
+from outerloop.endpoints import EndpointProfile
+from outerloop.hermes_install import hermes_ready, hermes_runtime
+from outerloop.image import apptainer_from_env
+from outerloop.runstate import is_throttle
+from outerloop.session_evidence import (
+    DEFAULT_CAP,
+    active,
+    capture_session,
+    number,
+    provision_credential_file,
+    read_bounded,
+    usage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +62,26 @@ DEFAULT_TIMEOUT_S = 5400
 DEFAULT_MAX_TURNS = 120
 
 
+class ClaudeModelUnset(RuntimeError):
+    """OUTERLOOP_CLAUDE_MODEL is unset or blank: a Claude-backed role has no model."""
+
+
+CLAUDE_MODEL_UNSET = (
+    "OUTERLOOP_CLAUDE_MODEL is not set: every Claude-backed role (author, panel judges, "
+    "steward) needs it; put OUTERLOOP_CLAUDE_MODEL=<model> in the deployment env"
+)
+
+
+def default_claude_model() -> str:
+    """The deployment's model for every Claude role — a required setting, never a
+    code default. Raises ClaudeModelUnset when OUTERLOOP_CLAUDE_MODEL is unset or
+    blank; callers resolve it at use time so an explicit model never needs it."""
+    model = os.environ.get("OUTERLOOP_CLAUDE_MODEL", "").strip()
+    if not model:
+        raise ClaudeModelUnset(CLAUDE_MODEL_UNSET)
+    return model
+
+
 @dataclass(frozen=True)
 class SessionResult:
     """What happened in one session — everything the orchestrator needs to
@@ -58,7 +95,7 @@ class SessionResult:
 
     stop_reason: str  # backend's stop reason, or "timeout" / "spawn-error"
     is_error: bool
-    cost_usd: float
+    cost_usd: float | None
     num_turns: int
     session_id: str
     final_text: str  # the agent's closing message (the research report draft)
@@ -69,6 +106,9 @@ class SessionResult:
     # reports and issue comments show — stop_reason alone reads as noise
     # ("tool_use") when a session dies mid-tool-call.
     error_detail: str = ""
+    tokens: dict[str, int] = field(default_factory=dict)
+    prompt_path: str = ""
+    session_record_path: str = ""
 
 
 class Harness(Protocol):
@@ -99,6 +139,12 @@ def session_env(api_key: str, key_variable: str, home: Path) -> dict[str, str]:
     env = {name: os.environ[name] for name in SESSION_ENV_ALLOWLIST if name in os.environ}
     env["HOME"] = str(home)
     env[key_variable] = api_key
+    # The session reasons; experiments that need a GPU go through `launch`,
+    # where they are recorded and metered. This is the DEFAULT a bare session
+    # starts with, not an enforcement: a host process can reset the variable.
+    # Containment is what enforces it (a contained session runs without --nv
+    # and has no GPU device at all); this makes the bare default match.
+    env["CUDA_VISIBLE_DEVICES"] = ""
     return env
 
 
@@ -152,6 +198,7 @@ class VertexConfig:
     # explicit path up front. "" only where a metadata server provides
     # credentials (GCE / workload identity).
     adc_file: str = ""
+    small_model: str = ""
 
     def env(self) -> dict[str, str]:
         out = {
@@ -159,6 +206,8 @@ class VertexConfig:
             "ANTHROPIC_VERTEX_PROJECT_ID": self.project,
             "CLOUD_ML_REGION": self.region,
         }
+        if self.small_model:
+            out["ANTHROPIC_SMALL_FAST_MODEL"] = self.small_model
         if self.adc_file:
             out["GOOGLE_APPLICATION_CREDENTIALS"] = self.adc_file
         return out
@@ -183,6 +232,7 @@ def vertex_from_env() -> VertexConfig | None:
         project=project,
         region=os.environ.get("OUTERLOOP_VERTEX_REGION", "global").strip() or "global",
         adc_file=adc,
+        small_model=os.environ.get("OUTERLOOP_VERTEX_SMALL_MODEL", "").strip(),
     )
 
 
@@ -193,21 +243,45 @@ def redact(text: str, secrets: tuple[str, ...]) -> str:
     at write time, not capture time."""
     from outerloop.appauth import issued_tokens
 
-    for secret in (*secrets, *issued_tokens()):
+    credentials = (active.get() or {}).get("credential_secrets", ())
+    for secret in sorted((*secrets, *issued_tokens(), *credentials), key=len, reverse=True):
         if secret:
             text = text.replace(secret, "[redacted]")
     return text
 
 
-def default_binary(backend: str) -> str:
+HARNESS_INSTALL = {
+    "claude": "bash scripts/install_claude.sh",
+    "codex": "bash scripts/install_codex.sh",
+    "hermes": "bash scripts/install_hermes.sh",
+}
+
+
+def default_binary(backend: str, environ: Mapping[str, str] | None = None) -> str:
     """The host CLI a job spawns for `backend`: the path init recorded
-    (`OUTERLOOP_<BACKEND>_BIN`), else `~/.local/bin/<backend>` where the native
-    installers put it. One rule for the climb, the follow-up and the steward,
-    so a CLI installed anywhere else works in every lane."""
+    (`OUTERLOOP_<BACKEND>_BIN`), else PATH, else `~/.local/bin/<backend>` where
+    the native installers put it and where a Slurm job with a bare PATH still
+    finds it. One rule for the climb, the follow-up, the steward and start's
+    preflight. PATH hits come back absolute (the container bind needs a path);
+    an absent CLI stays a bare name so callers can report it."""
+    env = os.environ if environ is None else environ
     name = backend.strip().lower() or "claude"
-    return os.path.expanduser(
-        os.environ.get(f"OUTERLOOP_{name.upper()}_BIN") or f"~/.local/bin/{name}"
+    recorded = env.get(f"OUTERLOOP_{name.upper()}_BIN", "")
+    if recorded:
+        return os.path.expanduser(recorded)
+    # only absolute PATH entries: an empty or relative entry would resolve a
+    # file in the working directory, which is never the deployment's CLI
+    search = os.pathsep.join(
+        p for p in env.get("PATH", os.defpath).split(os.pathsep) if os.path.isabs(p)
     )
+    found = shutil.which(name, path=search) if search else None
+    if found:
+        return str(Path(found).resolve())
+    home = env.get("HOME", "")  # only the given environment's home, never the test runner's
+    local = Path(home) / ".local" / "bin" / name if home else None
+    if local is not None and local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    return name
 
 
 def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "") -> SessionResult:
@@ -215,7 +289,7 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
         stop_reason=stop_reason,
         is_error=True,
         error_detail=(detail or stop_reason)[:500],
-        cost_usd=0.0,
+        cost_usd=None,
         num_turns=0,
         session_id="",
         final_text="",
@@ -224,11 +298,12 @@ def _error_result(stop_reason: str, transcript_path: str = "", detail: str = "")
 
 
 # Substrings that mean "the API itself is unavailable to us" — credit,
-# limit, auth, throttling. Matched only against error surfaces of an
-# is_error result (backend error text, never agent prose). The first group is
+# limit, auth. Matched only against error surfaces of an is_error result
+# (backend error text, never agent prose). The first group is
 # Anthropic-shaped; the second matches the OpenAI-compatible / hermes+OpenRouter
 # 401 shapes, whose text differs (e.g. "HTTP 401: Missing Authentication
 # header", "No auth credentials found") so the Anthropic patterns miss them.
+# Throttling is not here: runstate.THROTTLE_PATTERNS (via is_throttle) owns it.
 OUTAGE_PATTERNS = (
     "credit balance",
     "usage limit",
@@ -236,8 +311,6 @@ OUTAGE_PATTERNS = (
     "billing",
     "authentication_error",
     "invalid x-api-key",
-    "rate_limit_error",
-    "overloaded_error",
     "401",
     "missing authentication",
     "no auth credentials",
@@ -280,7 +353,7 @@ def outage(result: SessionResult) -> bool:
         if not text.startswith("api error"):
             return False
         surface = text
-    return any(pattern in surface for pattern in OUTAGE_PATTERNS)
+    return any(pattern in surface for pattern in OUTAGE_PATTERNS) or is_throttle(surface)
 
 
 def budget_exhausted(result: SessionResult) -> bool:
@@ -309,8 +382,13 @@ def _write_private(directory: Path, stem: str, suffix: str, text: str) -> str:
         except OSError as exc:
             log.warning("could not store transcript at %s: %s", path, exc)
             return ""
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            return ""
         return str(path)
     log.warning("could not find a free transcript name in %s", directory)
     return ""
@@ -343,21 +421,15 @@ def _read_no_follow(path: Path) -> str | None:
 
 
 def _collect_hermes_sample(session_home: Path) -> Any:
-    """Load this run's trajectory (newest `sample_*.json`) and delete every one
-    of them. Hardened for a session-writable dir: the mtime sort key cannot
-    raise out of run() on a vanished file, the read does not follow symlinks,
+    """Legacy result fallback: accept only one sample, then delete all samples.
+    Native evidence uses the explicit capture id, never this fallback.
+    Hardened for a session-writable dir: the read does not follow symlinks,
     and unlink removes the link itself (never its target). Returns the parsed
     sample, or None."""
 
-    def _mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    candidates = sorted(session_home.glob("sample_*.json"), key=_mtime, reverse=True)
+    candidates = list(session_home.glob("sample_*.json"))
     sample: Any = None
-    if candidates:
+    if len(candidates) == 1:
         text = _read_no_follow(candidates[0])
         if text is not None:
             with contextlib.suppress(json.JSONDecodeError):
@@ -436,6 +508,65 @@ def _save_resume_transcript(
     )
 
 
+def hermes_resume_max_chars(environ: Mapping[str, str] | None = None) -> int:
+    """Maximum rehydrated brief size, including the new results message."""
+    env = os.environ if environ is None else environ
+    raw = env.get("OUTERLOOP_HERMES_RESUME_MAX_CHARS", "120000")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError("OUTERLOOP_HERMES_RESUME_MAX_CHARS must be a positive integer")
+    return value
+
+
+class ResumeContextBlocked(ValueError):
+    """Required context cannot fit; preserve the parked session for an operator."""
+
+    def __init__(self, required_chars: int):
+        self.required_chars = required_chars
+        super().__init__(
+            "configuration-blocked: original brief and latest results exceed "
+            "OUTERLOOP_HERMES_RESUME_MAX_CHARS; set it to at least "
+            f"{required_chars} and tick or wake again"
+        )
+
+
+def resume_config_block(stage: dict[str, object]) -> str:
+    required = int(str(stage.get("hermes_resume_required_chars", 0)))
+    if not required:
+        return ""
+    try:
+        budget = hermes_resume_max_chars()
+    except ValueError as exc:
+        return f"configuration-blocked: {exc}"
+    return str(ResumeContextBlocked(required)) if budget < required else ""
+
+
+def _bounded_resume_brief(turns: list[dict[str, str]], latest: str, budget: int) -> str:
+    """Keep the original brief and a contiguous recent tail; never truncate results."""
+    tail = len(turns)
+
+    def render(start: int) -> str:
+        omitted = start - 1
+        note = (
+            f"[Resume context: {omitted} earlier turns omitted to fit the replay budget.]\n\n"
+            if omitted
+            else ""
+        )
+        return f"{note}{_render_resume_transcript([turns[0], *turns[start:]])}\n\n{latest}"
+
+    complete = render(1)
+    if len(complete) <= budget:
+        return complete
+    if len(render(tail)) > budget:
+        raise ResumeContextBlocked(min(len(complete), len(render(tail))))
+    while tail > 1 and len(render(tail - 1)) <= budget:
+        tail -= 1
+    return render(tail)
+
+
 def _render_resume_transcript(turns: list[dict[str, str]]) -> str:
     """Render prior turns as a readable prefix for the resume brief."""
     blocks = ["=== Earlier in this session (your prior context) ==="]
@@ -460,6 +591,24 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _kill_and_drain(process: subprocess.Popen[str]) -> str:
+    """Kill a timed-out session's whole process group, then drain its pipe within
+    a bound so `run()` always returns — a descendant that left the group (setsid)
+    can hold the pipe open past the kill. Returns whatever stdout drained (may be
+    empty). Shared by every backend's timeout path; keep the sequence in one place
+    so the safety-sensitive termination cannot drift between them."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    try:
+        stdout, _ = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout = ""
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            stdout, _ = process.communicate(timeout=5)
+    return stdout or ""
+
+
 @dataclass
 class ClaudeCodeHarness:
     """Headless Claude Code (`claude -p`): the JSON output carries cost,
@@ -470,7 +619,7 @@ class ClaudeCodeHarness:
 
     api_key: str
     binary: str = "claude"
-    model: str = "claude-opus-5"
+    model: str = field(default_factory=default_claude_model)
     max_turns: int = DEFAULT_MAX_TURNS
     timeout_s: int = DEFAULT_TIMEOUT_S
     # The working set for code + running the repo's own tests. Note the env
@@ -493,15 +642,17 @@ class ClaudeCodeHarness:
     # closes the threat model's shared-filesystem residual risk. Images stay
     # generic (python + uv + git); the binary is bind-mounted in.
     container_image: str = ""
-    apptainer_binary: str = "apptainer"
+    apptainer_binary: str = field(default_factory=apptainer_from_env)
     # Claude-on-Vertex (ADC) instead of the Anthropic API key; the api_key is
     # ignored when set. Contained sessions get the ADC file bind-mounted.
     vertex: VertexConfig | None = None
+    endpoint: EndpointProfile | None = None
 
     CONTAINER_CLAUDE = "/opt/agent/claude"
     CONTAINER_ADC = "/opt/agent/adc.json"
     supports_resume = True  # native --resume
 
+    @capture_session("claude")
     def run(
         self, brief_text: str, workspace: Path, resume_session_id: str | None = None
     ) -> SessionResult:
@@ -546,6 +697,12 @@ class ClaudeCodeHarness:
         ]
         if resume_session_id:
             claude_argv += ["--resume", resume_session_id]
+        else:
+            # Know the native filename even when a timeout prevents the final JSON result.
+            session_id = str(uuid.uuid4())
+            claude_argv += ["--session-id", session_id]
+            if evidence_state := active.get():
+                evidence_state["native_id"] = session_id
         if self.container_image:
             # bind sources must be absolute or apptainer fails at mount time
             workspace = workspace.resolve()
@@ -588,12 +745,42 @@ class ClaudeCodeHarness:
             # children included) in one process group we can kill as a unit —
             # a timed-out session must not leave orphans holding the API key
             # and writing into the clone.
-            if self.vertex is not None:
+            if self.endpoint:
+                env = session_env(self.api_key, "ANTHROPIC_AUTH_TOKEN", session_home)
+                env.update(
+                    {
+                        # Claude Code appends /v1/messages itself; profiles use the
+                        # OpenAI-style base, so drop a trailing /v1
+                        "ANTHROPIC_BASE_URL": endpoint_session_url(self.endpoint, workspace)
+                        .rstrip("/")
+                        .removesuffix("/v1"),
+                        "CLAUDE_CODE_USE_VERTEX": "0",
+                        "CLAUDE_CODE_USE_BEDROCK": "0",
+                        "CLAUDE_CODE_USE_FOUNDRY": "0",
+                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                        "ANTHROPIC_SMALL_FAST_MODEL": self.model,
+                        **{
+                            f"ANTHROPIC_DEFAULT_{size}_MODEL": self.model
+                            for size in ("OPUS", "SONNET", "HAIKU")
+                        },
+                    }
+                )
+                if self.container_image:
+                    env.update(
+                        {
+                            f"APPTAINERENV_{k}": v
+                            for k, v in list(env.items())
+                            if k not in SESSION_ENV_ALLOWLIST and k != "HOME"
+                        }
+                    )
+            elif self.vertex is not None:
                 # vertex auth: ADC only — ANTHROPIC_API_KEY is deliberately
                 # absent so the CLI cannot fall back to direct billing
                 env = session_env("", "ANTHROPIC_API_KEY", session_home)
                 del env["ANTHROPIC_API_KEY"]
                 vertex_env = dict(self.vertex.env())
+                if not self.vertex.small_model:
+                    vertex_env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
                 if self.container_image and self.vertex.adc_file:
                     vertex_env["GOOGLE_APPLICATION_CREDENTIALS"] = self.CONTAINER_ADC
                 env |= vertex_env
@@ -608,6 +795,9 @@ class ClaudeCodeHarness:
                     # with the prefix stripped — the key travels via the
                     # environment, never argv (argv is world-readable in /proc).
                     env["APPTAINERENV_ANTHROPIC_API_KEY"] = self.api_key
+            if self.vertex is not None and self.vertex.adc_file:
+                # Also mounted when an endpoint overrides Vertex authentication.
+                provision_credential_file(Path(self.vertex.adc_file))
             process = subprocess.Popen(
                 command,
                 cwd=workspace,
@@ -625,17 +815,7 @@ class ClaudeCodeHarness:
         try:
             stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-            # Bounded drain: a descendant that left the process group (setsid)
-            # can hold the pipe open past the kill; run() must still return.
-            try:
-                stdout, _ = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout = ""
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    stdout, _ = process.communicate(timeout=5)
+            stdout = _kill_and_drain(process)
             path = _write_private(
                 workspace.parent, transcript_stem, ".json", redact(stdout or "", (self.api_key,))
             )
@@ -675,16 +855,17 @@ class ClaudeCodeHarness:
         # machine "API Error ..." text (never agent prose) is the
         # authoritative cause, so surface it as the detail: downstream notes,
         # the operator log, and the outage latch (its classifier AND its
-        # throttle-duration check, which reads rate_limit/overloaded off the
-        # detail) all then see the real error instead of "success". Lift ONLY
-        # for the contradiction we have actually observed: an is_error whose
-        # subtype is empty or the self-contradictory "success", with no backend
-        # `messages`. Under those, `result` is machine error text, not agent
-        # prose. A REAL subtype (error_max_turns, error_during_execution, ...) is
-        # left alone: `result` there may be the agent's own closing message, and
-        # lifting a message that merely starts "API Error" would let agent prose
-        # trip the latch — a false outage pausing every lane is worse than the
-        # rare mis-scoped one.
+        # throttle-duration check, which reads the shared throttle patterns
+        # off the detail) all then see the real error instead of "success".
+        # Lift ONLY for the contradiction we have actually observed: an
+        # is_error whose subtype is empty or the self-contradictory
+        # "success", with no backend `messages`. Under those, `result` is
+        # machine error text, not agent prose. A REAL subtype is left alone
+        # (error_max_turns, error_during_execution, ...): `result` there may
+        # be the agent's own closing message, and lifting a message that
+        # merely starts "API Error" would let agent prose trip the latch —
+        # a false outage pausing every lane is worse than the rare
+        # mis-scoped one.
         if (
             is_error
             and not messages
@@ -698,7 +879,8 @@ class ClaudeCodeHarness:
             stop_reason=str(data.get("stop_reason") or data.get("subtype") or "unknown"),
             is_error=is_error,
             error_detail=detail if is_error else "",
-            cost_usd=_float(data.get("total_cost_usd")),
+            cost_usd=number(data.get("total_cost_usd")),
+            tokens=usage(data.get("usage"), "claude"),
             num_turns=_int(data.get("num_turns")),
             session_id=str(data.get("session_id") or ""),
             final_text=final_text,
@@ -733,6 +915,50 @@ def _parse_result(stdout: str) -> dict[str, Any] | None:
     return candidates[0] if candidates else None
 
 
+def _seed_codex_config(session_home: Path, config: str) -> bool:
+    """Replace user config without following session-planted links or hardlinks."""
+    fds: list[int] = []
+    temporary = f".config-{uuid.uuid4().hex}.toml"
+    try:
+        parent_fd = os.open(session_home.parent, os.O_RDONLY | os.O_DIRECTORY)
+        fds.append(parent_fd)
+        home_fd = _open_nofollow_dir(session_home.name, parent_fd)
+        if home_fd < 0:
+            return False
+        fds.append(home_fd)
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(".codex", mode=0o700, dir_fd=home_fd)
+        codex_fd = _open_nofollow_dir(".codex", home_fd)
+        if codex_fd < 0:
+            return False
+        fds.append(codex_fd)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=codex_fd)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(config)
+        os.replace(temporary, "config.toml", src_dir_fd=codex_fd, dst_dir_fd=codex_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if len(fds) == 3:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=fds[-1])
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def codex_web_search(endpoint: bool, env: Mapping[str, str] | None = None) -> bool:
+    """Whether a Codex session keeps its built-in web search.
+
+    OUTERLOOP_CODEX_WEB_SEARCH: `auto` (default) keeps Codex's own setting on
+    native provider sessions and turns it off on endpoint sessions, where the
+    provider-side tool cannot run; `off` turns it off everywhere. Any other
+    value means `off`.
+    """
+    value = (os.environ if env is None else env).get("OUTERLOOP_CODEX_WEB_SEARCH", "auto")
+    return (value.strip().lower() or "auto") == "auto" and not endpoint
+
+
 def _codex_command(
     binary: str,
     model: str,
@@ -747,7 +973,7 @@ def _codex_command(
     The prompt is NOT an argument: `codex exec` reads it from stdin when no
     positional prompt is given, keeping the brief out of world-readable /proc
     argv (the same rule as the Claude adapter). Flags verified against
-    codex-cli 0.130.0 (`codex exec[ resume] --help`): --json, --model,
+    codex-cli 0.160.0 (`codex exec[ resume] --help`): --json, --model,
     --output-last-message, --skip-git-repo-check, and the stdin prompt behavior.
 
     Fresh and resume take DIFFERENT flags. `codex exec` has `--sandbox` and
@@ -799,18 +1025,28 @@ def _parse_codex_result(
 
     `final_text` comes from the --output-last-message file, which is reliable.
     `session_id` is the `thread.started` event's `thread_id`, verified against
-    codex-cli 0.130.0 (a `codex exec resume <thread_id>` recalls the session).
-    Cost is left at 0 (these backends are subscription or token metered; the
-    budget layer meters them by a session/token proxy). Never raises.
+    codex-cli 0.160.0 (a `codex exec resume <thread_id>` recalls the session).
+    Usage is summed across completed turns. The adapter prices it only when
+    the operator supplies a model price table. Never raises.
     """
-    # Event schema verified against codex-cli 0.130.0:
+    # Event schema verified against codex-cli 0.160.0:
     #   thread.started -> thread_id (the session id)
+    #   turn.completed -> success (usage carries tokens)
+    # Error shapes last verified against codex-cli 0.130.0:
     #   error          -> message
     #   turn.failed    -> error.message
-    #   turn.completed -> success (usage carries tokens)
+    # An `error` followed by a `turn.completed` was recovered (codex 0.160.0
+    # emits "Reconnecting... 1/5" this way when a stream drops) and is not a
+    # failure; an `error` with no completed turn after it still is.
     session_id = ""
-    saw_error = False
-    errors: list[str] = []
+    tokens: dict[str, int] = {}
+    usage_keys: set[str] | None = None
+    incomplete_usage = False
+    turns = 0
+    failed = False
+    pending_error = False
+    errors: list[str] = []  # from failed turns
+    pending: list[str] = []  # from error events no completed turn has followed yet
     for line in stdout.splitlines():
         text = line.strip()
         if not text.startswith("{"):
@@ -826,19 +1062,35 @@ def _parse_codex_result(
             thread_id = event.get("thread_id")
             if isinstance(thread_id, str):
                 session_id = thread_id
+        elif etype == "turn.completed":
+            turns += 1
+            pending_error = False
+            pending.clear()
+            turn_usage = usage(event.get("usage"), "codex")
+            keys = set(turn_usage)
+            if not {"input_tokens", "output_tokens"} <= keys:
+                incomplete_usage = True
+            if usage_keys is not None and keys != usage_keys:
+                incomplete_usage = True
+            usage_keys = keys
+            for key, value in turn_usage.items():
+                tokens[key] = tokens.get(key, 0) + value
         elif etype == "error":
-            saw_error = True
+            pending_error = True
             message = event.get("message")
             if isinstance(message, str):
-                errors.append(message)
+                pending.append(message)
         elif etype == "turn.failed":
-            saw_error = True
+            incomplete_usage = True
+            failed = True
             err = event.get("error")
             message = err.get("message") if isinstance(err, dict) else None
             if isinstance(message, str):
                 errors.append(message)
-    is_error = returncode != 0 or saw_error
-    detail = "; ".join(errors)[:500]
+    is_error = returncode != 0 or failed or pending_error
+    if incomplete_usage or is_error:
+        tokens = {}  # Partial invocation totals must never be priced as complete.
+    detail = "; ".join(errors + pending)[:500]
     # Fall back to stderr so a failed run (e.g. a bad flag, no matching event)
     # carries some cause instead of an empty detail.
     if is_error and not detail and stderr.strip():
@@ -847,8 +1099,9 @@ def _parse_codex_result(
         stop_reason="error" if is_error else "completed",
         is_error=is_error,
         error_detail=detail if is_error else "",
-        cost_usd=0.0,
-        num_turns=0,
+        cost_usd=None,
+        num_turns=turns,
+        tokens=tokens,
         session_id=session_id,
         final_text=last_message.strip(),
         transcript_path=transcript_path,
@@ -860,10 +1113,9 @@ class CodexHarness:
     """Headless OpenAI Codex CLI (`codex exec`) — a second Harness backend.
 
     Stage 1's swappability proof (docs/design/consolidation.md). CLI flags AND
-    headless resume are verified against codex-cli 0.130.0 (`session_id` = the
-    `thread.started` `thread_id`; resume recalls it); cost parsing stays
-    best-effort (these backends are metered by a session/token proxy in the
-    budget layer).
+    headless resume are verified against codex-cli 0.160.0 (`session_id` = the
+    `thread.started` `thread_id`; resume recalls it). Usage is reported per
+    invocation; operator-supplied rates provide dollars when configured.
 
     CONTAINED mode (`container_image` set): both `codex login` and `codex exec`
     run inside `apptainer exec --containall --cleanenv`, sharing a bound
@@ -877,13 +1129,14 @@ class CodexHarness:
     and the deployment's boundary (this container, or the ephemeral runner in
     the uncontained case) already confines the session. The host codex binary
     is bind-mounted read-only into the container (like claude), so the image
-    stays codex-free and codex updates by swapping one host binary.
+    stays codex-free and Codex updates with its companion host.
 
     `run` never raises: every failure comes back as an error SessionResult.
     """
 
     api_key: str
     binary: str = "codex"
+    endpoint: EndpointProfile | None = None
     # empty -> codex's configured default (a wrong id 404s); pin only a verified one
     model: str = ""
     # the deployment's container or ephemeral runner is the boundary; codex's own
@@ -894,17 +1147,30 @@ class CodexHarness:
     # when set, login+exec run inside this apptainer image; empty = uncontained
     # (the deployment's runner is the boundary)
     container_image: str = ""
-    apptainer_binary: str = "apptainer"
+    apptainer_binary: str = field(default_factory=apptainer_from_env)
     # in-container path the host codex binary is bound to (bind-from-host, like
     # ClaudeCodeHarness.CONTAINER_CLAUDE — the image stays codex-free, and codex
     # is updated by swapping one host binary, no rebuild). A bare class attribute
     # (no annotation) so the dataclass does not treat it as a field.
     CONTAINER_CODEX = "/opt/agent/codex"
+    CONTAINER_CODE_MODE_HOST = "/opt/agent/codex-code-mode-host"
+
     # Headless resume is validated on codex-cli 0.130.0: a contained
     # `codex exec resume <thread_id>` recalls prior-turn context (the session id
     # is the `thread.started` event's `thread_id`, restored from the bound
-    # --home). So the revise/wake/followup loops resume codex like Claude.
+    # --home). So the revise/wake loops resume codex like Claude.
     supports_resume = True
+
+    def _code_mode_host(self) -> Path | None:
+        """The code-mode host beside the codex executable, or None for a script
+        launcher (the npm package's codex.js), which finds its own vendored host."""
+        path = Path(shutil.which(self.binary) or self.binary).resolve()
+        try:
+            with path.open("rb") as file:
+                launcher = path.suffix == ".js" or file.read(2) == b"#!"
+        except OSError:
+            launcher = False
+        return None if launcher else path.with_name("codex-code-mode-host")
 
     def _apptainer_argv(
         self, inner: list[str], session_home: Path, workspace: Path | None
@@ -924,6 +1190,20 @@ class CodexHarness:
             "--bind",
             f"{self.binary}:{self.CONTAINER_CODEX}:ro",
         ]
+        host = self._code_mode_host()
+        if host is not None:
+            argv += ["--bind", f"{host}:{self.CONTAINER_CODE_MODE_HOST}:ro"]
+        argv += [
+            "--bind",
+            f"{Path(__file__).with_name('codex_requirements.toml').resolve()}:"
+            "/etc/codex/requirements.toml:ro",
+        ]
+        if self.endpoint and self.endpoint.codex_bridge:
+            from outerloop.bridge_install import runtime_path
+
+            runtime = runtime_path()
+            script = Path(__file__).with_name("codex_bridge.py").resolve()
+            argv += ["--bind", f"{runtime}:{runtime}:ro", "--bind", f"{script}:{script}:ro"]
         if workspace is not None:
             argv += ["--bind", f"{workspace}:{workspace}", "--pwd", str(workspace)]
         return [*argv, self.container_image, *inner]
@@ -934,10 +1214,12 @@ class CodexHarness:
         AUTHOR mode the login runs inside apptainer with the same bound --home,
         so auth.json lands where the contained exec will read it."""
         env = session_env(self.api_key, "OPENAI_API_KEY", session_home)
+        env["CODEX_HOME"] = str((session_home / ".codex").absolute())
         if self.container_image:
             # --cleanenv drops host env inside the container except APPTAINERENV_*
             # (prefix stripped by apptainer): the key travels via env, not argv.
             env["APPTAINERENV_OPENAI_API_KEY"] = self.api_key
+            env["APPTAINERENV_CODEX_HOME"] = env["CODEX_HOME"]
             login_argv = self._apptainer_argv(
                 [self.CONTAINER_CODEX, "login", "--with-api-key"], session_home, None
             )
@@ -971,6 +1253,7 @@ class CodexHarness:
         with contextlib.suppress(OSError):
             (session_home / ".codex" / "auth.json").unlink()
 
+    @capture_session("codex")
     def run(
         self, brief_text: str, workspace: Path, resume_session_id: str | None = None
     ) -> SessionResult:
@@ -985,6 +1268,8 @@ class CodexHarness:
                 # mount time deep inside apptainer — catch it here instead
                 log.warning("contained codex needs an absolute binary path")
                 return _error_result("config-error")
+        if any("dangerously-bypass-hook-trust" in arg for arg in self.extra_args):
+            return _error_result("config-error", detail="hook trust bypass is forbidden")
         transcript_stem = f"{workspace.name}-codex"
         session_home = workspace.parent / f"{workspace.name}-home"
         try:
@@ -1026,11 +1311,47 @@ class CodexHarness:
                     finally:
                         os.close(codex_fd)
                 os.close(home_fd)
-        # Codex authenticates from ~/.codex/auth.json, not OPENAI_API_KEY alone
-        # (the responses endpoint 401s on env-only). Write auth.json
-        # into the scrubbed per-run HOME with `codex login --with-api-key`
-        # (key on stdin, never argv) before exec.
-        login_error = self._login(session_home)
+        host = self._code_mode_host()
+        if host is None and self.container_image:
+            return _error_result(
+                "codex-launcher-in-container",
+                detail="a contained session needs the native codex binary, not a script "
+                "launcher; run outerloop harness upgrade codex",
+            )
+        if host is not None and (not host.is_file() or not os.access(host, os.X_OK)):
+            return _error_result(
+                "codex-code-mode-host-missing", detail="run outerloop harness upgrade codex"
+            )
+        bridge = bool(self.endpoint and self.endpoint.codex_bridge)
+        if bridge:
+            from outerloop.bridge_install import ready, runtime_path
+
+            if not ready(runtime_path()):
+                return _error_result(
+                    "bridge-runtime-missing", detail="run outerloop harness upgrade bridge"
+                )
+        # Rebuild user config on EVERY launch, including resume: the previous
+        # session can write hook trust into it. Durable transcripts stay intact.
+        config = ""
+        # Native OpenAI sessions log in via stdin; endpoint sessions use env_key.
+        if self.endpoint:
+            if bridge:
+                base_url = "http://127.0.0.1:1/v1"
+            else:
+                base_url = endpoint_session_url(self.endpoint, workspace)
+            config = (
+                'model_provider = "outerloop_endpoint"\n'
+                "[model_providers.outerloop_endpoint]\n"
+                'name = "Outerloop endpoint"\n'
+                f"base_url = {json.dumps(base_url)}\n"
+                'env_key = "OUTERLOOP_SESSION_KEY"\n'
+                'wire_api = "responses"\n'
+                "requires_openai_auth = false\n"
+            )
+            self._purge_auth(session_home)
+        if not _seed_codex_config(session_home, config):
+            return _error_result("workspace-error", detail="could not seed codex config")
+        login_error = None if self.endpoint else self._login(session_home)
         if login_error is not None:
             return login_error
         # --output-last-message target lives inside the per-run home (0700),
@@ -1042,6 +1363,17 @@ class CodexHarness:
             last_message_path.unlink()
         # contained runs invoke the image's codex (on PATH); uncontained the
         # host binary. The exec binds the workspace and sets it as --pwd.
+        # Unix requirements have no per-process override in 0.160.0. Contained
+        # runs bind our managed-only policy; bare processes disable hooks and
+        # plugins (bundled cleanup hooks otherwise survive hooks=false). These
+        # CLI settings follow operator extra args so project config cannot win.
+        # No built-in sub-agents: multi-agent work goes through the kernel's
+        # own channels. Web search is a provider-side tool: it works only on
+        # native sessions, so endpoint sessions drop it (it would also reach
+        # the chat bridge as a tool type it cannot translate).
+        kernel_owned: tuple[str, ...] = ("-c", "features.multi_agent=false")
+        if not codex_web_search(bool(self.endpoint)):
+            kernel_owned += ("-c", 'web_search="disabled"')
         codex_argv = _codex_command(
             self.CONTAINER_CODEX if self.container_image else self.binary,
             self.model,
@@ -1049,17 +1381,41 @@ class CodexHarness:
             workspace,
             last_message_path,
             resume_session_id,
-            self.extra_args,
+            (
+                *self.extra_args,
+                *kernel_owned,
+                "-c",
+                "features.plugins=false",
+                "-c",
+                "features.hooks=false",
+            )
+            if not self.container_image
+            else (*self.extra_args, *kernel_owned),
         )
+        if bridge:
+            assert self.endpoint is not None
+            codex_argv = [
+                str(runtime_path() / "venv/bin/python"),
+                str(Path(__file__).with_name("codex_bridge.py").resolve()),
+                "run",
+                endpoint_session_url(self.endpoint, workspace),
+                self.model,
+                str(self.timeout_s),
+                *codex_argv,
+            ]
         command = (
             self._apptainer_argv(codex_argv, session_home, workspace)
             if self.container_image
             else codex_argv
         )
         try:
-            env = session_env(self.api_key, "OPENAI_API_KEY", session_home)
+            key_env = "OUTERLOOP_SESSION_KEY" if self.endpoint else "OPENAI_API_KEY"
+            env = session_env(self.api_key, key_env, session_home)
+            env["CODEX_HOME"] = str((session_home / ".codex").absolute())
             if self.container_image:
-                env["APPTAINERENV_OPENAI_API_KEY"] = self.api_key
+                env[f"APPTAINERENV_{key_env}"] = self.api_key
+                env["APPTAINERENV_CODEX_HOME"] = env["CODEX_HOME"]
+            provision_credential_file(session_home / ".codex" / "auth.json")
             process = subprocess.Popen(
                 command,
                 cwd=workspace,
@@ -1077,15 +1433,11 @@ class CodexHarness:
         try:
             stdout, stderr = process.communicate(input=brief_text, timeout=self.timeout_s)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-            try:
-                stdout, _ = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout = ""
+            if bridge:
+                process.terminate()
                 with contextlib.suppress(subprocess.TimeoutExpired):
-                    stdout, _ = process.communicate(timeout=5)
+                    process.wait(timeout=5)
+            stdout = _kill_and_drain(process)
             path = _write_private(
                 workspace.parent, transcript_stem, ".jsonl", redact(stdout or "", (self.api_key,))
             )
@@ -1098,13 +1450,23 @@ class CodexHarness:
                 path,
                 detail=f"session hit its {self.timeout_s}s walltime and was killed",
             )
+        except BaseException:
+            if bridge:
+                process.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=5)
+                _kill_and_drain(process)
+            raise
         stdout = redact(stdout, (self.api_key,))
         transcript_path = _write_private(workspace.parent, transcript_stem, ".jsonl", stdout)
         last_message = ""
         # errors="replace": a non-UTF-8 last-message file must not raise
         # UnicodeDecodeError (not an OSError) and break the never-raises contract.
         with contextlib.suppress(OSError):
-            last_message = redact(last_message_path.read_text(errors="replace"), (self.api_key,))
+            last_message = redact(
+                read_bounded(last_message_path, DEFAULT_CAP).decode("utf-8", errors="replace"),
+                (self.api_key,),
+            )
         # The final message is preserved in the 0600 transcript; drop the raw
         # file so model output is not left behind.
         with contextlib.suppress(OSError):
@@ -1129,8 +1491,8 @@ def _hermes_command(
     disabled_toolsets: tuple[str, ...],
     extra_args: tuple[str, ...],
 ) -> list[str]:
-    """Argv for one headless hermes run (`run_agent.py`, fire-style flags,
-    hermes-agent v0.20.1).
+    """Argv for one headless hermes run (`run_agent.py`, argparse flags,
+    hermes-agent v2026.9.24).
 
     The BRIEF is never in argv — it is written to a file and `query` is only a
     short pointer instruction. The API key is never in argv either: hermes
@@ -1139,12 +1501,10 @@ def _hermes_command(
     openai-api reads OPENAI_API_KEY). --save_sample makes hermes write a JSON
     trajectory to its cwd, which is the machine-readable result channel."""
     argv = [
-        "uv",
-        "run",
-        "--project",
+        str(hermes_runtime(repo_dir) / "venv/bin/python"),
+        "-B",
+        str(Path(__file__).with_name("hermes_capture.py").resolve()),
         str(repo_dir),
-        "python",
-        str(repo_dir / "run_agent.py"),
         f"--query={query}",
         f"--max_turns={max_turns}",
         "--save_sample",
@@ -1153,13 +1513,11 @@ def _hermes_command(
         argv.append(f"--model={model}")
     if base_url:
         argv.append(f"--base_url={base_url}")
-    # Embedded quotes are load-bearing: fire literal-evals flag values, so a
-    # bare `a,b` becomes a Python TUPLE and hermes's .split(",") crashes.
-    # `"a,b"` evals to the string hermes expects.
+    # argparse receives these directly; shell/Fire quoting would become literal.
     if enabled_toolsets:
-        argv.append(f'--enabled_toolsets="{",".join(enabled_toolsets)}"')
+        argv.append(f"--enabled_toolsets={','.join(enabled_toolsets)}")
     if disabled_toolsets:
-        argv.append(f'--disabled_toolsets="{",".join(disabled_toolsets)}"')
+        argv.append(f"--disabled_toolsets={','.join(disabled_toolsets)}")
     return [*argv, *extra_args]
 
 
@@ -1169,8 +1527,8 @@ def _parse_hermes_result(
     """Best-effort SessionResult from a hermes run.
 
     Prefers the --save_sample trajectory JSON (assistant messages + turn
-    count); falls back to raw stdout as the final text. Cost is left at 0
-    (metered by the budget layer's proxy). Never raises."""
+    count); falls back to raw stdout as the final text. The capture wrapper
+    supplies reported usage; the adapter applies operator prices. Never raises."""
     final_text = ""
     num_turns = 0
     # hermes saves ShareGPT-format trajectories ({"from": "gpt", "value": ...}),
@@ -1180,7 +1538,7 @@ def _parse_hermes_result(
         messages = sample
     elif isinstance(sample, dict):
         # run_agent.py --save_sample wraps the ShareGPT turns under
-        # "conversations" (hermes v0.20.1); accept "messages"/"trajectory"
+        # "conversations" (hermes v2026.9.24); accept "messages"/"trajectory"
         # too for other paths. Missing this key makes num_turns==0 and
         # drops a real verdict as a bogus error.
         wrapped = (
@@ -1200,6 +1558,13 @@ def _parse_hermes_result(
         final_text = content if isinstance(content, str) else str(content)
     if not final_text:
         final_text = stdout.strip()[-20_000:]
+    tokens = usage(sample.get("usage"), "hermes") if isinstance(sample, dict) else {}
+    for line in stdout.splitlines():
+        if line.startswith("OUTERLOOP_USAGE "):
+            with contextlib.suppress(ValueError, AttributeError):
+                tokens = usage(
+                    json.loads(line.removeprefix("OUTERLOOP_USAGE ")).get("usage"), "hermes"
+                )
     # hermes exits 0 even when every API call failed; a run with no
     # assistant output is a failure, not a report
     is_error = returncode != 0 or num_turns == 0
@@ -1207,8 +1572,9 @@ def _parse_hermes_result(
         stop_reason="error" if is_error else "completed",
         is_error=is_error,
         error_detail=stdout.strip()[-500:] if is_error else "",
-        cost_usd=0.0,
+        cost_usd=None,
         num_turns=num_turns,
+        tokens=tokens,
         session_id="",  # HermesHarness.run injects the resume id (saved-transcript seam)
         final_text=final_text,
         transcript_path=transcript_path,
@@ -1218,7 +1584,7 @@ def _parse_hermes_result(
 @dataclass
 class HermesHarness:
     """Headless hermes-agent (Nous Research, MIT) — the OSS backend behind the
-    Harness seam, driven via `uv run <repo>/run_agent.py` from a pinned clone.
+    Harness seam, driven by its installed Python and a pinned `run_agent.py`.
 
     A first-class, interchangeable backend: like claude and codex, its boundary
     is the deployment's (a container where one exists, the ephemeral runner
@@ -1251,6 +1617,7 @@ class HermesHarness:
     # none, and it refuses to run "unconfigured"); when set, the harness
     # pre-seeds a minimal config in the per-run home
     provider: str = ""
+    endpoint: EndpointProfile | None = None
     # approvals.deny: fnmatch globs hermes refuses before any yolo/mode-off
     # bypass (headless: a clean deny, never a hang). NOTE it matches SHELL
     # COMMANDS (the terminal tool), NOT the write_file/patch tool calls.
@@ -1276,16 +1643,26 @@ class HermesHarness:
     extra_args: tuple[str, ...] = field(default_factory=tuple)
     # Apptainer image for session containment, same stance as the other
     # backends: when set, the session runs under `apptainer exec --containall
-    # --cleanenv` seeing only the workspace, the per-run home, and a read-only
-    # bind of the pinned hermes repo. The project venv and uv cache live in
-    # the per-run home (UV_PROJECT_ENVIRONMENT/UV_CACHE_DIR), so the repo
-    # bind stays read-only and nothing survives across runs.
+    # --cleanenv` seeing only the workspace, the per-run home, and read-only
+    # binds of the pinned source and runtime (venv plus standalone Python).
     container_image: str = ""
-    apptainer_binary: str = "apptainer"
+    apptainer_binary: str = field(default_factory=apptainer_from_env)
 
+    resume_max_chars: int | None = None
+
+    @capture_session("hermes")
     def run(
         self, brief_text: str, workspace: Path, resume_session_id: str | None = None
     ) -> SessionResult:
+        repo = Path(self.repo_dir).expanduser().resolve()
+        if not hermes_ready(repo):
+            return _error_result(
+                "environment-unavailable",
+                detail=(
+                    "Hermes environment missing or incomplete; "
+                    f"run bash scripts/install_hermes.sh {repo}"
+                ),
+            )
         transcript_stem = f"{workspace.name}-hermes"
         session_home = workspace.parent / f"{workspace.name}-home"
         try:
@@ -1310,15 +1687,35 @@ class HermesHarness:
                     detail="no saved transcript to restore this session's context",
                 )
             prior_turns = loaded
-            brief_to_send = f"{_render_resume_transcript(prior_turns)}\n\n{brief_text}"
+            brief_to_send = _bounded_resume_brief(
+                prior_turns,
+                brief_text,
+                self.resume_max_chars
+                if self.resume_max_chars is not None
+                else hermes_resume_max_chars(),
+            )
+        capture_id = f"{session_id}-{uuid.uuid4().hex}"
+        evidence_state = active.get()
+        if evidence_state is not None:
+            evidence_state.update(prompt=brief_to_send, native_id=capture_id, session_id=session_id)
         if self.provider:
             # minimal headless config: provider + default model, nothing else
             hermes_dir = session_home / ".hermes"
             try:
                 hermes_dir.mkdir(mode=0o700, exist_ok=True)
-                config_lines = ["model:\n", f'  provider: "{self.provider}"\n']
+                config_lines = ["model:\n", f"  provider: {json.dumps(self.provider)}\n"]
                 if self.model:
-                    config_lines.insert(1, f'  default: "{self.model}"\n')
+                    config_lines.insert(1, f"  default: {json.dumps(self.model)}\n")
+                if self.endpoint:
+                    config_lines.append("  reasoning_echo: true\n")
+                    endpoint_url = endpoint_session_url(self.endpoint, workspace)
+                    config_lines.append(
+                        "custom_providers:\n"
+                        f"  - name: {json.dumps(self.provider)}\n"
+                        f"    base_url: {json.dumps(endpoint_url)}\n"
+                        f"    key_env: {json.dumps(self.key_env)}\n"
+                        "    api_mode: chat_completions\n"
+                    )
                 if self.approvals_deny:
                     config_lines.append("approvals:\n  deny:\n")
                     config_lines += [f'    - "{glob}"\n' for glob in self.approvals_deny]
@@ -1337,11 +1734,13 @@ class HermesHarness:
             f"Read the file {brief_path} and follow it as your complete brief. "
             f"The tree to work on is at {workspace.resolve()}."
         )
+        if evidence_state is not None:
+            evidence_state["query"] = query
         command = _hermes_command(
-            Path(self.repo_dir),
+            repo,
             query,
             self.model,
-            self.base_url,
+            "" if self.endpoint else self.base_url,
             self.max_turns,
             self.enabled_toolsets,
             self.disabled_toolsets,
@@ -1350,7 +1749,8 @@ class HermesHarness:
         if self.container_image:
             workspace_abs = workspace.resolve()
             home_abs = session_home.resolve()
-            repo_abs = Path(self.repo_dir).resolve()
+            repo_abs = repo
+            runtime_abs = hermes_runtime(repo)
             command = [
                 self.apptainer_binary,
                 "exec",
@@ -1365,24 +1765,26 @@ class HermesHarness:
                 f"{home_abs}:{home_abs}",
                 "--bind",
                 f"{repo_abs}:{repo_abs}:ro",
+                "--bind",
+                f"{runtime_abs}:{runtime_abs}:ro",
                 "--pwd",
                 str(home_abs),
+                "--bind",
+                f"{Path(__file__).with_name('hermes_capture.py').resolve()}:{Path(__file__).with_name('hermes_capture.py').resolve()}:ro",
                 self.container_image,
                 *command,
             ]
+        _collect_hermes_sample(session_home)  # discard stale legacy samples before this invocation
         try:
             env = session_env(self.api_key, self.key_env, session_home)
-            # the repo bind is read-only: uv builds the project venv and its
-            # cache in the per-run home instead (fresh per run; nothing shared
-            # across sessions)
-            env["UV_PROJECT_ENVIRONMENT"] = str(session_home / "venv")
-            env["UV_CACHE_DIR"] = str(session_home / "uv-cache")
-            env["UV_LINK_MODE"] = "copy"
+            env["TERMINAL_CWD"] = str(workspace.resolve())
+            env["OUTERLOOP_CAPTURE_ID"] = capture_id
             if self.container_image:
-                # --cleanenv drops the host env inside the container EXCEPT
-                # APPTAINERENV_* — the key travels via env, never argv
-                for k in (self.key_env, "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_LINK_MODE"):
-                    env[f"APPTAINERENV_{k}"] = env[k]
+                # --cleanenv drops the host env except APPTAINERENV_*: the key
+                # travels via the environment, never argv
+                env[f"APPTAINERENV_{self.key_env}"] = env[self.key_env]
+                env["APPTAINERENV_TERMINAL_CWD"] = env["TERMINAL_CWD"]
+                env["APPTAINERENV_OUTERLOOP_CAPTURE_ID"] = capture_id
             # cwd is the per-run home, NOT the workspace: --save_sample writes
             # its trajectory JSON to cwd, and artifacts must never land in the
             # clone (they would enter the diff).
@@ -1402,15 +1804,7 @@ class HermesHarness:
         try:
             stdout, _ = process.communicate(timeout=self.timeout_s)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-            try:
-                stdout, _ = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout = ""
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    stdout, _ = process.communicate(timeout=5)
+            stdout = _kill_and_drain(process)
             path = _write_private(
                 workspace.parent, transcript_stem, ".log", redact(stdout or "", (self.api_key,))
             )
@@ -1425,10 +1819,23 @@ class HermesHarness:
             )
         stdout = redact(stdout, (self.api_key,))
         transcript_path = _write_private(workspace.parent, transcript_stem, ".log", stdout)
+        native_text = None
+        with contextlib.suppress(OSError):
+            native_text = read_bounded(
+                session_home / f"evidence-{capture_id}.json", DEFAULT_CAP
+            ).decode("utf-8", errors="replace")
+        native_sample = None
+        if native_text:
+            with contextlib.suppress(ValueError):
+                native_sample = json.loads(native_text)
+        # Preserve the existing author-result parser. Raw messages can count
+        # tool-call turns differently from Hermes's ShareGPT conversion.
         sample = _collect_hermes_sample(session_home)
         with contextlib.suppress(OSError):
-            brief_path.unlink()  # the brief holds PR content; don't leave it at rest
+            brief_path.unlink()
         result = _parse_hermes_result(stdout, sample, process.returncode, transcript_path)
+        if isinstance(native_sample, dict):
+            result = replace(result, tokens=usage(native_sample.get("usage"), "hermes"))
         # Record this turn so a later resume can restore the context, and hand
         # back the session id it lives under. Only on a real reply — a failed
         # turn leaves the prior transcript intact (nothing useful to append).

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import stat
 import sys
 from pathlib import Path
@@ -16,7 +17,6 @@ from outerloop import cli
 from outerloop.cli import (
     DEFAULT_LOCAL_ROOT,
     DEFAULT_RESIDENT_MINUTES,
-    RESIDENT_JOB_NAME,
     START_KEYS,
     TICK_ENV_KEYS,
     StartError,
@@ -25,6 +25,7 @@ from outerloop.cli import (
     main,
     plan_start,
 )
+from outerloop.instance import job_name
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -49,7 +50,8 @@ def env_file(tmp_path: Path, text: str, mode: int = 0o600) -> Path:
 def test_env_file_values_reads_only_start_keys_last_wins_and_unquotes(tmp_path: Path) -> None:
     path = env_file(
         tmp_path,
-        "# comment\nAUTORESEARCH_ROOT=/old\nOUTERLOOP_ROOT='/scratch/me/ar'\r\n"
+        "# comment\nAUTORESEARCH_PARTITION=old\nOUTERLOOP_ROOT=/first\n"
+        "OUTERLOOP_ROOT='/scratch/me/ar'\r\n"
         'OUTERLOOP_ACCOUNT="acct"\nOUTERLOOP_PANEL=\nOTHER=x\n'
         "OUTERLOOP_CADENCE_MIN = 20\n",
     )
@@ -111,24 +113,20 @@ def plan(tmp_path: Path, **kw: Any) -> StartPlan:
     return plan_start(**args)
 
 
-def test_default_local_root_honors_a_pre_rename_state_dir(tmp_path: Path) -> None:
-    """~/.outerloop is the default; an existing ~/.autoresearch is used only while
-    no ~/.outerloop exists (state is never moved); no HOME means the plain
-    default."""
+def test_default_local_root(tmp_path: Path) -> None:
+    """The root uses HOME when supplied and the plain default otherwise."""
     from outerloop.cli import default_local_root
 
     env = {"HOME": str(tmp_path)}
+    (tmp_path / ".autoresearch").mkdir()  # an old root is not looked for
     assert default_local_root(env) == tmp_path / ".outerloop"
-    (tmp_path / ".autoresearch").mkdir()
-    assert default_local_root(env) == tmp_path / ".autoresearch"
     (tmp_path / ".outerloop").mkdir()
     assert default_local_root(env) == tmp_path / ".outerloop"
     assert default_local_root({}) == DEFAULT_LOCAL_ROOT
 
 
-def test_resident_lookup_asks_for_both_names(monkeypatch: Any) -> None:
-    """A resident submitted before the rename must still block `start`: the
-    singleton serializes by name, so two names would mean two residents."""
+def test_resident_lookup_asks_for_resident_name(monkeypatch: Any) -> None:
+    """A queued resident blocks another submission."""
     import subprocess
 
     from outerloop import cli as cli_mod
@@ -141,29 +139,17 @@ def test_resident_lookup_asks_for_both_names(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     assert cli_mod._resident_jobs() == ["777", "900"]
-    assert "--name=outerloop-resident,autoresearch-resident" in seen[0]
+    assert "--name=outerloop-resident" in seen[0]
 
 
-def test_default_image_falls_back_only_to_a_usable_legacy_file(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
-    """The pre-rename image is used while the new path is not a FILE (absent, or
-    a stray directory); a real new image always wins."""
+def test_default_image_path(monkeypatch: Any, tmp_path: Path) -> None:
     from outerloop.tick import _default_image
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    new = tmp_path / "outerloop-images" / "agent-py312.sif"
     old = tmp_path / "autoresearch-images" / "agent-py312.sif"
-    assert _default_image() == str(new)  # neither exists: the new default
     old.parent.mkdir()
-    old.write_text("")
-    assert _default_image() == str(old)
-    new.parent.mkdir()
-    new.mkdir()  # a directory at the new path is not an image
-    assert _default_image() == str(old)
-    new.rmdir()
-    new.write_text("")
-    assert _default_image() == str(new)
+    old.write_text("")  # an old image dir is not looked for
+    assert _default_image() == str(tmp_path / "outerloop-images" / "agent-py312.sif")
 
 
 def test_local_without_sbatch_defaults_the_root(tmp_path: Path) -> None:
@@ -208,7 +194,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         "--parsable",
         "--dependency=singleton",
         f"--time={DEFAULT_RESIDENT_MINUTES}",
-        f"--job-name={RESIDENT_JOB_NAME}",
+        f"--job-name={job_name()}",
         "--account=pr_1_general",
         "--partition=cpu_short",
         "--export=ALL",
@@ -326,6 +312,9 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cli, "ENV_FILE", tmp_path / "absent.env")
     monkeypatch.setattr(cli, "find_uv", lambda: ("/usr/bin/uv", ""))
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_BIN", sys.executable)
+    monkeypatch.setenv("OUTERLOOP_CODEX_BIN", sys.executable)
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", "claude-test-model")  # a configured deployment
     return tmp_path
 
 
@@ -453,7 +442,7 @@ def test_slurm_start_submits_once_and_reports(
     out = capsys.readouterr().out
     assert "job 4242" in out and "cpu_short" in out and "PAUSE" in out
     argv = log.read_text().split("\n")
-    assert argv[0] == "--parsable" and f"--job-name={RESIDENT_JOB_NAME}" in argv
+    assert argv[0] == "--parsable" and f"--job-name={job_name()}" in argv
     assert "--dependency=singleton" in argv
     assert "--export=ALL" in argv  # the knobs ride the inherited env, asserted next
     assert envlog.read_text() == f"1:{home}"  # export_env reached sbatch's environment
@@ -592,52 +581,130 @@ def test_tick_subcommand_forwards_to_the_tick_entry(monkeypatch: pytest.MonkeyPa
     assert seen[1:] == ["--root", "/r", "--loop"]
 
 
-def test_missing_harness_binary_checks_only_the_configured_backend(tmp_path: Path) -> None:
-    """#294: init records the CLI path; a missing one would end every climb with
-    spawn-error. Only the configured backend's path counts, and an explicit empty
-    value in the environment clears a stale recorded path."""
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_missing_harness_binary_resolution(tmp_path: Path, backend: str) -> None:
     from outerloop.cli import missing_harness_binary
 
-    present = tmp_path / "claude"
-    present.write_text("")
-    nope = str(tmp_path / "nope")
-    assert missing_harness_binary({"OUTERLOOP_CLAUDE_BIN": str(present)}, {}) == ""
-    assert missing_harness_binary({}, {}) == ""
-    problem = missing_harness_binary({"OUTERLOOP_CLAUDE_BIN": nope}, {})
-    assert "OUTERLOOP_CLAUDE_BIN" in problem and "init --force" in problem
-    # a stale path for the backend the loop never spawns does not block it
-    stale_other = {"OUTERLOOP_CLAUDE_BIN": nope, "OUTERLOOP_AUTHOR_BACKEND": "codex"}
-    assert missing_harness_binary(stale_other, {}) == ""
-    assert missing_harness_binary(
-        {"OUTERLOOP_CODEX_BIN": nope}, {"OUTERLOOP_AUTHOR_BACKEND": "codex"}
-    )
-    # the environment wins over the file, and an explicit empty value clears the path
-    assert (
-        missing_harness_binary(
-            {"OUTERLOOP_CLAUDE_BIN": nope}, {"OUTERLOOP_CLAUDE_BIN": str(present)}
-        )
-        == ""
-    )
-    assert (
-        missing_harness_binary({"OUTERLOOP_CLAUDE_BIN": nope}, {"OUTERLOOP_CLAUDE_BIN": ""}) == ""
-    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    present = bin_dir / backend
+    key = f"OUTERLOOP_{backend.upper()}_BIN"
+    other = "codex" if backend == "claude" else "claude"
+    values = {
+        "OUTERLOOP_AUTHOR_BACKEND": backend,
+        f"OUTERLOOP_{other.upper()}_BIN": str(tmp_path / "stale"),
+        "REVIEW_HERMES_REPO": str(tmp_path / "stale-hermes"),
+    }
+    env = {"PATH": str(bin_dir)}
+    problem = missing_harness_binary(values, env)
+    assert f"`{backend}` on PATH" in problem
+    assert "init --force" in problem
+    assert f"scripts/install_{backend}.sh" in problem
+    present.write_text("#!/bin/sh\nexit 0\n")
+    present.chmod(0o755)
+    assert missing_harness_binary(values, env) == ""  # stale other backends do not block
+    values[key] = str(present)
+    assert missing_harness_binary(values, {"PATH": ""}) == ""
+    values[key] = str(tmp_path / "gone")
+    assert f"{key}={values[key]}" in missing_harness_binary(values, env)  # no PATH fallback
+    assert missing_harness_binary(values, {**env, key: str(present)}) == ""
+    assert missing_harness_binary(values, {**env, key: ""}) == ""
+    present.chmod(0o644)
+    assert missing_harness_binary(values, {**env, key: str(present)})
+    present.unlink()
+    present.mkdir()
+    assert missing_harness_binary(values, {**env, key: str(present)})
 
 
-def test_start_refuses_a_missing_recorded_harness_binary(
-    clean_env: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_start_refuses_missing_harness_before_any_execution(
+    clean_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    backend: str,
+    recorded: bool,
 ) -> None:
-    """Through `start` itself: a recorded binary that is gone stops the launch
-    before any plan is made."""
-    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/sbatch")
-    monkeypatch.chdir(checkout(clean_env))
-    monkeypatch.setenv("OUTERLOOP_CLAUDE_BIN", str(clean_env / "gone"))
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_BACKEND", backend)
+    monkeypatch.setenv(
+        f"OUTERLOOP_{backend.upper()}_BIN", str(clean_env / "gone") if recorded else ""
+    )
+    monkeypatch.setenv("PATH", str(clean_env))
+    monkeypatch.setenv("HOME", str(clean_env))  # not the runner's own ~/.local/bin
+    monkeypatch.setattr(cli, "plan_start", lambda **kw: pytest.fail("must refuse before planning"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_exec", lambda *a: pytest.fail("must not exec"))
     assert main(["start"]) == 2
     err = capsys.readouterr().err
-    assert "OUTERLOOP_CLAUDE_BIN" in err and "is not a file" in err
-    # the same stale path is ignored when the loop is configured for codex
-    monkeypatch.setenv("OUTERLOOP_AUTHOR_BACKEND", "codex")
-    assert main(["start"]) == 2
-    assert "state root" in capsys.readouterr().err  # past the binary check
+    assert backend in err and "not an executable file" in err
+    assert (str(clean_env / "gone") if recorded else "on PATH") in err
+
+
+def test_start_dry_run_allows_missing_recorded_binary(clean_env, monkeypatch, capsys):
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_BIN", str(clean_env / "gone"))
+    assert main(["start", "--local", "--dry-run"]) == 0
+    assert "outerloop.tick" in capsys.readouterr().out
+
+
+def test_missing_claude_model_resolution() -> None:
+    """The Claude model is required by a claude author without its own model, by
+    a claude panel lens without one, and by a provisioned steward lane; a
+    deployment with none of those, or with the setting, passes."""
+    from outerloop.cli import missing_claude_model
+
+    unset = "OUTERLOOP_CLAUDE_MODEL is not set"
+    assert missing_claude_model({}, {"OUTERLOOP_CLAUDE_MODEL": "claude-x"}) == ""
+    assert missing_claude_model({"OUTERLOOP_CLAUDE_MODEL": "claude-x"}, {}) == ""
+    # the defaults alone (claude author, verify,review panel) need it
+    problem = missing_claude_model({}, {})
+    assert unset in problem and "OUTERLOOP_CLAUDE_MODEL=<model>" in problem
+    assert "claude author" in problem and "panel judge" in problem and "steward" not in problem
+    # the author's own model covers the author; explicit lens models cover the panel
+    covered = {
+        "OUTERLOOP_AUTHOR_MODEL": "claude-author",
+        "OUTERLOOP_PANEL": "verify:claude:claude-v,review:codex:gpt-x",
+    }
+    assert missing_claude_model(covered, {}) == ""
+    # a bare claude lens under a claude author inherits the author's model
+    assert missing_claude_model({**covered, "OUTERLOOP_PANEL": "review"}, {}) == ""
+    # ... but under a codex author it must name its own model
+    codex_bare = {"OUTERLOOP_AUTHOR_BACKEND": "codex", "OUTERLOOP_PANEL": "review:claude"}
+    from outerloop.cli import missing_panel_model
+
+    assert "review:claude:<model>" in missing_panel_model(codex_bare, {})
+    # a codex author with the panel off needs nothing; a provisioned steward does
+    codex = {"OUTERLOOP_AUTHOR_BACKEND": "codex", "OUTERLOOP_PANEL": ""}
+    assert missing_claude_model(codex, {}) == ""
+    assert "the steward" in missing_claude_model(codex, {"OUTERLOOP_STEWARD_KEY_FILE": "/k"})
+    # the shell wins over .env, including an explicit empty value
+    shell_cleared = {"OUTERLOOP_CLAUDE_MODEL": ""}
+    assert unset in missing_claude_model({"OUTERLOOP_CLAUDE_MODEL": "claude-x"}, shell_cleared)
+    # a malformed panel is the tick's diagnosis, not this one's
+    assert missing_claude_model({**codex, "OUTERLOOP_PANEL": "bogus"}, {}) == ""
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_start_refuses_without_the_claude_model(clean_env, monkeypatch, capsys, dry_run):
+    monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
+    monkeypatch.setattr(cli, "plan_start", lambda **kw: pytest.fail("must refuse before planning"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **kw: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_exec", lambda *a: pytest.fail("must not exec"))
+    argv = ["start", "--local", *(["--dry-run"] if dry_run else [])]
+    assert main(argv) == 2
+    err = capsys.readouterr().err
+    assert "OUTERLOOP_CLAUDE_MODEL is not set" in err
+    assert f"OUTERLOOP_CLAUDE_MODEL=<model> to {clean_env / 'absent.env'}" in err
+    # covered roles pass: the author names its model and every claude lens does too
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_MODEL", "claude-author")
+    monkeypatch.setenv("OUTERLOOP_PANEL", "verify:claude:claude-v,review:claude:claude-r")
+    monkeypatch.setattr(cli, "plan_start", plan_start)
+    monkeypatch.setattr(cli, "_exec", lambda *a: 0)
+    assert main(argv) == 0
+
+
+def test_hermes_author_requires_pinned_runtime(tmp_path):
+    problem = cli.missing_harness_binary({"OUTERLOOP_AUTHOR_BACKEND": "hermes"}, {})
+    assert "REVIEW_HERMES_REPO with pinned source and runtime" in problem
 
 
 # ---------------------------------------------------------------- uv
@@ -809,3 +876,317 @@ def test_installed_version_is_unknown_when_the_lookup_says_nothing(
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli._installed_version(sys.executable) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "flag,env,file,mode",
+    [
+        ("", {}, {"OUTERLOOP_TICK_HOST": "login"}, "login"),
+        ("", {"OUTERLOOP_TICK_HOST": "login"}, {"OUTERLOOP_TICK_HOST": "resident"}, "login"),
+        ("login", {"OUTERLOOP_TICK_HOST": "resident"}, {}, "login"),
+        ("resident", {"OUTERLOOP_TICK_HOST": "login"}, {}, "slurm"),
+        ("login", {"OUTERLOOP_COMPUTE": "local"}, {}, "local"),
+    ],
+)
+def test_tick_host_precedence(tmp_path, flag, env, file, mode):
+    p = plan(tmp_path, root="/r", tick_host=flag, environ=env, from_file=file)
+    assert p.mode == mode
+    if mode == "login":
+        assert p.command() == [sys.executable, "-m", "outerloop.tick", "--root", "/r", "--loop"]
+
+
+def test_login_requires_sbatch(tmp_path):
+    with pytest.raises(StartError, match="sbatch on PATH"):
+        plan(tmp_path, root="/r", tick_host="login", sbatch_on_path=False)
+
+
+def test_login_exec_exports_slurm_settings(clean_env, monkeypatch):
+    from outerloop.compute import SlurmCompute, compute_from_env
+
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    monkeypatch.setattr(cli, "_resident_jobs", lambda: [])
+    niced: list[int] = []
+    monkeypatch.setattr(cli.os, "nice", niced.append)
+    settings = {key: "" for key in TICK_ENV_KEYS}
+    settings.update(OUTERLOOP_QOS="priority", OUTERLOOP_APPTAINER_BIN="/apps/apptainer")
+    settings.update(OUTERLOOP_CLAUDE_BIN=sys.executable, OUTERLOOP_CODEX_BIN=sys.executable)
+    settings.update(OUTERLOOP_CLAUDE_MODEL="claude-test-model")  # clean_env's shell value
+    settings.update(
+        OUTERLOOP_TICK_HOST="login", OUTERLOOP_ACCOUNT="acct", OUTERLOOP_PARTITION="cpu"
+    )
+    monkeypatch.setattr(
+        cli, "ENV_FILE", env_file(clean_env, "\n".join(f"{k}={v}" for k, v in settings.items()))
+    )
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "_exec", lambda cmd, env: seen.update(cmd=cmd, env=env) or 0)
+    assert main(["start", "--root", str(clean_env / "state")]) == 0
+    env = seen["env"]
+    assert set(TICK_ENV_KEYS) <= env.keys()
+    assert all(env[key] == value for key, value in settings.items() if key != "OUTERLOOP_BOT_LOGIN")
+    assert env["OUTERLOOP_COMPUTE"] == "slurm"
+    with monkeypatch.context() as m:
+        m.setenv("OUTERLOOP_COMPUTE", env["OUTERLOOP_COMPUTE"])
+        assert isinstance(compute_from_env(), SlurmCompute)
+    assert "OUTERLOOP_RESIDENT" not in env
+    assert niced == [10]
+
+
+@pytest.mark.parametrize("block", ["lease", "resident", "scheduler"])
+def test_login_refuses_other_owner(clean_env, monkeypatch, capsys, block):
+    import time
+
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    monkeypatch.setattr(
+        cli,
+        "_resident_jobs",
+        lambda: ["777"] if block == "resident" else None if block == "scheduler" else [],
+    )
+    monkeypatch.setattr(cli, "_exec", lambda *a: pytest.fail("must refuse"))
+    root = clean_env / "state"
+    lease = acquire_tick_lease(root, "alpha1:123", time.time(), 5400) if block == "lease" else None
+    try:
+        assert main(["start", "--tick-host", "login", "--root", str(root)]) == 2
+        assert {"lease": "alpha1:123", "resident": "777", "scheduler": "squeue failed"}[
+            block
+        ] in capsys.readouterr().err
+    finally:
+        if lease is not None:
+            release_tick_lease(lease)
+
+
+def test_resident_qos_from_file_and_environment(tmp_path):
+    p = plan(tmp_path, root="/r", from_file={"OUTERLOOP_QOS": "priority"})
+    assert "--qos=priority" in p.command()
+    assert p.export_env()["OUTERLOOP_QOS"] == "priority"
+    p = plan(
+        tmp_path, root="/r", from_file={"OUTERLOOP_QOS": "priority"}, environ={"OUTERLOOP_QOS": ""}
+    )
+    assert not any(arg.startswith("--qos") for arg in p.command())
+
+
+def test_login_dry_run_prints_exec_without_starting(clean_env, monkeypatch, capsys):
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    monkeypatch.setattr(cli, "_resident_jobs", lambda: pytest.fail("dry run must not query Slurm"))
+    monkeypatch.setattr(cli.os, "nice", lambda value: pytest.fail("dry run must not nice"))
+    assert main(["start", "--tick-host", "login", "--root", "/shared/state", "--dry-run"]) == 0
+    assert capsys.readouterr().out.strip() == shlex.join(
+        [sys.executable, "-m", "outerloop.tick", "--root", "/shared/state", "--loop"]
+    )
+
+
+def test_login_uses_foreground_root_and_home_defaults(tmp_path):
+    p = plan(
+        tmp_path,
+        tick_host="login",
+        cwd=tmp_path,
+        environ={"HOME": str(tmp_path), "OUTERLOOP_RESIDENT_MINUTES": "unused"},
+        from_file={"OUTERLOOP_ACCOUNT": "a", "OUTERLOOP_PARTITION": "p"},
+    )
+    assert p.root == tmp_path / ".outerloop"
+    assert p.home == p.root / "home"
+    assert p.account == "a" and p.partition == "p"
+
+
+def test_resident_start_refuses_a_live_login_loop(clean_env, monkeypatch, capsys):
+    import time
+
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    monkeypatch.setattr(cli, "_resident_jobs", lambda: pytest.fail("the lease is checked first"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not submit"))
+    root = clean_env / "state"
+    lease = acquire_tick_lease(root, "alpha1:123", time.time(), 5400)
+    try:
+        assert main(["start", "--root", str(root)]) == 2
+        assert "alpha1:123" in capsys.readouterr().err
+    finally:
+        release_tick_lease(lease)
+
+
+def test_resident_tick_takes_no_root_lease(tmp_path, monkeypatch):
+    import sys
+
+    from outerloop import tick as mod
+
+    monkeypatch.setenv("OUTERLOOP_COMPUTE", "slurm")
+    monkeypatch.delenv("OUTERLOOP_TICK_HOST", raising=False)
+    monkeypatch.setattr(sys, "argv", ["tick", "--root", str(tmp_path)])
+    monkeypatch.setattr(mod, "_service_spec_from_env", lambda root, **kwargs: (None, None))
+    monkeypatch.setattr(mod, "tick", lambda *a, **k: mod.TickReport())
+    assert mod.main() == 0
+    assert not (tmp_path / "TICK").exists()
+
+
+def test_local_start_refuses_a_held_lease(clean_env, monkeypatch, capsys):
+    import time
+
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli, "_exec", lambda *a: pytest.fail("must refuse"))
+    root = clean_env / "state"
+    lease = acquire_tick_lease(root, "alpha1:123", time.time(), 5400)
+    try:
+        assert main(["start", "--local", "--root", str(root)]) == 2
+        assert "alpha1:123" in capsys.readouterr().err
+    finally:
+        release_tick_lease(lease)
+
+
+def test_resident_submission_withdraws_when_a_loop_took_the_lease(clean_env, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from outerloop import runstate
+
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    jobs = iter([[], ["4242"]])
+    monkeypatch.setattr(cli, "_resident_jobs", lambda: next(jobs))
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="4242;cluster", stderr=""),
+    )
+    holders = iter(["", "alpha1:5"])  # free at the check, taken after the submission
+    monkeypatch.setattr(runstate, "tick_lease_holder", lambda *a, **k: next(holders))
+    cancelled: list[str] = []
+
+    def cancel(job: str) -> bool:
+        cancelled.append(job)
+        return True
+
+    monkeypatch.setattr(cli, "_cancel", cancel)
+    assert main(["start", "--root", str(clean_env / "state")]) == 0
+    assert cancelled == ["4242"]
+    assert "alpha1:5" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_start_launches_with_resolved_author(clean_env, monkeypatch, backend, recorded):
+    from outerloop.harness import default_binary
+
+    binary = clean_env / backend
+    shim(clean_env, backend, "exit 0\n")
+    key = f"OUTERLOOP_{backend.upper()}_BIN"
+    monkeypatch.delenv(key)
+    monkeypatch.setenv("PATH", str(clean_env) if not recorded else "")
+    values = {"OUTERLOOP_AUTHOR_BACKEND": backend}
+    if recorded:
+        values[key] = str(binary)
+    monkeypatch.setattr(
+        cli, "ENV_FILE", env_file(clean_env, "\n".join(f"{k}={v}" for k, v in values.items()))
+    )
+    seen = []
+
+    def launch(cmd, env):
+        seen.append(default_binary(backend, env))
+        return 0
+
+    monkeypatch.setattr(cli, "_exec", launch)
+    assert main(["start", "--local", "--root", str(clean_env / "state")]) == 0
+    assert seen == [str(binary.resolve())]
+
+
+def test_missing_path_does_not_accept_a_cli_only_in_cwd(tmp_path, monkeypatch):
+    shim(tmp_path, "claude", "exit 0\n")
+    monkeypatch.chdir(tmp_path)
+    assert cli.missing_harness_binary({}, {"PATH": str(tmp_path / "absent")})
+
+
+def test_start_sees_steward_key_from_env_file(clean_env, monkeypatch, capsys):
+    monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("OUTERLOOP_STEWARD_KEY_FILE", raising=False)
+    path = env_file(
+        clean_env,
+        "OUTERLOOP_AUTHOR_BACKEND=codex\nOUTERLOOP_AUTHOR_MODEL=gpt-x\n"
+        "OUTERLOOP_PANEL=\nOUTERLOOP_STEWARD_KEY_FILE=/keys/steward\n",
+    )
+    monkeypatch.setattr(cli, "ENV_FILE", path)
+    exports = []
+
+    def capture_exec(cmd, env):
+        exports.append(env)
+        return 0
+
+    monkeypatch.setattr(cli, "_exec", capture_exec)
+    assert main(["start", "--local"]) == 2
+    assert "the steward" in capsys.readouterr().err
+    path.write_text(path.read_text() + "OUTERLOOP_CLAUDE_MODEL=claude-x\n")
+    assert main(["start", "--local"]) == 0
+    assert exports[-1]["OUTERLOOP_STEWARD_KEY_FILE"] == "/keys/steward"
+
+
+def test_start_reads_process_env_file_and_exports_it(clean_env, monkeypatch):
+    selected = env_file(clean_env, "OUTERLOOP_ROOT=/sandbox\nOUTERLOOP_TARGET=owner/repo\n")
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    monkeypatch.chdir(checkout(clean_env))
+    captured = {}
+
+    def execute(cmd, env):
+        captured.update(env)
+        return 0
+
+    monkeypatch.setattr(cli, "_exec", execute)
+    assert main(["start", "--local"]) == 0
+    assert captured["OUTERLOOP_ENV_FILE"] == str(selected)
+    assert captured["OUTERLOOP_ROOT"] == "/sandbox"
+    assert captured["OUTERLOOP_TARGET"] == "owner/repo"
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602])
+def test_start_override_keeps_trust_checks(clean_env, monkeypatch, capsys, mode):
+    selected = env_file(clean_env, "OUTERLOOP_ROOT=/sandbox\n", mode)
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    assert main(["start", "--local", "--dry-run"]) == 2
+    assert "refusing to read" in capsys.readouterr().err
+
+
+def test_env_file_selector_is_process_only(clean_env, monkeypatch):
+    selected = env_file(clean_env, "OUTERLOOP_ENV_FILE=/other\nOUTERLOOP_ROOT=/sandbox\n")
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    assert env_file_values(keys=None) == {"OUTERLOOP_ROOT": "/sandbox"}
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", "relative.env")
+    assert main(["start", "--local", "--dry-run"]) == 2
+
+
+def test_start_slurm_scopes_lookup_hints_and_inherited_selector(clean_env, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    selected = env_file(clean_env, f"OUTERLOOP_ROOT={clean_env}/sandbox\n")
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    monkeypatch.chdir(checkout(clean_env))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/" + name)
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="42" if cmd[0] == "sbatch" else "", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert main(["start"]) == 0
+    name = job_name()
+    assert f"Stop: scancel --name {name}." in capsys.readouterr().out
+    for cmd, kwargs in calls:
+        if cmd[0] == "squeue":
+            assert f"--name={name}" in cmd
+        if cmd[0] == "sbatch":
+            assert f"--job-name={name}" in cmd
+            assert kwargs["env"]["OUTERLOOP_ENV_FILE"] == str(selected)
+
+
+def test_override_rejects_another_owner(clean_env, monkeypatch):
+    from types import SimpleNamespace
+
+    selected = env_file(clean_env, "OUTERLOOP_ROOT=/sandbox\n")
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    monkeypatch.setattr(Path, "stat", lambda self: SimpleNamespace(st_uid=os.getuid() + 1))
+    with pytest.raises(StartError, match="owned by you"):
+        env_file_values()

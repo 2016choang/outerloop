@@ -238,3 +238,49 @@ def test_redact_covers_tokens_minted_after_the_snapshot(monkeypatch) -> None:
     p.token()  # the mid-run refresh the snapshot cannot know about
     text = "a ghs_mint_1 b ghs_mint_2 c api_key_x"
     assert redact(text, snapshot) == "a [redacted] b [redacted] c [redacted]"
+
+
+def test_add_credential_args_defaults_and_help(monkeypatch) -> None:
+    import argparse
+
+    from outerloop.appauth import add_credential_args
+
+    monkeypatch.delenv("OUTERLOOP_GITHUB_APP_FILE", raising=False)
+    parser = argparse.ArgumentParser()
+    add_credential_args(parser)
+    args = parser.parse_args([])
+    assert args.pat_file.endswith("bot_pat")
+    assert args.github_app_file == ""
+    assert "installation tokens replace the PAT" in " ".join(parser.format_help().split())
+    # the App file default comes from the environment
+    monkeypatch.setenv("OUTERLOOP_GITHUB_APP_FILE", "/c/app.json")
+    p2 = argparse.ArgumentParser()
+    add_credential_args(p2)
+    assert p2.parse_args([]).github_app_file == "/c/app.json"
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_transport_http_error_contract(monkeypatch, method):
+    import io
+    import urllib.error
+    import urllib.request
+    from email.message import Message
+
+    from outerloop import appauth
+
+    error = urllib.error.HTTPError(
+        "https://api.github.com/app", 403, "forbidden", Message(), io.BytesIO(b"denied")
+    )
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(appauth.AUTH_SAFE_OPENER, "open", fail)
+    request = urllib.request.Request("https://api.github.com/app", method=method)
+    if method == "GET":
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            appauth._default_transport(request)
+        assert caught.value is error
+    else:
+        with pytest.raises(ValueError, match=r"installation-token exchange failed \(403\): denied"):
+            appauth._default_transport(request)

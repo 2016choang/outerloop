@@ -12,8 +12,9 @@ import os
 import sys
 from pathlib import Path
 
+from outerloop.endpoints import resolve_endpoint
 from outerloop.github import EnvTokenProvider, GitHubClient
-from outerloop.harness import Harness
+from outerloop.harness import ClaudeModelUnset, Harness
 from outerloop.review_agent import (
     emit_envelope,
     run_agent_review,
@@ -53,6 +54,25 @@ def resolve_reviewer_harness(spec: RoleSpec) -> tuple[Harness | None, str, str]:
     never disagree about a value."""
     backend = os.environ.get("REVIEW_BACKEND", "claude").lower()
     review_model = os.environ.get("REVIEW_MODEL", "").strip()
+    try:
+        _, endpoint = resolve_endpoint(
+            review_model, backend, os.environ.get("REVIEW_ENDPOINT", "").strip()
+        )
+        if endpoint:
+            endpoint.validate_runtime(backend)
+            repo = os.environ.get("REVIEW_HERMES_REPO", "").strip()
+            harness = build_harness(
+                "",
+                spec,
+                backend=backend,
+                model=review_model or None,
+                endpoint=endpoint.name,
+                binary=os.environ.get("REVIEW_BINARY") or None,
+                hermes_repo=Path(repo).expanduser() if repo else None,
+            )
+            return harness, "", backend
+    except ValueError as exc:
+        return None, str(exc), backend
     hermes_provider = os.environ.get("REVIEW_HERMES_PROVIDER", "").lower() or "openrouter"
     key_var = {
         "claude": "ANTHROPIC_REVIEWER_KEY",
@@ -98,15 +118,19 @@ def resolve_reviewer_harness(spec: RoleSpec) -> tuple[Harness | None, str, str]:
                 "(gpt-5.6-terra, no openai/ prefix)",
                 backend,
             )
-    harness = build_harness(
-        api_key,
-        spec,
-        backend=backend,
-        binary=os.environ.get("REVIEW_BINARY") or None,  # else the backend default on PATH
-        model=review_model or None,
-        hermes_repo=hermes_repo,
-        hermes_provider=provider,
-    )
+    try:
+        harness = build_harness(
+            api_key,
+            spec,
+            backend=backend,
+            binary=os.environ.get("REVIEW_BINARY") or None,  # else the backend default on PATH
+            model=review_model or None,
+            hermes_repo=hermes_repo,
+            hermes_provider=provider,
+        )
+    except ClaudeModelUnset as exc:
+        # the claude backend has no built-in model: REVIEW_MODEL or OUTERLOOP_CLAUDE_MODEL
+        return None, str(exc), backend
     return harness, "", backend
 
 

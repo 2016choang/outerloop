@@ -39,18 +39,18 @@
 # NO set -u before the top-up: a config mistake must fail loudly AFTER the
 # chain has secured its successors, not break the chain silently. Required
 # vars are checked by hand instead.
-# Accept the pre-rename AUTORESEARCH_* names at the boundary for one release:
-# copy each into its OUTERLOOP_* twin when the twin is UNSET (an explicitly
-# empty twin is an off-switch and stays empty) so the chain reads one name.
-# The Python side does the same on import. Removed in the release after 0.1.
-for _ov in $(env | sed -n 's/^AUTORESEARCH_\([A-Z_][A-Z0-9_]*\)=.*/\1/p'); do
-    eval "[ -n \"\${OUTERLOOP_${_ov}+set}\" ] || export OUTERLOOP_${_ov}=\"\${AUTORESEARCH_${_ov}}\""
-done
 CADENCE_MIN="${OUTERLOOP_CADENCE_MIN:-30}"
 JOB_NAME="outerloop-tick"
 RESIDENT_JOB_NAME="outerloop-resident"
-# a resident submitted before the rename; dropped in the release after 0.1
-LEGACY_RESIDENT_JOB_NAME="autoresearch-resident"
+# Derive both names from the settings file before any scheduler query/cancellation.
+# The default settings path retains both old names, regardless of state root.
+# Use stdlib Python before deploy has synced dependencies.
+if [ -n "${OUTERLOOP_HOME:-}" ]; then
+    instance_python="$OUTERLOOP_HOME/.venv/bin/python"
+    [ -x "$instance_python" ] || instance_python=python3
+    RESIDENT_JOB_NAME=$("$instance_python" "$OUTERLOOP_HOME/src/outerloop/instance.py") || exit 1
+    JOB_NAME="outerloop-tick${RESIDENT_JOB_NAME#outerloop-resident}"
+fi
 missing=""
 for var in OUTERLOOP_HOME OUTERLOOP_ROOT; do
     eval "val=\${$var:-}"
@@ -61,6 +61,8 @@ done
 # partition may be a comma-list like "a,b"), pass them through.
 acct_arg=""
 [ -n "${OUTERLOOP_ACCOUNT:-}" ] && acct_arg="--account=${OUTERLOOP_ACCOUNT}"
+qos_arg=""
+[ -n "${OUTERLOOP_QOS:-}" ] && qos_arg="--qos=${OUTERLOOP_QOS}"
 part_arg=""
 [ -n "${OUTERLOOP_PARTITION:-}" ] && part_arg="--partition=${OUTERLOOP_PARTITION}"
 
@@ -80,7 +82,7 @@ fi
 # --- 1. keep two successors queued (singleton serializes same-name jobs) ---
 # A resident tick (design/resident-tick.md) supersedes this chain: while one
 # is queued or running, stop topping up so the per-cadence chain drains.
-if squeue -u "$USER" --name="$RESIDENT_JOB_NAME,$LEGACY_RESIDENT_JOB_NAME" -h 2>/dev/null | grep -q '[0-9]'; then
+if squeue -u "$USER" --name="$RESIDENT_JOB_NAME" -h 2>/dev/null | grep -q '[0-9]'; then
     echo "chain: a resident tick exists; not queuing successors (draining)"
     need=0
     pending=0
@@ -112,8 +114,8 @@ while [ "$i" -le "$need" ]; do
     begin=$(date -d "@$begin_epoch" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
             || date -r "$begin_epoch" +%Y-%m-%dT%H:%M:%S)
     for attempt in 1 2 3; do
-        if sbatch --dependency=singleton --begin="$begin" \
-                  ${acct_arg:+"$acct_arg"} ${part_arg:+"$part_arg"} \
+        if sbatch --dependency=singleton --begin="$begin" --job-name="$JOB_NAME" --export=ALL \
+                  ${acct_arg:+"$acct_arg"} ${part_arg:+"$part_arg"} ${qos_arg:+"$qos_arg"} \
                   "${OUTERLOOP_HOME:-}/scripts/tick_chain.sbatch"; then
             break
         fi
@@ -129,6 +131,11 @@ if [ -n "$missing" ]; then
     echo "tick misconfigured; missing:$missing" >&2
     exit 1
 fi
+# Track our fallback so deploy can replace it after reading the configured cache root.
+if [ -z "${UV_CACHE_DIR:-}" ]; then
+    _OUTERLOOP_DEFAULT_UV_CACHE_DIR="$OUTERLOOP_ROOT/cache/uv"
+fi
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_ROOT/cache/uv}"
 LOG_DIR="$OUTERLOOP_ROOT/logs"
 mkdir -p "$LOG_DIR" || true
 if [ -w "$LOG_DIR" ]; then
@@ -144,7 +151,7 @@ echo "=== tick $(date -Is) on $(hostname -s) job=${SLURM_JOB_ID:-none}"
 #        further down in the harness) ---
 cd "$OUTERLOOP_HOME"
 # The tick keeps OUTERLOOP_PAT_FILE: it reads GitHub (PR states, review
-# comments) and submits follow-up jobs. Agent sessions remain scrubbed by the
+# comments) and delivers the shared wake jobs. Agent sessions remain scrubbed by the
 # harness env allowlist regardless.
 # --no-sync: the deploy step above already synced (or logged its failure);
 # a bare `uv run` would sync AGAIN and, when that fails — a full quota,

@@ -42,11 +42,131 @@ def test_default_branch_and_headers(provider: FileTokenProvider) -> None:
     assert request.get_header("Authorization") == "Bearer github_pat_test123"
 
 
+def test_branch_sha_reads_current_ref(provider: FileTokenProvider) -> None:
+    transport = FakeTransport([{"object": {"sha": "new-tip"}}])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.branch_sha("org/repo", "release/next") == "new-tip"
+    assert transport.requests[0].get_method() == "GET"
+    assert transport.requests[0].full_url == (
+        "https://api.github.com/repos/org/repo/git/ref/heads/release%2Fnext"
+    )
+
+
+def test_commit_tree_reads_commit_tree(provider):
+    transport = FakeTransport([{"sha": "commit", "tree": {"sha": "root-tree"}}])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.commit_tree("org/repo", "feature/head") == "root-tree"
+    assert transport.requests[0].get_method() == "GET"
+    assert transport.requests[0].full_url == (
+        "https://api.github.com/repos/org/repo/git/commits/feature%2Fhead"
+    )
+
+
+def test_commit_tree_missing_commit(provider, monkeypatch):
+    from email.message import Message
+
+    def missing(request, **kwargs):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+
+    monkeypatch.setattr("outerloop.github.AUTH_SAFE_OPENER.open", missing)
+    client = GitHubClient(auth=provider)
+    with pytest.raises(GitHubError) as error:
+        client.commit_tree("org/repo", "missing")
+    assert error.value.status == 404
+
+
+@pytest.mark.parametrize("response", [None, {}, {"tree": {}}, {"tree": {"sha": ""}}])
+def test_commit_tree_rejects_missing_tree(provider, response):
+    client = GitHubClient(auth=provider, transport=FakeTransport([response]))
+    with pytest.raises(GitHubError):
+        client.commit_tree("org/repo", "commit")
+
+
+def test_public_tree_and_create_ref(provider, caplog):
+    transport = FakeTransport([{"sha": "tree"}, {}])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.get_tree("org/repo", "feature/head") == {"sha": "tree"}
+    assert transport.requests[-1].full_url.endswith("/git/trees/feature%2Fhead?recursive=1")
+    client.create_ref("org/repo", "refs/heads/research-log", "pin")
+    request = transport.requests[-1]
+    assert request.get_method() == "POST"
+    assert isinstance(request.data, bytes)
+    assert json.loads(request.data) == {"ref": "refs/heads/research-log", "sha": "pin"}
+    client.dry_run = True
+    client.create_ref("org/repo", "refs/heads/research-log", "pin")
+    assert len(transport.requests) == 2
+    assert provider.token() not in caplog.text
+
+
+@pytest.mark.parametrize("response", [None, [], {}, {"object": {}}, {"object": {"sha": ""}}])
+def test_branch_sha_rejects_missing_tip(provider: FileTokenProvider, response) -> None:
+    client = GitHubClient(auth=provider, transport=FakeTransport([response]))
+    with pytest.raises(GitHubError):
+        client.branch_sha("org/repo", "main")
+
+
+@pytest.mark.parametrize("status", ["ahead", "behind", "diverged", "identical"])
+def test_compare_and_head_contains(provider: FileTokenProvider, status) -> None:
+    response = {"status": status, "ahead_by": 2, "behind_by": 3, "commits": []}
+    transport = FakeTransport([response, response])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.compare("org/repo", "release/next", "head") == {
+        "status": status,
+        "ahead_by": 2,
+        "behind_by": 3,
+    }
+    assert client.head_contains("org/repo", "release/next", "head") == (
+        status in ("ahead", "identical")
+    )
+    assert transport.requests[0].get_method() == "GET"
+    assert transport.requests[0].full_url == (
+        "https://api.github.com/repos/org/repo/compare/release%2Fnext...head"
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        [],
+        {},
+        {"status": 1, "ahead_by": 0, "behind_by": 0},
+        {"status": "unknown", "ahead_by": 0, "behind_by": 0},
+        {"status": "ahead", "ahead_by": "2", "behind_by": 0},
+        {"status": "ahead", "ahead_by": True, "behind_by": 0},
+        {"status": "ahead", "ahead_by": 2, "behind_by": None},
+        {"status": "ahead", "ahead_by": 2, "behind_by": False},
+    ],
+)
+def test_compare_rejects_malformed_body(provider: FileTokenProvider, response) -> None:
+    client = GitHubClient(auth=provider, transport=FakeTransport([response]))
+    with pytest.raises(GitHubError):
+        client.head_contains("org/repo", "base", "head")
+
+
+def test_compare_surfaces_unavailable(provider: FileTokenProvider, monkeypatch) -> None:
+    import io
+    import urllib.error
+    from email.message import Message
+
+    def unavailable(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url, 500, "unavailable", Message(), io.BytesIO(b"temporarily unavailable")
+        )
+
+    from outerloop.github import AUTH_SAFE_OPENER
+
+    monkeypatch.setattr(AUTH_SAFE_OPENER, "open", unavailable)
+    with pytest.raises(GitHubError) as error:
+        GitHubClient(auth=provider).head_contains("org/repo", "base", "head")
+    assert error.value.status == 500
+
+
 def test_get_file_decodes_base64(provider: FileTokenProvider) -> None:
     content = base64.b64encode(b"benchmarks: []\n").decode()
     transport = FakeTransport([{"type": "file", "encoding": "base64", "content": content}])
     client = GitHubClient(auth=provider, transport=transport)
-    assert client.get_file("org/repo", ".autoresearch.yaml", "main") == "benchmarks: []\n"
+    assert client.get_file("org/repo", ".outerloop.yaml", "main") == "benchmarks: []\n"
     assert "ref=main" in transport.requests[0].full_url
 
 
@@ -63,6 +183,23 @@ def test_create_pr_posts_body(provider: FileTokenProvider) -> None:
         "base": "main",
         "body": "Body",
     }
+
+
+def test_update_issue_sets_the_title_only_when_given(provider: FileTokenProvider) -> None:
+    transport = FakeTransport([{}, {}])
+    client = GitHubClient(auth=provider, transport=transport)
+    client.update_issue("org/repo", 9, "new body", title="Maintainer digest — 2026-09-08")
+    req = transport.requests[0]
+    assert req.get_method() == "PATCH"
+    assert req.full_url == "https://api.github.com/repos/org/repo/issues/9"
+    assert isinstance(req.data, bytes)
+    assert json.loads(req.data.decode()) == {
+        "body": "new body",
+        "title": "Maintainer digest — 2026-09-08",
+    }
+    client.update_issue("org/repo", 9, "body only")  # no title → body only, title untouched
+    assert isinstance(transport.requests[1].data, bytes)
+    assert json.loads(transport.requests[1].data.decode()) == {"body": "body only"}
 
 
 def test_dry_run_mutations_touch_nothing(provider: FileTokenProvider) -> None:
@@ -213,7 +350,11 @@ def test_pull_request_files_paginate(provider: FileTokenProvider) -> None:
 
 
 def test_file_content_decodes_base64(provider: FileTokenProvider) -> None:
-    payload = {"encoding": "base64", "content": base64.b64encode(b"hello\nworld").decode()}
+    payload = {
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode(b"hello\nworld").decode(),
+    }
     client = GitHubClient(auth=provider, transport=FakeTransport([payload]))
     assert client.get_file_content("org/repo", "a/b.py", "sha") == "hello\nworld"
 
@@ -229,6 +370,14 @@ def test_file_content_is_none_on_error_or_nonfile(provider: FileTokenProvider) -
 
     directory = GitHubClient(auth=provider, transport=FakeTransport([[{"name": "sub"}]]))
     assert directory.get_file_content("org/repo", "dir", "sha") is None
+
+    # a symlink's blob text is its target, not file content: refused like a
+    # non-file, the same rule the git-object reader applies
+    symlink = GitHubClient(
+        auth=provider,
+        transport=FakeTransport([{"type": "symlink", "encoding": "base64", "content": "../x"}]),
+    )
+    assert symlink.get_file_content("org/repo", "link.md", "sha") is None
 
 
 def test_enable_auto_merge_arms_via_graphql(provider: FileTokenProvider) -> None:
@@ -397,42 +546,6 @@ def test_non_utf8_filter_config_neither_crashes_nor_executes(tmp_path: Path) -> 
     assert not marker.exists()
 
 
-def test_auto_mode_arming_merges_only_on_clean_status(monkeypatch) -> None:
-    """terra #171: the direct-merge fallback fires ONLY when GitHub declines
-    arming because the PR is already clean; any other decline (auto-merge
-    disabled in repo settings, missing permission) is a repo-owner control
-    and stops."""
-    from outerloop.github import GitHubClient, GitHubError
-
-    class _Tok:
-        def token(self) -> str:
-            return "t"
-
-    client = GitHubClient(auth=_Tok())
-    merged: list = []
-    monkeypatch.setattr(client, "allowed_merge_methods", lambda repo: ["MERGE"])
-
-    def _fake_merge(repo, n, method, expected_head=""):
-        merged.append(n)
-        return True
-
-    monkeypatch.setattr(client, "merge_pull", _fake_merge)
-
-    def clean_status(repo, n, method="MERGE", expected_head=""):
-        raise GitHubError(0, "/x", "Pull request is in clean status")
-
-    monkeypatch.setattr(client, "enable_auto_merge", clean_status)
-    assert client.arm_auto_merge_auto_mode("o/r", 7) is True
-    assert merged == [7]
-
-    def not_allowed(repo, n, method="MERGE", expected_head=""):
-        raise GitHubError(0, "/x", "Auto merge is not allowed for this repository")
-
-    monkeypatch.setattr(client, "enable_auto_merge", not_allowed)
-    assert client.arm_auto_merge_auto_mode("o/r", 8) is False
-    assert merged == [7]  # no bulldozing a repo-owner control
-
-
 def test_redirect_off_host_loses_the_authorization_header() -> None:
     # the shared opener forwards Authorization on a same-host redirect but
     # strips it when the redirect changes host (or scheme)
@@ -456,45 +569,6 @@ def test_redirect_off_host_loses_the_authorization_header() -> None:
     assert same_host.headers.get("Authorization") == "Bearer jwt"
 
 
-def test_auto_mode_arming_binds_to_the_expected_head(provider: FileTokenProvider) -> None:
-    """arm_auto_merge_auto_mode threads the blessed head into BOTH paths: the
-    GraphQL arm carries expectedHeadOid, and the clean-status direct merge
-    carries the REST `sha` guard — so a push racing the caller's check is
-    refused by GitHub rather than merged (terra #228 r9)."""
-    import json as _json
-
-    seen: list = []
-
-    class T:
-        def __init__(self, decline_arm: bool) -> None:
-            self.decline_arm = decline_arm
-
-        def __call__(self, request):
-            body = _json.loads(request.data) if request.data else {}
-            seen.append((request.get_method(), request.full_url, body))
-            if request.full_url.endswith("/graphql"):
-                if self.decline_arm:
-                    return {"errors": [{"message": "Pull request is in clean status"}]}
-                return {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"number": 1}}}}
-            if "/pulls/1/merge" in request.full_url:
-                return {"merged": True}
-            if request.full_url.endswith("/pulls/1"):
-                return {"node_id": "PR_x", "number": 1}
-            return {"allow_merge_commit": True}
-
-    client = GitHubClient(auth=provider, transport=T(decline_arm=False))
-    assert client.arm_auto_merge_auto_mode("o/r", 1, expected_head="h" * 40) is True
-    gql = [b for m, u, b in seen if u.endswith("/graphql")][-1]
-    assert gql["variables"]["head"] == "h" * 40
-    assert "expectedHeadOid" in gql["query"]
-
-    seen.clear()
-    client = GitHubClient(auth=provider, transport=T(decline_arm=True))
-    assert client.arm_auto_merge_auto_mode("o/r", 1, expected_head="h" * 40) is True
-    merge = [b for m, u, b in seen if "/pulls/1/merge" in u][-1]
-    assert merge["sha"] == "h" * 40
-
-
 def test_update_issue_patches_the_body(provider: FileTokenProvider) -> None:
     transport = FakeTransport([{}])
     client = GitHubClient(auth=provider, transport=transport)
@@ -513,3 +587,380 @@ def test_list_open_issues_can_filter_by_creator(provider: FileTokenProvider) -> 
     ]
     url = transport.requests[0].full_url
     assert "/repos/o/r/issues?per_page=100&page=1&creator=github-actions%5Bbot%5D" in url
+
+
+def test_check_runs_pagination(provider):
+    check = {
+        "id": 1,
+        "name": "test",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/check",
+        "app": {"slug": "github-actions"},
+    }
+    transport = FakeTransport(
+        [{"check_runs": [check] * 100}, {"check_runs": [{**check, "id": 101}]}]
+    )
+    client = GitHubClient(auth=provider, transport=transport)
+    runs = client.list_check_runs("org/repo", "branch/name")
+    assert len(runs) == 101 and runs[-1]["id"] == 101
+    assert runs[0] == check
+    assert "/commits/branch%2Fname/check-runs" in transport.requests[0].full_url
+    assert "page=2" in transport.requests[1].full_url
+    assert "filter=all" in transport.requests[0].full_url
+
+
+def test_job_log_tail_is_bounded_stripped_and_optional(provider, monkeypatch, caplog):
+    import io
+
+    from outerloop.github import AUTH_SAFE_OPENER
+
+    def raw(request, timeout):
+        assert request.full_url.endswith("/repos/org/repo/actions/jobs/123/logs")
+        return io.BytesIO(
+            (
+                "old line\n" * 100 + "\x1b[31merror\x1b[0m\n"
+                "\x1b]8;;https://example.com\x1b\\last line\x1b]8;;\x1b\\\n"
+            ).encode()
+        )
+
+    monkeypatch.setattr(AUTH_SAFE_OPENER, "open", raw)
+    client = GitHubClient(auth=provider)
+    assert client.job_log_tail("org/repo", 123, 21) == "error\nlast line\n"
+    assert client.job_log_tail("org/repo", 123, 0) == ""
+
+    def fail(request, timeout):
+        raise RuntimeError("log unavailable")
+
+    monkeypatch.setattr(AUTH_SAFE_OPENER, "open", fail)
+    caplog.set_level("INFO")
+    assert client.job_log_tail("org/repo", 123, 100) == ""
+    assert "job log for org/repo job 123 unavailable: log unavailable" in caplog.text
+
+
+def test_log_redirect_strips_credentials_and_refuses_downgrade():
+    import urllib.error
+
+    from outerloop.github import _NoAuthRedirect
+
+    request = urllib.request.Request(
+        "https://api.github.com/repos/o/r/actions/jobs/1/logs",
+        headers={"Authorization": "Bearer secret"},
+    )
+    redirect = _NoAuthRedirect()
+    redirected = redirect.redirect_request(
+        request, None, 302, "", {}, "https://storage.blob.core.windows.net/log?signature=x"
+    )
+    assert redirected.get_header("Authorization") is None
+    assert "Authorization" not in redirected.unredirected_hdrs
+    with pytest.raises(urllib.error.URLError, match="downgrade"):
+        redirect.redirect_request(request, None, 302, "", {}, "http://storage.example/log")
+
+
+def test_direct_merge_binds_expected_head(provider):
+    transport = FakeTransport([{"merged": True}])
+    client = GitHubClient(auth=provider, transport=transport)
+    assert client.merge_pull("org/repo", 9, "squash", expected_head="blessed")
+    request = transport.requests[0]
+    assert request.get_method() == "PUT"
+    assert isinstance(request.data, bytes)
+    assert json.loads(request.data) == {"merge_method": "squash", "sha": "blessed"}
+
+
+def test_job_log_stream_stops_at_byte_cap(provider, monkeypatch):
+    from outerloop.github import AUTH_SAFE_OPENER, MAX_LOG_BYTES
+
+    class Response:
+        total = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, size):
+            assert 0 < size <= 65536
+            assert self.total + size <= MAX_LOG_BYTES
+            self.total += size
+            return b"old\n" * (size // 4)
+
+    response = Response()
+    monkeypatch.setattr(AUTH_SAFE_OPENER, "open", lambda *a, **k: response)
+    assert GitHubClient(auth=provider).job_log_tail("org/repo", 1, 15) == "old\nold\nold\n"
+    assert response.total == MAX_LOG_BYTES
+
+
+def test_network_git_failure_never_carries_the_credential(monkeypatch, tmp_path):
+    """git's error text is re-raised without the token or its Basic form, and
+    without the original exception chained behind it."""
+    from outerloop import github as github_mod
+
+    token = "ghs_secret_token_value"
+    basic = github_mod._basic(token)
+
+    def fail(args, env, timeout=None):
+        raise github_mod.GitError(f"git push failed: remote: {token} and {basic} refused")
+
+    monkeypatch.setattr(github_mod, "_run_git", fail)
+    with pytest.raises(github_mod.GitError) as caught:
+        github_mod._run_git_with_credential(["git", "push"], token, tmp_path)
+    text = str(caught.value)
+    assert token not in text and basic not in text
+    assert text.count("[redacted]") == 2
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_network_git_refuses_an_empty_token_before_any_call(monkeypatch, tmp_path):
+    from outerloop import github as github_mod
+
+    monkeypatch.setattr(github_mod, "_run_git", lambda *a, **k: pytest.fail("no network call"))
+    with pytest.raises(github_mod.GitError, match="token is empty"):
+        github_mod._run_git_with_credential(["git", "fetch"], "", tmp_path)
+    # no token at all is a different case: an anonymous call is allowed
+    monkeypatch.setattr(github_mod, "_run_git", lambda *a, **k: "ok")
+    assert github_mod._run_git_with_credential(["git", "fetch"], None, tmp_path) == "ok"
+
+
+def _ledger_tree(*paths):
+    return {"truncated": False, "tree": [{"path": p, "type": "blob"} for p in paths]}
+
+
+def _ledger_content(content):
+    return {
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode(content.encode()).decode(),
+    }
+
+
+def test_ledger_pinned_read_and_removed_pending(provider):
+    from outerloop.ledger_branch import read_ledger
+    from outerloop.progress import LEADER_FILE
+
+    transport = FakeTransport(
+        [
+            {"object": {"sha": "pinned"}},
+            _ledger_tree(LEADER_FILE, "results/submissions/run/head.json"),
+            _ledger_content("{}"),
+            _ledger_content("null"),
+        ]
+    )
+    client = GitHubClient(auth=provider, transport=transport)
+    assert read_ledger(client, "org/repo") == ("pinned", {}, {})
+    assert all("ref=pinned" in r.full_url for r in transport.requests[2:])
+
+
+@pytest.mark.parametrize(
+    "tree", [{"truncated": True, "tree": []}, {}, {"truncated": False, "tree": None}]
+)
+def test_ledger_refuses_incomplete_tree(provider, tree):
+    from outerloop.ledger_branch import read_ledger
+    from outerloop.progress import LedgerReadError
+
+    client = GitHubClient(
+        auth=provider, transport=FakeTransport([{"object": {"sha": "pin"}}, tree])
+    )
+    with pytest.raises(LedgerReadError):
+        read_ledger(client, "org/repo")
+
+
+def test_ledger_corrupt_read_never_writes(provider, monkeypatch):
+    from outerloop.ledger_branch import write_ledger
+    from outerloop.progress import LEADER_FILE, LedgerReadError
+
+    client = GitHubClient(
+        auth=provider, transport=FakeTransport([_ledger_tree(LEADER_FILE), _ledger_content("{")])
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not write corrupt ledger")
+
+    monkeypatch.setattr(client, "put_files", forbidden)
+    with pytest.raises(LedgerReadError):
+        write_ledger(client, "org/repo", "pin", lambda leader, pendings: {})
+
+
+@pytest.mark.parametrize("conflicts", [1, 3])
+def test_ledger_cas_recomputes_and_bounds_retries(provider, monkeypatch, conflicts):
+    from dataclasses import asdict
+
+    from outerloop.ledger_branch import LedgerWriteError, write_ledger
+    from outerloop.progress import LEADER_FILE, PROGRESS_FILE, LeaderEntry, render_markdown
+
+    concurrent = LeaderEntry("other", "score", "max", 1.0, 2.0, "other-run", "today")
+    encoded = json.dumps({"other": asdict(concurrent)})
+    responses: list[object] = [_ledger_tree()]
+    for index in range(conflicts):
+        responses.append({"object": {"sha": f"head-{index + 1}"}})
+        if index < 2:
+            responses.extend([_ledger_tree(LEADER_FILE), _ledger_content(encoded)])
+    client = GitHubClient(auth=provider, transport=FakeTransport(responses))
+    seen = []
+    writes = []
+
+    def edit(leader, pendings):
+        seen.append(dict(leader))
+        return {LEADER_FILE: json.dumps({k: asdict(v) for k, v in leader.items()})}
+
+    def put(repo, files, branch, message, expected_head=None):
+        writes.append((expected_head, files))
+        assert branch == "research-log"
+        return len(writes) > conflicts
+
+    monkeypatch.setattr(client, "put_files", put)
+    if conflicts == 3:
+        with pytest.raises(LedgerWriteError, match="three"):
+            write_ledger(client, "org/repo", "head-0", edit)
+        assert len(writes) == 3
+    else:
+        write_ledger(client, "org/repo", "head-0", edit)
+        assert len(writes) == 2
+    assert seen[0] == {} and seen[1] == {"other": concurrent}
+    assert writes[1][0] == "head-1"
+    assert writes[1][1][PROGRESS_FILE] == render_markdown({"other": concurrent}, "org/repo")
+    from outerloop.progress import parse_leader
+
+    assert parse_leader(writes[1][1][LEADER_FILE])["other"] == concurrent
+
+
+@pytest.mark.parametrize("head", ["existing", ""])
+def test_ledger_branch_creation_uses_only_callers_pin(provider, head):
+    from outerloop.ledger_branch import ensure_ledger_branch
+
+    transport = FakeTransport([{}])
+    client = GitHubClient(auth=provider, transport=transport)
+    from unittest.mock import patch
+
+    with patch.object(client, "branch_head", return_value=head):
+        ensure_ledger_branch(client, "org/repo", "pinned-main")
+    assert len(transport.requests) == (0 if head else 1)
+    if not head:
+        payload = transport.requests[0].data
+        assert isinstance(payload, bytes)
+        assert json.loads(payload) == {
+            "ref": "refs/heads/research-log",
+            "sha": "pinned-main",
+        }
+
+
+def test_shared_research_branch_constant():
+    import outerloop.attempt as attempt
+    import outerloop.climbboard as board
+    import outerloop.tick as tick
+    from outerloop.ledger_branch import RESEARCH_LOG_BRANCH
+
+    assert (
+        attempt.RESEARCH_LOG_BRANCH
+        == tick.RESEARCH_LOG_BRANCH
+        == board.BOARD_BRANCH
+        == RESEARCH_LOG_BRANCH
+    )
+    for module in (attempt, tick, board):
+        assert module.__file__ is not None
+        text = Path(module.__file__).read_text()
+        assert 'BRANCH = "research-log"' not in text
+        assert "from outerloop.ledger_branch import RESEARCH_LOG_BRANCH" in text
+
+
+def test_ledger_pending_publish_and_reject_are_atomic(provider, monkeypatch):
+    from outerloop.ledger_branch import read_ledger, write_ledger
+    from outerloop.progress import (
+        LEADER_FILE,
+        PROGRESS_FILE,
+        PendingSubmission,
+        record_pending,
+        reject,
+    )
+
+    pending = PendingSubmission(
+        "bench",
+        "score",
+        "max",
+        0.123456789012345,
+        0.234567890123456,
+        "run",
+        123456789,
+        "ruler",
+        "signature",
+        "sealed",
+        12,
+        "head",
+        "today",
+    )
+    transport = FakeTransport(
+        [
+            {"object": {"sha": "pin"}},
+            _ledger_tree(pending.path),
+            _ledger_content(record_pending(pending)[pending.path]),
+            _ledger_tree(pending.path),
+            _ledger_content(record_pending(pending)[pending.path]),
+            _ledger_tree(pending.path),
+            _ledger_content("null"),
+        ]
+    )
+    client = GitHubClient(auth=provider, transport=transport)
+    head, leader, pendings = read_ledger(client, "org/repo")
+    assert leader == {} and pendings == {pending.path: pending}
+    writes = []
+
+    def put(repo, files, branch, message, expected_head=None):
+        writes.append(files)
+        assert expected_head == "pin"
+        return True
+
+    monkeypatch.setattr(client, "put_files", put)
+    write_ledger(client, "org/repo", head, lambda leader, pendings: reject(pending))
+    # Replaying after a successful write remains safe.
+    write_ledger(client, "org/repo", head, lambda leader, pendings: reject(pending))
+    for files in writes:
+        assert files[pending.path] == "null\n"
+        assert json.loads(files[LEADER_FILE]) == {}
+        assert PROGRESS_FILE in files
+
+
+@pytest.mark.parametrize("head", [None, ""])
+def test_ledger_unavailable_head_refuses_read(provider, monkeypatch, head):
+    from outerloop.ledger_branch import read_ledger
+    from outerloop.progress import LedgerReadError
+
+    client = GitHubClient(auth=provider, transport=FakeTransport([]))
+    monkeypatch.setattr(client, "branch_head", lambda *args: head)
+    with pytest.raises(LedgerReadError):
+        read_ledger(client, "org/repo")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_mark_ready_for_review(provider, dry_run):
+    transport = FakeTransport([{"node_id": "PR_node"}, {"data": {}}])
+    client = GitHubClient(auth=provider, transport=transport, dry_run=dry_run)
+    client.mark_ready_for_review("org/repo", 29)
+    if dry_run:
+        assert not transport.requests
+    else:
+        assert transport.requests[0].full_url.endswith("/repos/org/repo/pulls/29")
+        data = transport.requests[1].data
+        assert isinstance(data, bytes)
+        mutation = json.loads(data)
+        assert "markPullRequestReadyForReview" in mutation["query"]
+        assert mutation["variables"] == {"pr": "PR_node"}
+
+
+def test_mark_ready_for_review_skips_a_moved_head(provider):
+    transport = FakeTransport([{"node_id": "PR_node", "head": {"sha": "newer"}}])
+    client = GitHubClient(auth=provider, transport=transport)
+    client.mark_ready_for_review("org/repo", 29, expected_head="read")
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [{"node_id": "PR_node"}, {"errors": [{"message": "denied"}]}],
+        [{}],
+    ],
+)
+def test_mark_ready_for_review_reports_failure(provider, responses):
+    client = GitHubClient(auth=provider, transport=FakeTransport(responses))
+    with pytest.raises(GitHubError):
+        client.mark_ready_for_review("org/repo", 29)

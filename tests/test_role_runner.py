@@ -71,21 +71,32 @@ def test_session_error_propagates(tmp_path: Path) -> None:
     assert result.error == "boom"
 
 
+def test_session_error_names_an_oom_kill_during_the_session(tmp_path: Path, monkeypatch) -> None:
+    # the cgroup's oom_kill counter rises across the session; the error
+    # detail names what was seen ahead of the symptom
+    events = tmp_path / "memory.events"
+    events.write_text("oom_kill 3\n")
+
+    @dataclass
+    class OomHarness:
+        def run(
+            self, brief_text: str, workspace: Path, resume_session_id: str | None = None
+        ) -> SessionResult:
+            events.write_text("oom_kill 4\n")  # an out-of-memory kill hit the cgroup
+            return _session(is_error=True, error_detail="codex bridge unavailable or interrupted")
+
+    monkeypatch.setattr("outerloop.role_runner._MEMORY_EVENTS", events)
+    result = run_role(reviewer_spec(), OomHarness(), "brief", tmp_path)
+    assert result.error == (
+        "an out-of-memory kill happened in this job during the session "
+        "(oom_kill +1); codex bridge unavailable or interrupted"
+    )
+
+
 def test_editing_role_needs_no_schema() -> None:
     result = run_role(author_spec(), _SeqHarness([_session("done")]), "brief", _WORKSPACE)
     assert result.ok is True
     assert result.data is None
-
-
-def test_followup_spec_carries_the_resuming_roles_key() -> None:
-    from outerloop.roles import followup_spec
-
-    spec = followup_spec()
-    assert spec.name == "followup" and spec.key == "author"
-    assert spec.execution.can_execute is True
-    assert {"Write", "Edit", "Bash"} <= set(spec.tools)
-    assert spec.output_schema is None  # the reply is prose; changes are re-measured
-    assert followup_spec(resuming="steward").key == "steward"
 
 
 def test_steward_spec_is_an_executing_editor_in_its_own_territory() -> None:

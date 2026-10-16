@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from outerloop.provenance import producing_author
 from outerloop.syscall import Launch, LaunchResult, launch_jobs
 
 LEDGER = "launches.jsonl"
@@ -39,7 +40,13 @@ def _append(run_dir: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def append_submitted(
-    run_dir: Path, *, sleep: int, launches: tuple[Launch, ...], job_ids: list[str], at: float
+    run_dir: Path,
+    *,
+    sleep: int,
+    launches: tuple[Launch, ...],
+    job_ids: list[str],
+    at: float,
+    commit: str = "",
 ) -> None:
     """One record per launch of a sleep, with the job ids it fanned out to. The
     ids are positional over `launch_jobs` order, exactly as the park recorded
@@ -66,6 +73,8 @@ def append_submitted(
         rows.append(
             {
                 "event": "submitted",
+                "commit": commit,
+                "author": producing_author(run_dir, commit),
                 "sleep": sleep,
                 "name": launch.name,
                 "why": launch.why,
@@ -168,6 +177,8 @@ def history(run_dir: Path) -> list[dict[str, Any]]:
             "concurrency": row.get("concurrency", 0),
             "job_ids": list(row.get("job_ids") or []),
             "submitted_at": row.get("at"),
+            "commit": str(row.get("commit") or ""),
+            "author": row.get("author", {}),
             "jobs": [],
         }
     for row in rows:
@@ -207,6 +218,8 @@ def experiments_rows(run_dir: Path) -> list[dict[str, Any]]:
                 {
                     "sleep": entry.get("sleep"),
                     "launch": name,
+                    "commit": entry["commit"],
+                    "author": entry["author"],
                     "why": str(entry.get("why") or ""),
                     "array": array,
                     "concurrency": int(entry.get("concurrency") or 0),

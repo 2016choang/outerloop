@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -23,6 +25,12 @@ def _install(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
             shutil.copy(f, home / "scripts" / f.name)
     root = tmp_path / "root"
     root.mkdir()
+    (home / "src/outerloop").mkdir(parents=True)
+    shutil.copy(ROOT / "src/outerloop/instance.py", home / "src/outerloop/instance.py")
+    config = home / ".config/outerloop/.env"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(f"OUTERLOOP_ROOT={root}\n")
+    config.chmod(0o600)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     shimlog = tmp_path / "shimlog"
@@ -34,9 +42,12 @@ def _install(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
             f'n=$(wc -l < "{shimlog}/sbatch" | tr -d " ")\necho "$((500 + n))"\n'
         ),
         "scancel": f'#!/bin/sh\necho "$1" >> "{shimlog}/scancel"\n',
-        "squeue": "#!/bin/sh\nexit 0\n",  # nothing of ours queued
+        "squeue": '#!/bin/sh\ncase "$*" in *"-j "*) echo PENDING;; esac\n',
         "scontrol": '#!/bin/sh\necho "JobId=42 EndTime=2030-01-01T00:00:00 JobState=RUNNING"\n',
         "timeout": '#!/bin/sh\nshift 2\nexec "$@"\n',  # --kill-after=.. 15m cmd...
+        # the resident loop's cadence wait: the tick count, not the wall clock,
+        # is what these tests observe
+        "sleep": "#!/bin/sh\nexit 0\n",
         # uv: `sync` is a no-op; `run ... tick` is the fake tick — it counts
         # its calls, appends to the shim on the 2nd call, sets PAUSE on the 3rd
         "uv": f'''#!/bin/sh
@@ -44,6 +55,7 @@ echo "$@" >> "{shimlog}/uv"
 case "$1" in
   sync) exit 0 ;;
   run)
+    [ "$3" = outerloop ] && exit 0
     echo "tick $(date +%s)" >> "{shimlog}/ticks"
     n=$(wc -l < "{shimlog}/ticks" | tr -d " ")
     [ "$n" -eq 2 ] && echo "# shim edited by a deploy" >> "{home}/scripts/tick_chain.sbatch"
@@ -69,10 +81,11 @@ def _env(home: Path, root: Path, bindir: Path, **extra: str) -> dict[str, str]:
         "OUTERLOOP_ROOT": str(root),
         "OUTERLOOP_ACCOUNT": "acct",
         "OUTERLOOP_PARTITION": "cpu_short",
-        "HOME": str(home),  # no ~/.config/autoresearch/.env
+        "HOME": str(home),
     }
     env.pop("OUTERLOOP_PAT_FILE", None)
     env.pop("OUTERLOOP_RESIDENT", None)
+    env.pop("OUTERLOOP_ENV_FILE", None)
     env.update(extra)
     return env
 
@@ -89,13 +102,15 @@ def _run_chain(
     )
 
 
-def test_per_cadence_chain_queues_two_successors_and_execs_the_tick(tmp_path: Path) -> None:
+@pytest.mark.parametrize("qos", ["", "priority"])
+def test_per_cadence_chain_queues_two_successors_and_execs_the_tick(tmp_path: Path, qos) -> None:
     home, root, bindir, shimlog = _install(tmp_path)
-    proc = _run_chain(home, _env(home, root, bindir))
+    proc = _run_chain(home, _env(home, root, bindir, OUTERLOOP_QOS=qos))
     assert proc.returncode == 0, proc.stderr
     sbatch = (shimlog / "sbatch").read_text().splitlines()
     assert len(sbatch) == 2
     for line in sbatch:
+        assert ("--qos=priority" in line) == bool(qos)
         assert "--dependency=singleton" in line and "--begin=" in line
         assert "--partition=cpu_short" in line and "--deadline" not in line
         assert "afterany" not in line
@@ -104,14 +119,17 @@ def test_per_cadence_chain_queues_two_successors_and_execs_the_tick(tmp_path: Pa
     assert "=== tick" in log and "(resident)" not in log
 
 
+@pytest.mark.parametrize("qos", ["", "priority"])
 def test_resident_loop_keeps_one_successor_resubmits_on_shim_change_and_pauses_clean(
     tmp_path: Path,
+    qos,
 ) -> None:
     home, root, bindir, shimlog = _install(tmp_path)
     env = _env(
         home,
         root,
         bindir,
+        OUTERLOOP_QOS=qos,
         OUTERLOOP_RESIDENT="1",
         OUTERLOOP_RESIDENT_CADENCE_S="1",
         OUTERLOOP_RESIDENT_MINUTES="360",
@@ -125,6 +143,7 @@ def test_resident_loop_keeps_one_successor_resubmits_on_shim_change_and_pauses_c
     # one successor at start, one resubmit after the shim changed — never two queued
     assert len(sbatch) == 2
     for line in sbatch:
+        assert ("--qos=priority" in line) == bool(qos)
         assert "--dependency=afterany:42,singleton" in line
         assert "--time=360" in line and "--job-name=outerloop-resident" in line
         assert "--export=ALL" in line and "--begin" not in line
@@ -139,10 +158,9 @@ def test_resident_loop_keeps_one_successor_resubmits_on_shim_change_and_pauses_c
 
 def test_per_cadence_chain_drains_when_a_resident_exists(tmp_path: Path) -> None:
     home, root, bindir, shimlog = _install(tmp_path)
-    # squeue reports a resident job of ours (a pre-rename one: the drain check
-    # asks for both names)
+    # squeue reports a resident job of ours.
     (bindir / "squeue").write_text(
-        '#!/bin/sh\ncase "$*" in *autoresearch-resident*) echo "777";; esac\nexit 0\n'
+        '#!/bin/sh\ncase "$*" in *outerloop-resident*) echo "777";; esac\nexit 0\n'
     )
     proc = _run_chain(home, _env(home, root, bindir))
     assert proc.returncode == 0, proc.stderr
@@ -176,7 +194,8 @@ def test_a_shim_change_on_the_first_deploy_replaces_the_successor(tmp_path: Path
         f"""#!/bin/sh
 case "$1" in
   sync) echo "# shim edited by the first deploy" >> "{home}/scripts/tick_chain.sbatch"; exit 0 ;;
-  run) echo tick >> "{shimlog}/ticks"; touch "{root}/PAUSE"; exit 0 ;;
+  run) [ "$3" = outerloop ] && exit 0
+    echo tick >> "{shimlog}/ticks"; touch "{root}/PAUSE"; exit 0 ;;
 esac
 """
     )
@@ -275,7 +294,8 @@ echo "$((500 + n))"
     assert proc.returncode == 0, proc.stderr
     assert len((shimlog / "sbatch").read_text().splitlines()) == 5
     log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
-    assert "submit failed at handover; retrying" in log
+    assert "submit failed; retrying next iteration" in log
+    assert (shimlog / "ticks").read_text().count("tick") == 1
     assert "handing over to successor 505" in log
 
 
@@ -298,7 +318,11 @@ def test_the_tick_runs_the_installed_environment_without_resyncing(tmp_path: Pat
     home, root, bindir, shimlog = _install(tmp_path)
     proc = _run_chain(home, _resident_env(home, root, bindir))
     assert proc.returncode == 0, proc.stderr
-    runs = [ln for ln in (shimlog / "uv").read_text().splitlines() if ln.startswith("run ")]
+    runs = [
+        ln
+        for ln in (shimlog / "uv").read_text().splitlines()
+        if ln.startswith("run ") and "harness upgrade" not in ln
+    ]
     assert runs, "no tick was run"
     assert all(ln.startswith("run --no-sync python -m outerloop.tick") for ln in runs), runs
 
@@ -537,7 +561,8 @@ exit 0
         else "true"
     )
     (bindir / "uv").write_text(
-        f'#!/bin/sh\ncase "$1" in sync) echo x >> "{syncs}"; {fail} ;; esac\nexit 0\n'
+        f'#!/bin/sh\necho "$UV_CACHE_DIR" >> "{tmp_path}/uv-caches"\n'
+        f'case "$1" in sync) echo x >> "{syncs}"; {fail} ;; esac\nexit 0\n'
     )
     for p in bindir.iterdir():
         os.chmod(p, 0o755)
@@ -556,7 +581,6 @@ exit 0
     }
     for k in (
         "OUTERLOOP_AUTO_UPDATE",
-        "AUTORESEARCH_AUTO_UPDATE",
         "OUTERLOOP_PAT_FILE",
         "UV_PROJECT_ENVIRONMENT",
     ):
@@ -634,7 +658,7 @@ def test_main_policy_follows_main_and_authenticates_with_the_pat(tmp_path: Path)
 
 
 def test_the_env_file_policy_wins_over_the_environment(tmp_path: Path) -> None:
-    """The .env line is read before the fetch, in either spelling; an explicit
+    """The .env line is read before the fetch, and an explicit
     `off` there switches off an inherited `main`."""
     proc, gitlog = _deploy(
         tmp_path, env_file="OUTERLOOP_AUTO_UPDATE=off\n", OUTERLOOP_AUTO_UPDATE="main"
@@ -642,10 +666,19 @@ def test_the_env_file_policy_wins_over_the_environment(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "fetch" not in gitlog
     proc, gitlog = _deploy(
-        tmp_path / "b", tags="v0.1.0", env_file="AUTORESEARCH_AUTO_UPDATE=release\n"
+        tmp_path / "b", tags="v0.1.0", env_file="OUTERLOOP_AUTO_UPDATE=release\n"
     )
     assert "ls-remote --tags --refs" in gitlog
     assert "reset --hard --quiet refs/tags/v0.1.0" in gitlog
+    # the pre-rename spelling is read neither from the file nor the environment
+    proc, gitlog = _deploy(
+        tmp_path / "c",
+        tags="v0.1.0",
+        env_file="AUTORESEARCH_AUTO_UPDATE=release\n",
+        AUTORESEARCH_AUTO_UPDATE="main",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "fetch" not in gitlog and "ls-remote" not in gitlog
 
 
 def test_an_unknown_policy_is_off_and_says_so(tmp_path: Path) -> None:
@@ -681,3 +714,271 @@ def test_without_a_record_a_failed_sync_keeps_the_checkout(tmp_path: Path) -> No
     proc, gitlog = _deploy(tmp_path, head="NEW", sync_fails_once=True)
     assert "reset" not in gitlog
     assert "uv sync failed; environment unchanged" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "PENDING",
+        "RUNNING",
+        "",
+        "CANCELLED",
+        "FAILED",
+        "TIMEOUT",
+        "NODE_FAIL",
+        "SPECIAL_EXIT",
+        "QUERY_ERROR",
+        "INVALID_ID",
+    ],
+)
+def test_resident_checks_successor_each_tick_and_records_replacement(
+    tmp_path: Path, state: str
+) -> None:
+    home, root, bindir, shimlog = _install(tmp_path)
+    (bindir / "squeue").write_text(
+        f'''#!/bin/sh
+case "$*" in
+  *"-j 501 "*)
+    case "{state}" in
+      QUERY_ERROR) echo "scheduler unavailable" >&2; exit 1 ;;
+      INVALID_ID) echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1 ;;
+      *) echo "{state}" ;;
+    esac ;;
+  *"-j "*) echo PENDING ;;
+esac
+'''
+    )
+    # Three ticks: observe the original, then observe the recorded replacement
+    # again without submitting a second replacement. No shim-change resubmit.
+    (bindir / "uv").write_text(
+        f'''#!/bin/sh
+[ "$1" = run ] || exit 0
+[ "$3" = outerloop ] && exit 0
+echo tick >> "{shimlog}/ticks"
+[ "$(wc -l < "{shimlog}/ticks")" -ge 3 ] && touch "{root}/PAUSE"
+exit 0
+'''
+    )
+    proc = _run_chain(home, _resident_env(home, root, bindir, OUTERLOOP_QOS="priority"))
+    assert proc.returncode == 0, proc.stderr
+    healthy = state in ("PENDING", "RUNNING", "QUERY_ERROR")
+    submissions = (shimlog / "sbatch").read_text().splitlines()
+    assert len(submissions) == (1 if healthy else 2)
+    assert all(line == submissions[0] for line in submissions)
+    for flag in (
+        "--dependency=afterany:42,singleton",
+        "--account=acct",
+        "--partition=cpu_short",
+        "--qos=priority",
+        "--export=ALL",
+    ):
+        assert flag in submissions[0]
+    assert (shimlog / "scancel").read_text().split() == (["501"] if healthy else ["502"])
+    log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
+    if healthy:
+        assert "vanished" not in log
+    else:
+        vanished_state = "GONE" if state in ("", "INVALID_ID") else state
+        assert log.count(f"successor 501 vanished ({vanished_state}); requeued as 502") == 1
+
+
+@pytest.mark.parametrize("submit_fails", [True, False])
+def test_resident_recovery_at_margin(tmp_path: Path, submit_fails: bool) -> None:
+    home, root, bindir, shimlog = _install(tmp_path)
+    # Start outside the margin; the first tick advances the clock into it.
+    (bindir / "scontrol").write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "date").write_text(
+        f'''#!/bin/sh
+if [ "$1" = +%s ]; then
+    if [ -e "{shimlog}/ticks" ]; then echo 22000; else echo 1000; fi
+else exec /bin/date "$@"; fi
+'''
+    )
+    (bindir / "date").chmod(0o755)
+    (bindir / "squeue").write_text('#!/bin/sh\ncase "$*" in *"-j 502 "*) echo PENDING;; esac\n')
+    (bindir / "sbatch").write_text(
+        f'''#!/bin/sh
+echo "$@" >> "{shimlog}/sbatch"
+n=$(wc -l < "{shimlog}/sbatch")
+[ "$n" -gt 1 ] && [ "{submit_fails}" = True ] && exit 1
+echo "$((500 + n))"
+'''
+    )
+    (bindir / "uv").write_text(
+        f'''#!/bin/sh
+[ "$1" = run ] || exit 0
+[ "$3" = outerloop ] && exit 0
+echo tick >> "{shimlog}/ticks"
+[ "$(wc -l < "{shimlog}/ticks")" -ge 3 ] && touch "{root}/PAUSE"
+exit 0
+'''
+    )
+    proc = _run_chain(home, _resident_env(home, root, bindir, OUTERLOOP_RESIDENT_RETRY_S="0"))
+    assert proc.returncode == 0, proc.stderr
+    assert (shimlog / "ticks").read_text().count("tick") == (3 if submit_fails else 1)
+    assert len((shimlog / "sbatch").read_text().splitlines()) == (7 if submit_fails else 2)
+    log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
+    if submit_fails:
+        assert "ERROR: successor 501 submit failed" in log
+        assert "keeping ticking until walltime ends" in log
+        assert "handing over" not in log
+    else:
+        assert "successor 501 vanished (GONE); requeued as 502" in log
+        assert "handing over to successor 502" in log
+
+
+@pytest.mark.parametrize("mode", ["success", "upgrade_failure", "sync_failure"])
+def test_deploy_harness_upgrade_is_best_effort(tmp_path, mode):
+    home, root, bindir, shimlog = _install(tmp_path)
+    config = home / ".config/outerloop/.env"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("OUTERLOOP_CLAUDE_BIN=/old/claude\nOUTERLOOP_PANEL=\n")
+    config.chmod(0o600)
+    (bindir / "uv").write_text(f'''#!/bin/sh
+echo "$*" >> "{shimlog}/uv"
+if [ "$1" = sync ]; then
+    [ "{mode}" != sync_failure ]; exit $?
+fi
+if [ "$3" = outerloop ]; then
+    [ "{mode}" != upgrade_failure ] || exit 17
+    echo 'OUTERLOOP_CLAUDE_BIN=/new/claude' >> "{config}"
+    exit 0
+fi
+echo "$OUTERLOOP_CLAUDE_BIN" >> "{shimlog}/path"
+exit 0
+''')
+    proc = _run_chain(home, _env(home, root, bindir))
+    assert proc.returncode == 0, proc.stderr
+    calls = (shimlog / "uv").read_text()
+    assert ("harness upgrade --used" in calls) == (mode != "sync_failure")
+    assert (shimlog / "path").read_text().strip() == (
+        "/new/claude" if mode == "success" else "/old/claude"
+    )
+    if mode == "upgrade_failure":
+        log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
+        assert "harness upgrade failed; previous versions retained" in log
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("inherited_default", [False, True])
+def test_deploy_configured_cache_precedes_sync(tmp_path, explicit, inherited_default):
+    configured = tmp_path / "configured-cache"
+    chosen = tmp_path / "explicit-uv" if explicit else configured / "uv"
+    proc, _ = _deploy(
+        tmp_path,
+        env_file=f"OUTERLOOP_CACHE_ROOT={configured}\n",
+        UV_CACHE_DIR=(
+            str(chosen)
+            if explicit
+            else str(tmp_path / "root/cache/uv")
+            if inherited_default
+            else ""
+        ),
+        _OUTERLOOP_DEFAULT_UV_CACHE_DIR=(
+            str(tmp_path / "root/cache/uv") if inherited_default else ""
+        ),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert set((tmp_path / "uv-caches").read_text().splitlines()) == {str(chosen)}
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o620, 0o602])
+def test_deploy_env_override_trust(tmp_path, mode):
+    selected = tmp_path / "sandbox.env"
+    selected.write_text("OUTERLOOP_TARGET=owner/sandbox\n")
+    selected.chmod(mode)
+    header = (ROOT / "scripts/tick_deploy.sh").read_text().split("# --- 2. deploy:")[0]
+    proc = subprocess.run(
+        ["bash", "-c", header + '\n_k=OUTERLOOP_TARGET; env_line; env_value; echo "VALUE=$_v"'],
+        env={**os.environ, "OUTERLOOP_ENV_FILE": str(selected)},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+    assert ("VALUE=owner/sandbox" in proc.stdout) == (mode == 0o600)
+    assert ("refusing to read" in proc.stdout) == (mode != 0o600)
+
+
+def test_instance_resubmit_preserves_settings_and_does_not_drain_production(tmp_path, monkeypatch):
+    from outerloop.instance import job_name
+
+    home, root, bindir, shimlog = _install(tmp_path)
+    # Production's legacy root differs from this sandbox.
+    (home / ".config/outerloop/.env").write_text("OUTERLOOP_ROOT=/production\n")
+    selected = tmp_path / "sandbox.env"
+    selected.write_text("OUTERLOOP_TARGET=owner/sandbox\nOUTERLOOP_ENV_FILE=/ignored\n")
+    selected.chmod(0o600)
+    sbatch = bindir / "sbatch"
+    sbatch.write_text(
+        sbatch.read_text().replace(
+            'echo "$@"', f'echo "$OUTERLOOP_ENV_FILE" >> "{shimlog}/env-files"\necho "$@"'
+        )
+    )
+    (bindir / "squeue").write_text(f'''#!/bin/sh
+echo "$*" >> "{shimlog}/squeue"
+case "$*" in
+  *"--name=outerloop-tick "*) echo 999 ;;
+  *"-j "*) echo PENDING ;;
+esac
+''')
+    uv = bindir / "uv"
+    uv.write_text(
+        uv.read_text().replace(
+            'echo "tick $(date +%s)"',
+            f'echo "$OUTERLOOP_TARGET" >> "{shimlog}/targets"\necho "tick $(date +%s)"',
+        )
+    )
+    proc = _run_chain(
+        home,
+        _env(
+            home,
+            root,
+            bindir,
+            OUTERLOOP_ENV_FILE=str(selected),
+            OUTERLOOP_RESIDENT="1",
+            OUTERLOOP_RESIDENT_CADENCE_S="1",
+            SLURM_JOB_ID="42",
+        ),
+    )
+    assert proc.returncode == 0, proc.stderr
+    submissions = (shimlog / "sbatch").read_text().splitlines()
+    assert len(submissions) == 2  # initial successor, then shim-change recovery
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    assert all(f"--job-name={job_name()}" in line for line in submissions)
+    assert all("--export=ALL" in line for line in submissions)
+    assert (shimlog / "env-files").read_text().splitlines() == [str(selected)] * 2
+    assert (shimlog / "targets").read_text().splitlines() == ["owner/sandbox"] * 3
+    assert "999" not in (shimlog / "scancel").read_text().splitlines()
+    assert "--name=outerloop-tick-" in (shimlog / "squeue").read_text()
+
+
+def test_legacy_settings_without_root_chain_keeps_names(tmp_path):
+    home, root, bindir, shimlog = _install(tmp_path)
+    (home / ".config/outerloop/.env").write_text("OUTERLOOP_TARGET=owner/repo\n")
+    (bindir / "squeue").write_text(f'#!/bin/sh\necho "$*" >> "{shimlog}/squeue"\n')
+    proc = _run_chain(home, _env(home, root, bindir))
+    assert proc.returncode == 0, proc.stderr
+    queries = (shimlog / "squeue").read_text().splitlines()
+    assert any("--name=outerloop-resident" in line.split() for line in queries)
+    assert any("--name=outerloop-tick" in line.split() for line in queries)
+    submissions = (shimlog / "sbatch").read_text().splitlines()
+    assert len(submissions) == 2
+    assert all("--job-name=outerloop-tick" in line.split() for line in submissions)
+
+
+def test_per_cadence_resubmit_preserves_settings(tmp_path, monkeypatch):
+    from outerloop.instance import job_name
+
+    home, root, bindir, shimlog = _install(tmp_path)
+    selected = tmp_path / "selected.env"
+    selected.write_text("OUTERLOOP_TARGET=owner/repo\n")
+    sbatch = bindir / "sbatch"
+    sbatch.write_text(sbatch.read_text() + f'echo "$OUTERLOOP_ENV_FILE" >> "{shimlog}/env-files"\n')
+    proc = _run_chain(home, _env(home, root, bindir, OUTERLOOP_ENV_FILE=str(selected)))
+    assert proc.returncode == 0, proc.stderr
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(selected))
+    submissions = (shimlog / "sbatch").read_text().splitlines()
+    assert len(submissions) == 2
+    assert all(f"--job-name={job_name('outerloop-tick')}" in line.split() for line in submissions)
+    assert all("--export=ALL" in line.split() for line in submissions)
+    assert (shimlog / "env-files").read_text().splitlines() == [str(selected)] * 2

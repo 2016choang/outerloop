@@ -8,7 +8,7 @@ experiments and hibernate:
 
     python .outerloop/syscall launch --name train --minutes 90 \\
         --artifact results/curve.json -- uv run python train.py --lr 3e-4
-    python .outerloop/syscall note "compare with the lr sweep"
+    python .outerloop/syscall message --to self "compare with the lr sweep"
     python .outerloop/syscall submit      # seal + gate + panel on this tree
     python .outerloop/syscall sleep       # then END YOUR TURN to hibernate
 
@@ -26,7 +26,7 @@ verbs (`sleep`, `conclude`) write the typed ABI to `.outerloop/syscall.json`
 committing it are separate acts.
 
 This file is STANDALONE by contract: the kernel copies its source into the
-sandbox at `.outerloop/syscall` (the target repo does not have autoresearch
+sandbox at `.outerloop/syscall` (the target repo does not have outerloop
 installed), so it imports only the stdlib. The validation here is for FAST,
 IN-SESSION feedback only; the kernel re-validates every field authoritatively
 when it reads the ABI (`syscall.py`) — this tool is a convenience layer, never a
@@ -54,8 +54,9 @@ BUDGET = "budget.json"  # kernel-written: remaining counts, for `status`
 MAX_LAUNCHES = 8
 MAX_COMMAND_CHARS = 2_000
 MAX_ARTIFACTS = 8
-MAX_NOTE_CHARS = 2_000
+MAX_REPLY_CHARS = 20_000
 MAX_WHY_CHARS = 200  # one line on what a launch tests; every agent sees it in `queue`
+MAX_REQUEST_BYTES = 65_536
 MAX_REPORT_CHARS = 8_000  # the write-up a submit carries; it becomes the PR's research report
 MAX_LAUNCH_MINUTES = 240
 MAX_LAUNCH_ARRAY = 16  # jobs one launch may fan out to (a sweep)
@@ -95,13 +96,12 @@ def _load_staged(root: Path) -> dict:
     try:
         data = json.loads(f.read_text())
     except FileNotFoundError:
-        return {"launches": [], "note": "", "submit": False, "findings": [], "notes": ""}
+        return {"launches": [], "submit": False, "findings": [], "notes": ""}
     except (OSError, json.JSONDecodeError) as exc:
         raise ToolError(f"staged request is unreadable ({exc}); run `cancel` to reset") from exc
     # tolerate a partial file: default any missing family so either role's verbs work
     for key, empty in (
         ("launches", []),
-        ("note", ""),
         ("submit", False),
         ("eval_minutes", None),
         ("report", ""),
@@ -124,15 +124,66 @@ def _budget_line(root: Path) -> str:
         return (
             f"budget: {b.get('launches_remaining', '?')} launches, "
             f"{b.get('sleeps_remaining', '?')} sleeps{gpu_part} remaining"
+            + (f"; {b['review_topup']}" if b.get("review_topup") else "")
         )
     except (OSError, json.JSONDecodeError):
         return "budget: (unknown)"
 
 
-# --- author syscalls: launch / note / sleep --------------------------------
+# --- author syscalls: launch / message / sleep --------------------------------
+
+
+def _check_end(root: Path, verb: str) -> None:
+    abi = root / DIR / ABI
+    if abi.exists() and json.loads(abi.read_text()).get("type") == "end":
+        if verb == "submit":
+            raise ToolError("submit first, end after the verdict")
+        raise ToolError("end is final for the leg; it cannot accompany launch or sleep")
+
+
+def cmd_end(root: Path, args: argparse.Namespace) -> str:
+    if args.withdraw is not None:
+        try:
+            open_pr = json.loads((root / DIR / BUDGET).read_text()).get("open_pr") is True
+        except (OSError, ValueError):
+            open_pr = False
+        if not open_pr:
+            raise ToolError("Withdrawal requires an open PR.")
+        if not args.withdraw.strip() or len(args.withdraw) > MAX_REPLY_CHARS:
+            raise ToolError(f"withdrawal reason must contain 1 to {MAX_REPLY_CHARS} chars")
+    staged = _load_staged(root)
+    abi = _dir(root) / ABI
+    payload = json.loads(abi.read_text()) if abi.exists() else {}
+    if staged["submit"] or payload.get("submit"):
+        raise ToolError("submit first, end after the verdict")
+    if staged["launches"] or payload.get("type") == "sleep":
+        raise ToolError("end is final for the leg; it cannot accompany launch or sleep")
+    report = ""
+    if args.report:
+        path = Path(args.report)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                report = stream.read(MAX_REPORT_CHARS + 1)
+        except OSError as exc:
+            raise ToolError(f"report file could not be read: {exc}") from exc
+        if not report.strip() or len(report) > MAX_REPORT_CHARS:
+            raise ToolError(f"report must contain 1 to {MAX_REPORT_CHARS} chars")
+    ending = {"type": "end", "report": report, "messages": payload.get("messages", [])}
+    if args.withdraw is not None:
+        ending["withdraw"] = args.withdraw.strip()
+    encoded = json.dumps(ending)
+    if len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ToolError(f"staged request exceeds {MAX_REQUEST_BYTES} bytes")
+    abi.write_text(encoded)
+    if args.withdraw is not None:
+        return "withdrawal staged; END YOUR TURN. The PR closes on the kernel's next pass."
+    return "end staged; END YOUR TURN to end the run or park its open PR."
 
 
 def cmd_launch(root: Path, args: argparse.Namespace) -> str:
+    _check_end(root, "launch")
     # shlex.join, NOT " ".join: the shell that invoked this CLI already split
     # `-- python train.py --label "a b"` into tokens, so re-quote them so the
     # eventual `sh -c "$(cat command.txt)"` re-parses the SAME tokens (a plain
@@ -193,36 +244,143 @@ def cmd_launch(root: Path, args: argparse.Namespace) -> str:
     )
 
 
-def cmd_note(root: Path, args: argparse.Namespace) -> str:
-    note = args.text
-    if len(note) > MAX_NOTE_CHARS:
-        raise ToolError(f"note exceeds {MAX_NOTE_CHARS} chars")
-    staged = _load_staged(root)
-    staged["note"] = note
-    _save_staged(root, staged)
-    return "note saved (delivered back to you on wake)."
+def _messages(root: Path) -> list[dict]:
+    try:
+        return json.loads((root / DIR / "messages.json").read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def cmd_message(root: Path, args: argparse.Namespace) -> str:
+    if args.show is not None:
+        if args.text is not None or args.file or args.reply_to is not None or args.to != "thread":
+            raise ToolError("--show cannot accompany a message")
+        return _show_chain(root, args.show)
+    if args.to not in ("thread", "self") and not re.fullmatch(r"agent-\d{2,}", args.to):
+        raise ToolError("invalid message destination")
+    if args.to not in ("thread", "self") and not _policy(root).get("channels", {}).get(
+        "messages", True
+    ):
+        raise ToolError("inter-agent messages disabled by channels.messages")
+    if args.reply_to is not None and not any(m["seq"] == args.reply_to for m in _messages(root)):
+        raise ToolError(f"unknown inbox message #{args.reply_to}")
+    if (args.text is None) == (args.file is None):
+        raise ToolError("provide text or --file")
+    text = args.text
+    if args.file:
+        path = Path(args.file)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                text = stream.read(MAX_REPLY_CHARS + 1)
+        except OSError as exc:
+            raise ToolError(f"message file could not be read: {exc}") from exc
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_REPLY_CHARS:
+        raise ToolError(f"message text exceeds bounds: 1 to {MAX_REPLY_CHARS} chars")
+    path = _dir(root) / ABI
+    payload: dict = json.loads(path.read_text()) if path.exists() else {"type": "message"}
+    messages = payload.setdefault("messages", [])
+    if len(messages) >= 8:
+        raise ToolError("at most 8 messages per leg")
+    messages.append({"to": args.to, "text": text, "reply_to": args.reply_to})
+    encoded = json.dumps(payload)
+    if len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ToolError(f"staged messages exceed {MAX_REQUEST_BYTES} bytes")
+    path.write_text(encoded)
+    if args.to == "thread":
+        try:
+            thread = json.loads((root / DIR / "message-destination.json").read_text())["thread"]
+        except (OSError, ValueError, KeyError):
+            thread = "this run's PR or issue thread"
+        return f"message staged to thread; this will be posted publicly on {thread}."
+    destination = "self (you)" if args.to == "self" else args.to
+    return f"message staged to {destination} (delivered at the next wake)."
+
+
+def _show_chain(root: Path, number: int) -> str:
+    entries = {m["seq"]: m for m in _messages(root)}
+    if number not in entries:
+        return f"unknown inbox message #{number}"
+    chain = {number}
+    current = entries[number].get("reply_to_seq")
+    while isinstance(current, int) and current in entries and current not in chain:
+        chain.add(current)
+        current = entries[current].get("reply_to_seq")
+    diagnostic = ""
+    if isinstance(current, int):
+        diagnostic = (
+            f"cycle detected at #{current}"
+            if current in chain
+            else f"missing root: inbox message #{current} is not in the snapshot"
+        )
+    while True:
+        children = {n for n, m in entries.items() if m.get("reply_to_seq") in chain}
+        if children <= chain:
+            break
+        chain |= children
+    lines = [f"chain of #{number}, {len(chain)} messages, oldest first", ""]
+    if diagnostic:
+        lines.extend([diagnostic, ""])
+    for n in sorted(chain):
+        m = entries[n]
+        reference = m.get("reply_to_seq")
+        suffix = f"   (replying to #{reference})" if reference else ""
+        lines.extend(
+            [
+                f"#{n:<3} {m['time']}   {m['sender']} -> {m['recipient']}{suffix}",
+                "     " + m["text"].replace("\n", "\n     "),
+                "",
+            ]
+        )
+    body = "\n".join(lines).rstrip()
+    fence = "`" * max(3, max((len(x) + 1 for x in re.findall(r"`+", body)), default=0))
+    return f"{fence}\n{body}\n{fence}"
+
+
+def _policy(root: Path) -> dict:
+    try:
+        return json.loads((root / DIR / "policy.json").read_text())
+    except FileNotFoundError:
+        return {}
 
 
 def cmd_submit(root: Path, args: argparse.Namespace) -> str:
-    path = Path(args.report)
-    if not path.is_absolute():
-        path = root / path
-    try:
-        # read one char past the cap, never the whole file: the size check
-        # decides before an oversized file is in memory
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            report = fh.read(MAX_REPORT_CHARS + 1)
-    except OSError as exc:
-        raise ToolError(f"--report {args.report!r} could not be read ({exc})") from exc
-    if len(report) > MAX_REPORT_CHARS:
-        raise ToolError(f"--report is over the limit; at most {MAX_REPORT_CHARS} chars")
-    report = report.strip()
-    if not report:
-        raise ToolError(
-            f"--report {args.report!r} is empty: write the hypothesis, what you ran and "
-            "measured, and why this should merge"
-        )
+    _check_end(root, "submit")
+    report = ""
+    if args.report:
+        path = Path(args.report)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            # read one char past the cap, never the whole file: the size check
+            # decides before an oversized file is in memory
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                report = fh.read(MAX_REPORT_CHARS + 1)
+        except OSError as exc:
+            raise ToolError(f"--report {args.report!r} could not be read ({exc})") from exc
+        if len(report) > MAX_REPORT_CHARS:
+            raise ToolError(f"--report is over the limit; at most {MAX_REPORT_CHARS} chars")
+        report = report.strip()
+        if not report:
+            raise ToolError(
+                f"--report {args.report!r} is empty: write the hypothesis, what you ran and "
+                "measured, and why this should merge"
+            )
     staged = _load_staged(root)
+    claimed = getattr(args, "claimed_value", None)
+    baseline = getattr(args, "claimed_baseline", None)
+    trust = _policy(root).get("verification") == "self_report"
+    import math
+
+    if trust and (claimed is None or baseline is None):
+        raise ToolError("self_report requires --claimed-value and --claimed-baseline")
+    for key, value in (("claimed_value", claimed), ("claimed_baseline", baseline)):
+        if value is not None and not math.isfinite(value):
+            raise ToolError(f"{key} must be finite")
+        staged.pop(key, None)
+        if value is not None:
+            staged[key] = value
     staged["submit"] = True
     staged["report"] = report
     minutes = getattr(args, "minutes", None)
@@ -231,6 +389,11 @@ def cmd_submit(root: Path, args: argparse.Namespace) -> str:
             raise ToolError("--minutes must be a positive integer")
         staged["eval_minutes"] = min(minutes, MAX_EVAL_MINUTES)
     _save_staged(root, staged)
+    if trust:
+        return (
+            f"staged self-reported submit: {baseline} -> {claimed}; scope and improvement "
+            "floors apply, no gate evals or panel run. Use sleep to submit."
+        )
     declared = staged.get("eval_minutes")
     walltime = (
         f"each paired eval gets {declared} min of walltime (your declaration; "
@@ -247,25 +410,35 @@ def cmd_submit(root: Path, args: argparse.Namespace) -> str:
 
 
 def cmd_sleep(root: Path, _args: argparse.Namespace) -> str:
+    _check_end(root, "sleep")
     staged = _load_staged(root)
     # commit the SLEEP syscall -> the ABI the kernel reads; then END THE TURN.
     payload = {
         "type": "sleep",
         "launches": staged["launches"],
-        "note": staged["note"],
         "submit": bool(staged["submit"]),
     }
     if staged["submit"] and staged.get("eval_minutes"):
         payload["eval_minutes"] = int(staged["eval_minutes"])
     if staged["submit"]:
-        # the report rides the submit: the kernel refuses a submit without one
+        # The optional report rides the submit.
         payload["report"] = str(staged.get("report") or "")
-    (_dir(root) / ABI).write_text(json.dumps(payload))
+        for key in ("claimed_value", "claimed_baseline"):
+            if key in staged:
+                payload[key] = staged[key]
+    abi = _dir(root) / ABI
+    if abi.exists():
+        payload["messages"] = json.loads(abi.read_text()).get("messages", [])
+    abi.write_text(json.dumps(payload))
     (root / DIR / REQUEST).unlink(missing_ok=True)
     n = len(staged["launches"])
     what = f"{n} launch(es)" if n else "a checkpoint (no launches)"
     if staged["submit"]:
-        what += " + a submit (seal, gate, panel)"
+        what += (
+            " + a self-reported submit (scope and floors)"
+            if _policy(root).get("verification") == "self_report"
+            else " + a submit (seal, gate, panel)"
+        )
     return (
         f"committed {what}. END YOUR TURN NOW to hibernate — you will be woken "
         "with the results. (If you keep working, the sleep still triggers when "
@@ -335,6 +508,13 @@ def cmd_conclude(root: Path, args: argparse.Namespace) -> str:
 def cmd_status(root: Path, _args: argparse.Namespace) -> str:
     staged = _load_staged(root)
     lines: list[str] = []
+    abi = root / DIR / ABI
+    if abi.exists():
+        payload = json.loads(abi.read_text())
+        if payload.get("type") == "end":
+            lines.append("end staged (applies when this turn ends)")
+        for message in payload.get("messages", []):
+            lines.append(f"message staged to {message['to']}: {message['text']}")
     if staged["launches"] or staged["submit"] or (root / DIR / BUDGET).exists():
         lines.append(f"{len(staged['launches'])} launch(es) staged; {_budget_line(root)}.")
         for la in staged["launches"]:
@@ -346,11 +526,13 @@ def cmd_status(root: Path, _args: argparse.Namespace) -> str:
             if la.get("why"):
                 lines.append(f"      why: {la['why']}")
         if staged["submit"]:
-            lines.append("  submit staged: `sleep` seals this tree for the gate + panel")
+            lines.append(
+                "  self-reported submit staged: scope and floors, no gate or panel"
+                if _policy(root).get("verification") == "self_report"
+                else "  submit staged: `sleep` seals this tree for the gate + panel"
+            )
             if staged.get("report"):
                 lines.append(f"  report: {len(staged['report'])} chars")
-        if staged.get("note"):
-            lines.append(f"  note: {staged['note']}")
     if staged["findings"]:
         lines.append(f"{len(staged['findings'])} finding(s) staged:")
         for f in staged["findings"]:
@@ -361,6 +543,7 @@ def cmd_status(root: Path, _args: argparse.Namespace) -> str:
 
 def cmd_cancel(root: Path, _args: argparse.Namespace) -> str:
     (root / DIR / REQUEST).unlink(missing_ok=True)
+    (root / DIR / ABI).unlink(missing_ok=True)
     return "staged request discarded."
 
 
@@ -400,15 +583,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="repo-relative file to bring back (repeatable)",
     )
     la.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command to run")
-    no = sub.add_parser("note", help="save a note to yourself, echoed back on wake")
-    no.add_argument("text")
+    message = sub.add_parser("message", help="send to thread, self, or agent-NN; show a chain")
+    message.add_argument("text", nargs="?")
+    message.add_argument("--file")
+    message.add_argument("--to", default="thread")
+    message.add_argument("--reply-to", type=int)
+    message.add_argument("--show", type=int)
     su = sub.add_parser(
         "submit",
-        help="stage a submit: on sleep, seal this tree for the gate + review panel",
+        help=(
+            "stage a submit: on sleep, seal this tree for the gate + review panel. "
+            "The session ends here."
+        ),
+        description=(
+            "Seal and measure this tree; a credited verdict publishes it. The session ends here."
+        ),
     )
+    su.add_argument("--claimed-value", type=float, help="self-reported candidate metric")
+    su.add_argument("--claimed-baseline", type=float, help="self-reported comparison baseline")
     su.add_argument(
         "--report",
-        required=True,
+        default="",
         help=(
             "markdown file: your hypothesis, what you ran and what it measured (see "
             "`history`), why this should merge, what did not work; it becomes the PR's "
@@ -422,7 +617,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="walltime for each paired gate eval (default: the contract's; "
         "2 evals x minutes x GPUs draws on your GPU-hour budget)",
     )
-    sub.add_parser("sleep", help="commit staged launches/submit; then end your turn")
+    sub.add_parser(
+        "sleep",
+        help="commit staged launches/submit; then end your turn. The session ends here.",
+        description="The session ends here.",
+    )
+    end = sub.add_parser(
+        "end",
+        help="stage an end; then end your turn. The session ends here.",
+        description="The session ends here.",
+    )
+    end.add_argument("--withdraw", metavar="REASON", help="close your open PR and end the run")
+    end.add_argument("--report", default="", help="file containing your final report")
     # judge verbs
     fi = sub.add_parser("finding", help="record one finding")
     fi.add_argument("--file", required=True)
@@ -447,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="show staged syscalls and remaining budget")
     sub.add_parser(
         "siblings",
-        help="what the other agents were working on as of this session's start",
+        help="what the other agents are working on, refreshed at every wake",
     )
     sync_p = sub.add_parser(
         "sync",
@@ -513,25 +719,27 @@ def cmd_sync(root: Path, args) -> str:
 
 
 def cmd_siblings(root: Path, _args) -> str:
-    """The fleet snapshot the kernel wrote at session start (informational;
-    other agents may have moved on since)."""
+    """The fleet snapshot the kernel wrote at this wake (informational; other
+    agents may have moved on since)."""
     try:
         entries = json.loads((root / DIR / "siblings.json").read_text())
     except (OSError, ValueError):
         entries = []
     if not isinstance(entries, list) or not entries:
         return "no sibling activity known."
-    lines = ["as of this session's start:"]
+    lines = ["as of this wake:"]
     for e in entries:
         if not isinstance(e, dict):
             continue
         who = str(e.get("agent", "?"))[:64]
         state = str(e.get("state", ""))[:32]
         phase = str(e.get("phase", ""))[:32]
-        direction = str(e.get("direction", ""))[:160]
+        what = str(e.get("hypothesis") or e.get("direction") or "")[:400]
+        pr_url = str(e.get("pr_url", ""))[:1000]
         label = f"{state}/{phase}" if phase else state
-        lines.append(f"  - {who} ({label}): {direction}" if direction else f"  - {who} ({label})")
-    lines.append("prefer a direction no sibling is actively on, unless you have a distinct angle.")
+        lines.append(f"  - {who} ({label}): {what}" if what else f"  - {who} ({label})")
+        if pr_url:
+            lines.append(f"    in review: {pr_url}")
     return "\n".join(lines)
 
 
@@ -539,6 +747,8 @@ def cmd_reports(root: Path, args) -> str:
     """The research-report archive the kernel fetched for this run. With no
     names: one summary line per report, newest first. With names: those
     reports in full, in the order asked."""
+    if not _policy(root).get("channels", {}).get("shared_reports", True):
+        raise ToolError("shared reports disabled by channels.shared_reports")
     archive = root / "reports"
     if not archive.is_dir():
         return "no report archive in this run (a first attempt on the target, or fetch failed)"
@@ -722,8 +932,9 @@ def cmd_history(root: Path, args) -> str:
 
 
 _HANDLERS = {
+    "end": cmd_end,
+    "message": cmd_message,
     "launch": cmd_launch,
-    "note": cmd_note,
     "submit": cmd_submit,
     "sleep": cmd_sleep,
     "finding": cmd_finding,
@@ -743,7 +954,7 @@ def main(argv: list[str], root: Path | None = None) -> int:
     # argparse REMAINDER keeps a leading "--"; drop it for a clean command
     if getattr(args, "command", None) and args.command and args.command[0] == "--":
         args.command = args.command[1:]
-    # Root at the tool's own install location (<workspace>/.autoresearch/
+    # Root at the tool's own install location (<workspace>/.outerloop/
     # syscall -> the workspace), NEVER the caller's cwd: an agent may invoke
     # the tool from a subdirectory or from another working directory entirely
     # (hermes starts in its per-run home), and a cwd-rooted channel would

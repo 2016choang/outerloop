@@ -29,9 +29,10 @@ data, not accounts: every commit is authored by the one bot account with an
 | **Maintenance agent** | model | later | CI fixes, dependency bumps, issue triage on opted-in repos | count toward research budgets; touch benchmarks |
 
 Authority in one line: **model roles propose, code roles enforce, humans
-decide.** Every merge into a target repo is a human decision (bot PRs arm
-auto-merge only where branch protection requires that human review — the
-arming guard refuses otherwise, in code).
+decide.** Merging into a target repo is a human decision unless the owner
+opted the repo in with `merge: auto` in its contract (architecture.md). Bot
+PRs otherwise arm auto-merge only where branch protection requires that human
+review — the arming guard refuses otherwise, in code.
 
 ## The main flow: one improvement, end to end
 
@@ -62,13 +63,13 @@ flowchart TD
 
     F -->|no| R0["run ends: negative result<br/>+ research report"]
     F -->|yes| G["freshness: base moved?<br/>merge + re-measure BOTH sides"]
-    G --> PR["push branch, open PR<br/>report + table in body,<br/>arm auto-merge (guarded)"]
+    G --> PR["push measured tree, open PR<br/>pending record on research-log;<br/>report + table in body,<br/>record blessed head in auto mode;<br/>manual arming requires human review"]
 
     PR --> V["verifier (next): integrity read<br/>advisory reviewer: skips bot PRs"]
     PR --> H{human code-owner review}
     V -.->|findings inform| H
-    H -->|approve| M["auto-merge executes<br/>ledger + BENCHMARKS.md updated"]
-    H -->|comment| W["follow-up job wakes the<br/>AUTHOR session (resume)"]
+    H -->|approve| M["merge executes<br/>kernel confirms on research-log"]
+    H -->|comment| W["wake job wakes the<br/>AUTHOR session (resume)"]
     W -->|reply / fixes re-measured| PR
     H -->|close| R1["run ends: rejected + report"]
 ```
@@ -107,7 +108,7 @@ naturally to batches ACROSS rounds instead (successive-halving: broad
 short batch → wake → prune → deep batch), with each pruning decision an
 auditable artifact. One batch in flight per run; concurrent research
 lines = parallel runs, the planner's call. Bounded by cumulative
-gpu_hours_per_run (exhaustion forces a concluding wake), the run
+gpu_hours_per_run (exhaustion is reported at the next wake), the run
 deadline, and the wake-attempt cap.
 
 Division of labor: the **author** designs the experiment; the
@@ -134,7 +135,7 @@ sbatch — budget enforcement is unavoidable), a session blocked on a
 48-hour job would burn money doing nothing, and every request ever made
 is an auditable artifact in the run dir.
 
-Status: the mechanisms are live-verified (waiting state, afterany wake on
+Status: the mechanisms are live-verified (parked state, afterany wake on
 any termination, deadlines, resume across nodes, wake prompts) but the
 launch glue — the request-artifact format and validation, GPU-hour
 accounting, the real wake dispatcher — is pending; it gates the first GPU
@@ -148,7 +149,7 @@ issues — never directly on code or contracts:
 ```mermaid
 flowchart TD
     subgraph memory [Research memory]
-        LED["leader.json:<br/>best config per benchmark"]
+        LED["research-log leader.json:<br/>confirmed best per benchmark"]
         LES["notebook: lessons,<br/>recent run reports"]
     end
 
@@ -210,18 +211,20 @@ finding survives.
 
 | Boundary | Enforced by |
 |---|---|
-| Solver never touches ruler/contract/progress files | scope veto + ledger-only publish commit on the sealed sha (code) |
+| Solver never touches ruler/contract/progress files | scope veto; PR carries only the measured tree (code) |
 | Numbers come only from the orchestrator | climb_once re-measures; PR body states it; CI re-verifies |
 | Reviewer never reviews its own pipeline's PRs automatically | bot-author skip (code) |
 | Verifier ≠ author | different role, prompt, key; reads adversarially |
 | Steward ≠ solver | separate identity, credentials, budget; scored on discrimination, never solver metrics |
 | Goal changes are human acts | `vision:` is agent-unwritable (loader invariant); plan issues are vetoable; contract changes merge only by humans |
-| Bot never merges | account permissions + the auto-merge arming guard (code) |
+| Merge authority | manual mode requires a human review; auto mode merges only a clean blessed head |
 
 ## Where state lives
 
 Run records, leases, pending markers: the state root on the shared FS.
-Results: `results/leader.json` + `BENCHMARKS.md` in the target repo
-(orchestrator-written only). Research memory: reports per run, distilled
+Results: `results/leader.json` + `BENCHMARKS.md` on the target's
+`research-log` branch (kernel-written only). Measurements are pending at publish
+and confirmed when the kernel observes the merge. The main-commit column links
+the merge; imported rows say "provenance unknown". PRs carry only the measured tree. Research memory: reports per run, distilled
 lessons in the private notebook (phase 6). Plans: GitHub issues + notebook
 copies. Nothing durable lives in any process.

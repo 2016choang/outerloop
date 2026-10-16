@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,12 @@ from outerloop.runstate import (
     ENDED,
     MAX_CLOCK_SKEW_S,
     OUTAGE_COOLDOWN_S,
+    PARKED,
     STUCK,
     THROTTLE_COOLDOWN_S,
-    WAITING,
     RunRecord,
     acquire_lease,
+    is_throttle,
     lease_is_stale,
     list_runs,
     load_record,
@@ -29,7 +31,7 @@ from outerloop.runstate import (
 
 
 def make_record(**overrides) -> RunRecord:
-    base = dict(run_id="r1", target="org/repo", task_title="t", state=WAITING, deadline=999.0)
+    base = dict(run_id="r1", target="org/repo", task_title="t", state=PARKED, deadline=999.0)
     return RunRecord(**{**base, **overrides})
 
 
@@ -52,7 +54,7 @@ def test_save_stamps_updated_but_keeps_created(tmp_path: Path) -> None:
 def test_save_is_atomic_no_tmp_left_behind(tmp_path: Path) -> None:
     save_record(tmp_path, make_record(), now=1.0)
     names = {p.name for p in run_dir(tmp_path, "r1").iterdir()}
-    assert names == {"state.json"}
+    assert names == {"state.json", ".record-lock"}
 
 
 def test_invalid_state_and_ending_are_rejected(tmp_path: Path) -> None:
@@ -203,11 +205,30 @@ def test_outage_latch_pauses_then_expires(tmp_path) -> None:
 
 
 def test_throttling_stamps_a_short_pause(tmp_path) -> None:
-    """A 429/529 is transient: the stamp carries its own short cooldown,
-    so one throttled session never idles the lanes for most of an hour."""
+    """Throttling is an outage that takes the latch's short cooldown, never the long one."""
+    from outerloop.harness import SessionResult, outage
+
+    detail = "exceeded retry limit, last status: 429 Too Many Requests"
+    assert outage(
+        SessionResult(
+            stop_reason="error",
+            is_error=True,
+            cost_usd=None,
+            num_turns=0,
+            session_id="",
+            final_text="",
+            transcript_path="",
+            error_detail=detail,
+        )
+    )
+    stamp_outage(tmp_path, detail, now=1000.0)
+    assert "429" in outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S - 1)
+    assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S) == ""
     stamp_outage(tmp_path, "rate_limit_error: Number of requests exceeded", now=1000.0)
     assert "rate_limit" in outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S - 1)
     assert outage_active(tmp_path, now=1000.0 + THROTTLE_COOLDOWN_S) == ""
+    assert not is_throttle("context length exceeded: 429 tokens requested, limit is 200000")
+    assert not is_throttle("exceeded retry limit, last status: 500")
 
 
 def test_corrupt_outage_stamp_reads_inactive(tmp_path) -> None:
@@ -232,39 +253,266 @@ def test_future_stamp_within_skew_is_active(tmp_path) -> None:
     assert outage_active(tmp_path, now=1000.0 - MAX_CLOCK_SKEW_S - 1) == ""
 
 
-def test_load_record_maps_legacy_climb_job_id(tmp_path: Path) -> None:
-    # an in-flight record written by pre-rename code carries climb_job_id;
-    # load must map it to run_job_id so the sweep still ends a killed job
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("implementing", "running"),
+        ("waiting", "parked"),
+        ("in-review", "parked"),
+        ("concluding", "parked"),
+    ],
+)
+def test_old_states_migrate(tmp_path, caplog, old, new):
     import json
 
-    from outerloop.runstate import RECORD_NAME, load_record, run_dir
+    from outerloop.runstate import run_dir
 
-    d = run_dir(tmp_path, "r1")
-    d.mkdir(parents=True)
-    (d / RECORD_NAME).write_text(
+    directory = run_dir(tmp_path, "legacy")
+    directory.mkdir(parents=True)
+    (directory / "state.json").write_text(
         json.dumps(
             {
-                "run_id": "r1",
-                "target": "o/r",
-                "task_title": "t",
-                "state": "implementing",
-                "climb_job_id": "16299",  # the legacy key
+                "run_id": "legacy",
+                "target": "org/repo",
+                "task_title": "old",
+                "state": old,
+                "followup_stage": {"candidate_sha": "old"},
+                "followup_job_id": "123",
+                "last_comment_id": 900,
             }
         )
     )
-    rec = load_record(tmp_path, "r1")
-    assert rec.run_job_id == "16299"
-    # a new record's run_job_id always wins over a stray legacy key
-    (d / RECORD_NAME).write_text(
-        json.dumps(
-            {
-                "run_id": "r1",
-                "target": "o/r",
-                "task_title": "t",
-                "state": "implementing",
-                "climb_job_id": "old",
-                "run_job_id": "new",
-            }
-        )
+    record = load_record(tmp_path, "legacy")
+    assert record.state == new
+    assert ("migrating concluding to parked" in caplog.text) == (old == "concluding")
+    from outerloop.inbox import github_positions
+
+    assert github_positions(directory) == {}
+    from outerloop.runstate import acquire_lease, migrate_inbox
+
+    assert acquire_lease(tmp_path, "legacy", "test", "", 1)
+    migrate_inbox(tmp_path, "legacy", 1)
+    assert github_positions(directory)["comment"] == 900
+    save_record(tmp_path, record, 1)
+    raw = json.loads((directory / "state.json").read_text())
+    assert not {"followup_stage", "followup_job_id", "last_comment_id"} & raw.keys()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_legacy_positions_migrate_once_in_leased_sweep(tmp_path, monkeypatch, existing):
+    import outerloop.inbox as inbox
+    from fakes import RecordingDispatcher
+    from outerloop.compute import LocalCompute
+    from outerloop.runstate import migrate_inbox, read_lease
+    from outerloop.tick import sweep
+
+    record = RunRecord("legacy", "org/repo", "task", PARKED)
+    save_record(tmp_path, record, 1)
+    directory = tmp_path / "runs" / record.run_id
+    path = directory / "state.json"
+    raw = json.loads(path.read_text())
+    raw.update(last_comment_id=900, last_review_id=20, last_review_comment_id=3)
+    path.write_text(json.dumps(raw))
+    if existing:
+        inbox.advance_github_positions(directory, {"comment": 5})
+    before = {p: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    load_record(tmp_path, record.run_id)
+    assert {p: p.read_bytes() for p in directory.rglob("*") if p.is_file()} == before
+    with pytest.raises(RuntimeError, match="requires the run lease"):
+        migrate_inbox(tmp_path, record.run_id, 2)
+    writes = []
+    original = inbox.advance_github_positions
+
+    def advance(folder, positions):
+        assert read_lease(tmp_path, record.run_id) is not None
+        writes.append(positions)
+        original(folder, positions)
+
+    monkeypatch.setattr(inbox, "advance_github_positions", advance)
+    sweep(tmp_path, LocalCompute(), RecordingDispatcher(), 2)
+    assert len(writes) == (0 if existing else 1)
+    assert inbox.github_positions(directory) == (
+        {"comment": 5} if existing else {"comment": 900, "review": 20, "review_comment": 3}
     )
-    assert load_record(tmp_path, "r1").run_job_id == "new"
+    assert "last_comment_id" not in json.loads(path.read_text())
+    stamp = (directory / "inbox/positions.json").stat().st_mtime_ns
+    sweep(tmp_path, LocalCompute(), RecordingDispatcher(), 3)
+    assert len(writes) == (0 if existing else 1)
+    assert (directory / "inbox/positions.json").stat().st_mtime_ns == stamp
+
+
+@pytest.mark.parametrize("writer_state", [PARKED, ENDED])
+def test_wake_writers_leave_ended_record_byte_identical(tmp_path, writer_state):
+    from dataclasses import replace
+
+    record = RunRecord("run", "org/repo", "task", ENDED, ending="merged", ending_note="PR merged")
+    save_record(tmp_path, record, 1)
+    path = run_dir(tmp_path, "run") / "state.json"
+    before = path.read_bytes()
+    save_record(
+        tmp_path, replace(record, state=writer_state, inbox_seq=5, stage={"sleeps_used": 9}), 2
+    )
+    assert path.read_bytes() == before
+
+
+def test_migration_drops_the_follow_up_job_fields(tmp_path):
+    """An idle old record that names a follow-up job or a dispatched
+    re-measure is migrated once under the lease and stops counting as legacy."""
+    import json
+
+    from outerloop.runstate import acquire_lease, migrate_inbox
+
+    record = RunRecord("legacy2", "org/repo", "t", "parked", pr_url="https://x/pull/3")
+    save_record(tmp_path, record, 1)
+    path = run_dir(tmp_path, "legacy2") / "state.json"
+    raw = json.loads(path.read_text())
+    raw["followup_job_id"] = "12345"
+    raw["followup_stage"] = {"candidate_sha": "abc"}
+    raw["state"] = "in-review"
+    path.write_text(json.dumps(raw))
+    assert acquire_lease(tmp_path, "legacy2", holder="t", holder_job_id="", now=1)
+    migrate_inbox(tmp_path, "legacy2", 2)
+    after = json.loads(path.read_text())
+    assert "followup_job_id" not in after and "followup_stage" not in after
+    assert load_record(tmp_path, "legacy2").state == "parked"
+
+
+def test_tick_lease_fences_live_holder_and_recovers_crash(tmp_path, caplog):
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    lease = acquire_tick_lease(tmp_path, "alpha1:1", 100, 300)
+    try:
+        # Even an overdue heartbeat cannot displace a running tick.
+        with pytest.raises(RuntimeError, match="alpha1:1"):
+            acquire_tick_lease(tmp_path, "alpha2:2", 1000, 300)
+        acquire_tick_lease(tmp_path, "alpha1:1", 1000, 300, lease)
+    finally:
+        lease.close()  # a crash drops the lock but leaves the heartbeat
+    with pytest.raises(RuntimeError, match="alpha1:1"):
+        acquire_tick_lease(tmp_path, "alpha2:2", 1200, 300)
+    successor = acquire_tick_lease(tmp_path, "alpha2:2", 1301, 300)
+    assert "taking over the tick lease left by alpha1:1" in caplog.text
+    release_tick_lease(successor)
+    immediate = acquire_tick_lease(tmp_path, "alpha3:3", 1301, 300)
+    release_tick_lease(immediate)
+    assert (tmp_path / "TICK").read_text() == ""
+
+
+def test_tick_lease_excludes_another_process(tmp_path):
+    import subprocess
+    import sys
+
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    code = """
+import sys
+from pathlib import Path
+from outerloop.runstate import acquire_tick_lease
+lease = acquire_tick_lease(Path(sys.argv[1]), 'login:123', 100, 300)
+print('held', flush=True)
+sys.stdin.read()
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as child:
+        assert child.stdout is not None and child.stdout.readline().strip() == "held"
+        try:
+            with pytest.raises(RuntimeError, match="login:123"):
+                acquire_tick_lease(tmp_path, "resident:456", 1000, 300)
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+    lease = acquire_tick_lease(tmp_path, "resident:456", 1000, 300)
+    release_tick_lease(lease)
+
+
+def test_tick_lease_same_host_takes_over_a_dead_holder(tmp_path, caplog):
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease, tick_lease_holder
+
+    lease = acquire_tick_lease(tmp_path, "alpha1:1", 100, 300)
+    assert tick_lease_holder(tmp_path, 100, 300, "alpha1") == "alpha1:1"  # live: the lock says so
+    lease.close()  # a crash: the lock drops, the heartbeat stays fresh
+    assert tick_lease_holder(tmp_path, 150, 300, "alpha2") == "alpha1:1"
+    assert tick_lease_holder(tmp_path, 150, 300, "alpha1") == ""
+    with pytest.raises(RuntimeError, match="alpha1:1"):
+        acquire_tick_lease(tmp_path, "alpha2:2", 150, 300)
+    successor = acquire_tick_lease(tmp_path, "alpha1:9", 150, 300)
+    assert "taking over the tick lease left by alpha1:1" in caplog.text
+    release_tick_lease(successor)
+    assert tick_lease_holder(tmp_path, 151, 300, "alpha2") == ""
+
+
+def test_tick_lease_ttl_is_the_holders(tmp_path):
+    from outerloop.runstate import acquire_tick_lease, tick_lease_holder
+
+    lease = acquire_tick_lease(tmp_path, "alpha1:1", 100, 5400)  # a 30-min cadence
+    lease.close()  # crash
+    # a one-minute-cadence reader elsewhere must not call it stale after its own 3 minutes
+    assert tick_lease_holder(tmp_path, 400, 180, "alpha2") == "alpha1:1"
+    with pytest.raises(RuntimeError, match="alpha1:1"):
+        acquire_tick_lease(tmp_path, "alpha2:2", 400, 180)
+    assert tick_lease_holder(tmp_path, 100 + 5400 + 1, 180, "alpha2") == ""
+
+
+def test_heartbeat_stops_when_another_node_took_the_record(tmp_path):
+    from outerloop.runstate import acquire_tick_lease, release_tick_lease
+
+    lease = acquire_tick_lease(tmp_path, "alpha1:1", 100, 300)
+    # a node the file lock did not reach wrote its own record
+    foreign = json.dumps({"holder": "alpha2:2", "heartbeat": 150, "ttl": 300})
+    (tmp_path / "TICK").write_text(foreign)
+    with pytest.raises(RuntimeError, match="taken by alpha2:2"):
+        acquire_tick_lease(tmp_path, "alpha1:1", 200, 300, lease)
+    assert lease.closed
+    assert (tmp_path / "TICK").read_text() == foreign  # never overwritten by the loser
+    other = acquire_tick_lease(tmp_path, "alpha2:2", 200, 300)  # the winner heartbeats on
+    release_tick_lease(other, "alpha2:2")
+    assert (tmp_path / "TICK").read_text() == ""
+
+
+def test_legacy_bless_reason_defaults_empty(tmp_path):
+    record = RunRecord("legacy-bless", "org/repo", "task", "parked", auto_blessed_head="head")
+    save_record(tmp_path, record, 1)
+    path = run_dir(tmp_path, record.run_id) / "state.json"
+    raw = json.loads(path.read_text())
+    del raw["auto_bless_reason"]
+    path.write_text(json.dumps(raw))
+    latest = load_record(tmp_path, record.run_id)
+    assert latest.auto_blessed_head == "head"
+    assert latest.auto_bless_reason == ""
+
+
+def test_fresh_tick_lease_yields_when_another_node_wrote_during_the_settle(tmp_path, monkeypatch):
+    import json
+
+    from outerloop import runstate
+
+    foreign = json.dumps({"holder": "alpha2:2", "heartbeat": 100, "ttl": 300})
+
+    def other_node_writes(seconds):
+        assert seconds == 0.25
+        (tmp_path / "TICK").write_text(foreign)  # a lock that did not span nodes
+
+    monkeypatch.setattr(runstate.time, "sleep", other_node_writes)
+    with pytest.raises(RuntimeError, match="taken by alpha2:2"):
+        runstate.acquire_tick_lease(tmp_path, "alpha1:1", 100, 300, settle_s=0.25)
+    assert (tmp_path / "TICK").read_text() == foreign  # the loser left the winner's record
+    monkeypatch.setattr(runstate.time, "sleep", lambda seconds: None)
+    lease = runstate.acquire_tick_lease(tmp_path, "alpha2:2", 101, 300, settle_s=0.25)
+    runstate.release_tick_lease(lease, "alpha2:2")
+
+
+def test_ended_record_drops_resume_block(tmp_path):
+    save_record(
+        tmp_path,
+        make_record(
+            state=ENDED,
+            ending=STUCK,
+            stage={"hermes_resume_required_chars": 200000, "sleeps_used": 2},
+        ),
+        now=1.0,
+    )
+    assert load_record(tmp_path, "r1").stage == {"sleeps_used": 2}

@@ -1,7 +1,7 @@
 """`outerloop init` — the guided setup.
 
-Collects placement (Slurm or local), the target repo, bot auth, and the
-author's model key, then writes `~/.config/outerloop/.env` (plus the credential
+Collects placement (Slurm or local), the target repo, bot auth, the Claude
+model, and the author's model key, then writes `~/.config/outerloop/.env` (plus the credential
 files), so a new adopter never hand-edits config or reasons about which
 `OUTERLOOP_*` keys to set. Flags fill
 answers non-interactively; anything left out is prompted for (a secret via
@@ -21,16 +21,19 @@ import getpass
 import json
 import logging
 import os
-import shutil
+import shlex
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from outerloop.cli import ENV_FILE
+from outerloop.cli import ENV_FILE, StartError, env_file_values, operator_env_file
+from outerloop.harness import HARNESS_INSTALL, default_binary
+from outerloop.hermes_install import hermes_ready
 from outerloop.image import ensure_image
 from outerloop.paths import write_private
 
@@ -40,7 +43,7 @@ CONFIG_DIR = ENV_FILE.parent
 DEFAULT_PAT_FILE = CONFIG_DIR / "bot_pat"
 API = "https://api.github.com"
 # The climbing author's harnesses (attempt.py's --author-backend choices).
-AUTHOR_BACKENDS = ("claude", "codex")
+AUTHOR_BACKENDS = ("claude", "codex", "hermes")
 
 
 @dataclass
@@ -52,14 +55,23 @@ class InitAnswers:
     partition: str = ""  # Slurm partition (optional; unset -> Slurm default)
     author_backend: str = ""  # optional: the climbing author's harness
     author_model: str = ""  # optional
+    claude_model: str = ""  # the model every Claude role runs (OUTERLOOP_CLAUDE_MODEL)
     author_key_file: str = ""  # the author's model key file, when known
     image: str = ""  # the agent image (OUTERLOOP_IMAGE)
     uncontained: bool = False  # --no-image: write OUTERLOOP_IMAGE= so no image is picked up
-    author_bin: str = ""  # the author harness binary (claude/codex), absolute, when found
+    author_bin: str = ""  # absolute binary or Hermes source path, when ready
+
+    # Existing deployment values untouched by a focused GitHub App update.
+    preserved_env: dict[str, str] = field(default_factory=dict)
 
 
 def render_env(
-    a: InitAnswers, pat_file: str = "", *, app_file: str = "", bot_login: str = ""
+    a: InitAnswers,
+    pat_file: str = "",
+    *,
+    app_file: str = "",
+    bot_login: str = "",
+    existing_text: str = "",
 ) -> str:
     """The `.env` body for these answers — only the keys that have a value, so
     the file stays minimal and every line means something. Ordered placement →
@@ -90,6 +102,8 @@ def render_env(
         # every own-comment filter and own-PR scan keys on this login; without
         # it the kernel assumes a default that is not this adopter's identity
         lines.append(f"OUTERLOOP_BOT_LOGIN={bot_login}")
+    if a.claude_model:
+        lines.append(f"OUTERLOOP_CLAUDE_MODEL={a.claude_model}")
     if a.author_backend:
         lines.append(f"OUTERLOOP_AUTHOR_BACKEND={a.author_backend}")
     if a.author_model:
@@ -98,41 +112,120 @@ def render_env(
         lines.append(f"{author_key_env(a.author_backend)}={a.author_key_file}")
     if a.author_bin:
         lines.append(f"{author_bin_env(a.author_backend)}={a.author_bin}")
-    return "\n".join(lines) + "\n"
+    # A focused auth update preserves every setting it does not explicitly manage.
+    values = dict(line.split("=", 1) for line in lines)
+    values.update(a.preserved_env)
+    if not existing_text:
+        return "".join(f"{key}={value}\n" for key, value in values.items())
+    # Rewriting a hand-edited file: keep its comments, blank lines and order;
+    # replace managed values in place, drop keys no longer set, append new ones.
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in existing_text.splitlines():
+        key, sep, _ = raw.partition("=")
+        key = key.strip()
+        if not sep or not key or key.startswith("#"):
+            out.append(raw)
+            continue
+        if key in values and key not in seen:
+            out.append(f"{key}={values[key]}")
+        seen.add(key)
+    out.extend(f"{key}={value}" for key, value in values.items() if key not in seen)
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _env_path() -> Path:
+    return operator_env_file(CONFIG_DIR / ENV_FILE.name)
+
+
+def _existing_env() -> str:
+    """The current `.env` text, or "" when there is none (a fresh setup)."""
+    try:
+        path = _env_path()
+        env_file_values(path, keys=None)
+        return path.read_text()
+    except OSError:
+        return ""
 
 
 def author_bin_env(backend: str) -> str:
-    """The `.env` key naming `backend`'s harness binary (`OUTERLOOP_CLAUDE_BIN`,
-    `OUTERLOOP_CODEX_BIN`), the same names `attempt` reads."""
-    return f"OUTERLOOP_{(backend or AUTHOR_BACKENDS[0]).upper()}_BIN"
-
-
-HARNESS_INSTALL = {
-    "claude": "npm install -g @anthropic-ai/claude-code "
-    "(or: curl -fsSL https://claude.ai/install.sh | bash)",
-    "codex": "npm install -g @openai/codex",
-}
+    """The `.env` key naming the backend's binary or pinned source directory."""
+    return (
+        "REVIEW_HERMES_REPO"
+        if backend == "hermes"
+        else f"OUTERLOOP_{(backend or AUTHOR_BACKENDS[0]).upper()}_BIN"
+    )
 
 
 def locate_harness(backend: str) -> str:
-    """The absolute path of `backend`'s CLI on this machine: PATH first, then
+    """The absolute path of `backend`'s CLI: configured environment path, then PATH, then
     ~/.local/bin (where the native installers put it and where a Slurm job,
     with no login PATH, would not find it); "" when absent. Recorded in .env so
     every job spawns the same binary the operator installed."""
     name = backend or AUTHOR_BACKENDS[0]
-    found = shutil.which(name)
-    if found:
-        return str(Path(found).resolve())
-    local = Path.home() / ".local" / "bin" / name
-    return str(local) if local.is_file() and os.access(local, os.X_OK) else ""
+    if name == "hermes":
+        repo = (
+            Path(os.environ.get("REVIEW_HERMES_REPO") or Path.home() / "hermes-agent")
+            .expanduser()
+            .resolve()
+        )
+        return str(repo) if hermes_ready(repo) else ""
+    recorded = os.environ.get(author_bin_env(name), "")
+    if recorded:
+        # an operator's explicit path is kept when it works and reported when it does not
+        path = Path(recorded).expanduser().absolute()
+        return str(path) if path.is_file() and os.access(path, os.X_OK) else ""
+    # the harness's own lookup, minus any path already recorded: absolute PATH
+    # entries only (never the working directory), then ~/.local/bin
+    env = {k: v for k, v in os.environ.items() if k != f"OUTERLOOP_{name.upper()}_BIN"}
+    found = default_binary(name, env)
+    return found if os.path.isabs(found) else ""
+
+
+def cli_install_wanted(author_bin: str, args: argparse.Namespace) -> bool:
+    """Install the author's CLI only in the full setup, when none was found and
+    the operator did not opt out; the focused --github-app run sets up the App."""
+    return not author_bin and not args.no_install_harness and not args.github_app
+
+
+def install_harness(backend: str, target: Path | None = None) -> str:
+    """Install a missing harness and return its binary or Hermes source path."""
+    name = backend or AUTHOR_BACKENDS[0]
+    if target is None:
+        target = (
+            Path(os.environ.get("REVIEW_HERMES_REPO") or Path.home() / "hermes-agent")
+            if name == "hermes"
+            else Path(os.environ.get(author_bin_env(name)) or Path.home() / ".local/bin" / name)
+        )
+    target = target.expanduser().absolute()
+    command = shlex.split(HARNESS_INSTALL[name])
+    script = Path(__file__).resolve().parents[2] / command[1]
+    if not script.is_file():
+        script = Path(__file__).resolve().parent / "_installers" / Path(command[1]).name
+    argv = [command[0], str(script), str(target)]
+    try:
+        subprocess.run(argv, check=True)
+        ready = (
+            hermes_ready(target)
+            if name == "hermes"
+            else target.is_file() and os.access(target, os.X_OK)
+        )
+        if not ready:
+            raise OSError(f"installer did not produce a complete harness at {target}")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(
+            f"{name} installation failed: {exc}. Run manually: {shlex.join(argv)}"
+        ) from exc
+    print(f"installed {name} at {target}")
+    return str(target)
 
 
 def _harness_hint(answers: InitAnswers) -> None:
     if not answers.author_bin:
         name = answers.author_backend or AUTHOR_BACKENDS[0]
         print(
-            f"  no `{name}` binary found on PATH or in ~/.local/bin — the first climb would end\n"
-            f"  with spawn-error. Install it: {HARNESS_INSTALL.get(name, 'see its docs')}\n"
+            f"  no `{name}` binary found on PATH or in ~/.local/bin — start will refuse to run\n"
+            f"  until it is installed. Install it: {HARNESS_INSTALL.get(name, 'see its docs')}\n"
             "  then run `outerloop init --force` so its path is recorded."
         )
 
@@ -184,6 +277,7 @@ def write_config(
     """Write the PAT file (only when a token is pasted) and the `.env`, both
     owner-only (0600) — `start`/`tick_deploy` refuse a group/world-readable
     `.env`, and a token file must never be wider. Returns (env_path, pat_path)."""
+    config_dir = operator_env_file(config_dir / ENV_FILE.name).parent
     config_dir.mkdir(parents=True, exist_ok=True)
     written_pat: Path | None = None
     if token:
@@ -193,7 +287,7 @@ def write_config(
         write_private(pat_path, token)
         written_pat = pat_path
         pat_file = str(pat_path)
-    env_path = config_dir / ENV_FILE.name
+    env_path = operator_env_file(config_dir / ENV_FILE.name)
     write_private(env_path, render_env(a, pat_file))
     return env_path, written_pat
 
@@ -227,55 +321,139 @@ def _check_repo_access(token: str, target: str) -> str:
         return f"could not reach GitHub: {exc.reason}"
 
 
-def _check_app_access(provider: Any, target: str) -> str:
-    """Can this App write the target repo? "" on success, else a short reason.
+@dataclass(frozen=True)
+class AppPermissionGaps:
+    missing: tuple[str, ...]
+    edit_url: str
+    accept_url: str
+    problem: str
+    configured_missing: tuple[str, ...] = ()
+    known: bool = False  # the installation's permissions were read
 
-    An installation token does not populate a repository's `permissions`
-    object, so the PAT check above reads all-false for an App that can push.
-    The App is asked the two questions that decide it: is the target among
-    the repositories its installation covers, and does the installation carry
-    write on contents and pull requests. Never raises."""
+
+def app_permission_gaps(provider: Any, target: str) -> AppPermissionGaps:
+    """Check installation grants and point to both permission pages; never raise."""
     from outerloop.appauth import build_app_jwt
+    from outerloop.appmanifest import DEFAULT_PERMISSIONS
 
-    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    missing = tuple(DEFAULT_PERMISSIONS)
+    known = False
+    names = ", ".join(f"{name}: {DEFAULT_PERMISSIONS[name]}" for name in missing)
     try:
-        # Asked as the App itself: GitHub answers with the installation that
-        # covers this repository, permissions included, or 404. A public
-        # repository would answer a plain read for any token, and the
-        # installation's repository list paginates, so neither is asked.
         jwt = build_app_jwt(provider.app_id, time.time(), provider._sign)
-        req = urllib.request.Request(
-            f"{API}/repos/{target}/installation",
-            headers={**headers, "Authorization": f"Bearer {jwt}"},
-        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Authorization": f"Bearer {jwt}",
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                installation = json.loads(resp.read())
+            installation = provider._transport(
+                urllib.request.Request(
+                    f"{API}/repos/{target}/installation",
+                    headers=headers,
+                )
+            )
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                return f"the App is not installed on {target}; install it there"
+                return AppPermissionGaps(
+                    missing, "", "", f"the App is not installed on {target}; install it there"
+                )
             raise
         if int(installation.get("id", 0)) != int(provider.installation_id):
-            return (
-                f"the App is installed on {target} under installation "
-                f"{installation.get('id')}, but the App file records {provider.installation_id}"
+            return AppPermissionGaps(
+                missing,
+                "",
+                "",
+                (
+                    f"the App is installed on {target} under installation "
+                    f"{installation.get('id')}, but the App file records {provider.installation_id}"
+                ),
             )
         perms = installation.get("permissions") or {}
-        missing = [k for k in ("contents", "issues", "pull_requests") if perms.get(k) != "write"]
-        if missing:
-            return (
-                f"the App lacks write on {', '.join(missing)} "
-                "(it pushes branches, opens PRs, and files and closes issues)"
-            )
-        return ""
+        missing = tuple(
+            name
+            for name, level in DEFAULT_PERMISSIONS.items()
+            if perms.get(name) not in (("read", "write") if level == "read" else ("write",))
+        )
+        known = True
+        if not missing:
+            return AppPermissionGaps((), "", "", "", known=True)
+        names = ", ".join(f"{name}: {DEFAULT_PERMISSIONS[name]}" for name in missing)
+        app = provider._transport(urllib.request.Request(f"{API}/app", headers=headers))
+        configured = app.get("permissions") or {}
+        configured_missing = tuple(
+            name
+            for name, level in DEFAULT_PERMISSIONS.items()
+            if configured.get(name) not in (("read", "write") if level == "read" else ("write",))
+        )
+        owner, account = app["owner"], installation["account"]
+        if owner["type"] not in ("User", "Organization") or account["type"] not in (
+            "User",
+            "Organization",
+        ):
+            raise ValueError("unknown account type")
+        slug = app["slug"]
+        if not slug or not owner["login"] or not account["login"]:
+            raise ValueError("missing App or account name")
+        edit_base = "https://github.com"
+        if owner["type"] == "Organization":
+            edit_base += f"/organizations/{owner['login']}"
+        accept_base = "https://github.com"
+        if account["type"] == "Organization":
+            accept_base += f"/organizations/{account['login']}"
+        edit_url = f"{edit_base}/settings/apps/{slug}/permissions"
+        accept_url = f"{accept_base}/settings/installations/{installation['id']}"
+        return AppPermissionGaps(
+            missing,
+            edit_url,
+            accept_url,
+            (
+                f"The App needs {names}; edit permissions at {edit_url}, "
+                f"then accept them at {accept_url}."
+                if configured_missing
+                else f"The installation needs {names}; the App is already configured at "
+                f"{edit_url}; accept the permissions at {accept_url}."
+            ),
+            configured_missing,
+            known=True,
+        )
     except urllib.error.HTTPError as exc:
-        if exc.code == 429 or exc.code >= 500:
-            return f"could not reach GitHub: it returned {exc.code} while checking the App"
-        return f"GitHub returned {exc.code} while checking the App"
-    except urllib.error.URLError as exc:
-        return f"could not reach GitHub: {exc.reason}"
-    except Exception as exc:  # a check failure is a warning, never fails setup
-        return f"could not check the App: {exc}"
+        prefix = "could not reach GitHub" if exc.code == 429 or exc.code >= 500 else "GitHub"
+        return AppPermissionGaps(
+            missing,
+            "",
+            "",
+            (
+                f"{prefix}: returned {exc.code} while checking the App; check {names} "
+                "in the App settings and accept them on the installation."
+            ),
+            known=known,
+        )
+    except Exception:
+        return AppPermissionGaps(
+            missing,
+            "",
+            "",
+            (
+                f"could not check the App permissions on GitHub; check {names} "
+                "in the App settings and accept them on the installation."
+            ),
+            known=known,
+        )
+
+
+def _app_verdict(provider: Any, target: str) -> tuple[str, bool]:
+    """(problem, fatal): a missing read permission is a warning, since the loop
+    runs without check results; a missing write, or no installation, fails
+    setup. Not being able to ask GitHub right now never does."""
+    from outerloop.appmanifest import DEFAULT_PERMISSIONS
+
+    gaps = app_permission_gaps(provider, target)
+    if gaps.known:  # the installation answered: its write gaps decide, whatever failed after
+        fatal = any(DEFAULT_PERMISSIONS[n] == "write" for n in gaps.missing)
+    else:
+        fatal = _auth_is_fatal(gaps.problem)
+    return gaps.problem, fatal
 
 
 def validate_pat(pat_file: str, target: str) -> str:
@@ -304,6 +482,48 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
     """Merge flags with prompts (when interactive) into answers + a PAT-file
     path. `args.pat_file` names an existing file; otherwise, interactively, a
     pasted token is returned separately to be written 0600."""
+    preserved: dict[str, str] = {}
+    if args.github_app:
+        preserved = env_file_values(_env_path(), keys=None)
+        existing = preserved.copy()
+        explicit_image = args.image
+        # Flags, then shell, then the working deployment. Keep unknown keys too.
+        for attr in (
+            "compute",
+            "target",
+            "root",
+            "account",
+            "partition",
+            "author_backend",
+            "author_model",
+            "claude_model",
+            "image",
+        ):
+            key = f"OUTERLOOP_{attr.upper()}"
+            flag = getattr(args, attr)
+            if attr == "claude_model":
+                flag = (flag or "").strip()
+            shell = os.environ.get(key, "").strip()
+            if flag or shell:
+                preserved.pop(key, None)
+                # Placement remains useful when switching back to Slurm, even
+                # though render_env omits it for a local deployment.
+                if attr in ("root", "account", "partition") and key in existing:
+                    preserved[key] = flag or shell
+            setattr(args, attr, flag or shell or existing.get(key, ""))
+        if args.no_image and not explicit_image:
+            args.image = ""
+            preserved.pop("OUTERLOOP_IMAGE", None)
+        elif existing.get("OUTERLOOP_IMAGE") == "" and not args.image:
+            args.no_image = True
+        backend = args.author_backend or "claude"
+        for key in (author_key_env(backend), author_bin_env(backend)):
+            if os.environ.get(key):
+                preserved[key] = os.environ[key]
+        if args.author_key_file:
+            preserved.pop(author_key_env(backend), None)
+        for key in ("OUTERLOOP_PAT_FILE", "OUTERLOOP_GITHUB_APP_FILE", "OUTERLOOP_BOT_LOGIN"):
+            preserved.pop(key, None)
     compute = args.compute or (_ask("Compute: slurm or local", "slurm") if interactive else "slurm")
     compute = compute.lower()
     target = args.target or (_ask("Target repo (owner/repo)", required=True) if interactive else "")
@@ -322,11 +542,19 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
     # (that one is about auth). When asked, offer the fixed set, not a blank.
     ask_author = interactive and not args.github_app
     backend = args.author_backend or (
-        _ask("Author backend (claude or codex)", "claude") if ask_author else ""
+        _ask("Author backend (claude, codex or hermes)", "claude") if ask_author else ""
     )
     model = args.author_model or (
         _ask("Author model (blank = the backend's default)") if ask_author else ""
     )
+    # The Claude model is required, with no code default: a claude author reads
+    # it, and so do the default panel's judges and the steward. Flag, then the
+    # shell's OUTERLOOP_CLAUDE_MODEL, then a prompt on the full setup.
+    claude_model = (args.claude_model or "").strip() or os.environ.get(
+        "OUTERLOOP_CLAUDE_MODEL", ""
+    ).strip()
+    if not claude_model and ask_author:
+        claude_model = _ask("Claude model (author, panel judges, steward)", required=True)
     # An explicit --image is recorded here (absolute: jobs read it from their
     # own directory); the published one is fetched in main, after every check
     # that could still end the run.
@@ -339,9 +567,12 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
         partition=partition,
         author_backend=backend,
         author_model=model,
+        claude_model=claude_model,
         image=image,
-        author_bin=locate_harness(backend),
+        author_key_file=preserved.get(author_key_env(backend), ""),
+        author_bin=preserved.get(author_bin_env(backend), "") or locate_harness(backend),
         uncontained=bool(args.no_image) and not image,
+        preserved_env=preserved,
     )
     return answers, (args.pat_file or "")
 
@@ -367,6 +598,26 @@ def _owner_type(owner: str) -> str:
         return ""
 
 
+def _app_owner_mismatch_note(conversion: dict[str, Any], expected_owner: str, target: str) -> str:
+    """When the App landed under a different account than intended — GitHub's
+    fallback when someone who is not an org owner tries to create an org-owned
+    App — explain the path that still works, since a personal App does not
+    install on an org repo by default. Empty when the App landed as intended."""
+    actual = str((conversion.get("owner") or {}).get("login", "")).strip()
+    if not actual or actual.casefold() == expected_owner.casefold():
+        return ""
+    org = target.split("/")[0]
+    return (
+        f"  note: the App was created under '{actual}', not '{expected_owner}'. Creating an\n"
+        f"  App owned by an organization needs org-owner rights, so GitHub made a personal\n"
+        f"  one — which will not install on {target} by default. To use it there anyway:\n"
+        f"  make the App public (its Settings > 'Make public'), request its installation on\n"
+        f"  {target}, and have an owner of {org} approve it; then rerun\n"
+        f"  `outerloop init --force --github-app`. For lab ownership, you can later transfer\n"
+        f"  the App to {org} from its Advanced settings — the key keeps working."
+    )
+
+
 def _app_failure(answers: InitAnswers, slug: str, problem: str) -> int:
     """The App cannot write the target: say so, keep the credentials, and point
     at the fix and the re-check. Never `start` — the check just failed."""
@@ -376,7 +627,9 @@ def _app_failure(answers: InitAnswers, slug: str, problem: str) -> int:
         f"  https://github.com/apps/{slug}/installations/new (or the App's page under\n"
         "  Settings > Installations > Configure) install it on that repository and accept\n"
         "  contents, issues and pull-request write access, then run\n"
-        "  `outerloop init --force --github-app` to re-check with these credentials.",
+        "  `outerloop init --force --github-app` to re-check with these credentials.\n"
+        "  If the App is under your personal account and the repository belongs to an\n"
+        "  organization, make the App public first and have an org owner approve the install.",
         file=sys.stderr,
     )
     return 1
@@ -400,15 +653,23 @@ def _github_app_recheck(answers: InitAnswers, app_json: Path) -> int:
             if iid:
                 appmanifest.set_installation_id(app_json, iid)
                 print(f"  installation id {iid} recorded")
-        problem = _check_app_access(app_provider_from_file(app_json), answers.target)
+        problem, fatal = _app_verdict(app_provider_from_file(app_json), answers.target)
     except Exception as exc:
-        problem = f"could not read the App credentials: {exc}"
-    env_path = CONFIG_DIR / ENV_FILE.name
-    write_private(env_path, render_env(answers, app_file=str(app_json), bot_login=f"{slug}[bot]"))
-    if _auth_is_fatal(problem):
+        problem, fatal = f"could not read the App credentials: {exc}", False
+    env_path = _env_path()
+    write_private(
+        env_path,
+        render_env(
+            answers, app_file=str(app_json), bot_login=f"{slug}[bot]", existing_text=_existing_env()
+        ),
+    )
+    if fatal:
         return _app_failure(answers, slug, problem)
     print(f"  auth check: {'ok' if not problem else 'WARNING — ' + problem}")
+    if problem:
+        print("  next: outerloop permissions --open")
     print(f"wrote {env_path}")
+    _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
     print("next: outerloop start")
@@ -423,7 +684,7 @@ def _github_app_setup(
     Interactive by nature (a browser click + install), so no `--yes` variant."""
     from outerloop import appmanifest
 
-    existing = sorted(CONFIG_DIR.glob("github_app.*.json"))
+    existing = sorted(_env_path().parent.glob("github_app.*.json"))
     if len(existing) == 1:
         # a re-run after fixing the installation: re-check the App this machine
         # already has rather than creating a second one
@@ -446,9 +707,12 @@ def _github_app_setup(
     except ValueError as exc:
         print(f"outerloop init: {exc}", file=sys.stderr)
         return 1
-    pem_path, app_json = appmanifest.save_app_creds(conversion, CONFIG_DIR)
+    pem_path, app_json = appmanifest.save_app_creds(conversion, _env_path().parent)
     repo = answers.target.split("/", 1)[-1]
     print(f"  created App '{conversion['slug']}'; credentials in {app_json} and {pem_path} (0600)")
+    mismatch = _app_owner_mismatch_note(conversion, owner, answers.target)
+    if mismatch:
+        print(mismatch, file=sys.stderr)
     print()
     print(f"Step 2 of 3: install the App on {answers.target}.")
     print(f"  Open {appmanifest.install_url(conversion)}")
@@ -475,31 +739,49 @@ def _github_app_setup(
         from outerloop.appauth import app_provider_from_file
 
         try:
-            problem = _check_app_access(app_provider_from_file(app_json), answers.target)
+            problem, fatal = _app_verdict(app_provider_from_file(app_json), answers.target)
         except Exception as exc:  # a check failure is a warning, never fails setup
-            problem = f"could not read the App credentials: {exc}"
-        if _auth_is_fatal(problem):
+            problem, fatal = f"could not read the App credentials: {exc}", False
+        if fatal:
             write_private(
-                CONFIG_DIR / ENV_FILE.name,
-                render_env(answers, app_file=str(app_json), bot_login=f"{conversion['slug']}[bot]"),
+                _env_path(),
+                render_env(
+                    answers,
+                    app_file=str(app_json),
+                    bot_login=f"{conversion['slug']}[bot]",
+                    existing_text=_existing_env(),
+                ),
             )
             return _app_failure(answers, str(conversion["slug"]), problem)
         print(f"  auth check: {'ok' if not problem else 'WARNING — ' + problem}")
+        if problem:
+            print("  next: outerloop permissions --open")
     else:
         # the credentials are kept; nothing can run until the App is installed
         write_private(
-            CONFIG_DIR / ENV_FILE.name,
-            render_env(answers, app_file=str(app_json), bot_login=f"{conversion['slug']}[bot]"),
+            _env_path(),
+            render_env(
+                answers,
+                app_file=str(app_json),
+                bot_login=f"{conversion['slug']}[bot]",
+                existing_text=_existing_env(),
+            ),
         )
         return _app_failure(
             answers, str(conversion["slug"]), f"the App is not installed on {answers.target}"
         )
-    env_path = CONFIG_DIR / ENV_FILE.name
+    env_path = _env_path()
     write_private(
         env_path,
-        render_env(answers, app_file=str(app_json), bot_login=f"{conversion['slug']}[bot]"),
+        render_env(
+            answers,
+            app_file=str(app_json),
+            bot_login=f"{conversion['slug']}[bot]",
+            existing_text=_existing_env(),
+        ),
     )
     print(f"wrote {env_path}")
+    _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
     print("next: outerloop start")
@@ -507,6 +789,11 @@ def _github_app_setup(
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        env_file_values(_env_path(), keys=None)
+    except StartError as exc:
+        print(f"outerloop init: {exc}", file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         prog="outerloop init",
         description="Guided setup: asks for anything not given as a flag, checks the "
@@ -537,7 +824,18 @@ def main(argv: list[str] | None = None) -> int:
         dest="author_backend",
         help=f"climbing author's backend ({' or '.join(AUTHOR_BACKENDS)}; default claude)",
     )
+    parser.add_argument(
+        "--no-install-harness",
+        action="store_true",
+        help="skip installing a missing author CLI or Hermes judge runtime",
+    )
     parser.add_argument("--author-model", dest="author_model", help="climbing author's model")
+    parser.add_argument(
+        "--claude-model",
+        dest="claude_model",
+        help="model for every Claude role (author, panel judges, steward): required, no "
+        "default; OUTERLOOP_CLAUDE_MODEL in the shell also counts",
+    )
     image_flags = parser.add_mutually_exclusive_group()  # one or the other, never both
     image_flags.add_argument(
         "--image",
@@ -564,7 +862,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(sys.argv[2:] if argv is None else argv)
     interactive = not args.yes
 
-    answers, pat_file = _collect(args, interactive)
+    try:
+        answers, pat_file = _collect(args, interactive)
+    except StartError as exc:
+        print(f"outerloop init: {exc}", file=sys.stderr)
+        return 2
+    from outerloop.author_overrides import override_entries, validate_overrides
+
+    try:
+        effective_overrides = {
+            **env_file_values(_env_path(), keys=None),
+            **answers.preserved_env,
+            **os.environ,
+        }
+        selected_authors = [o for _, o in override_entries(effective_overrides)]
+    except (ValueError, StartError) as exc:
+        print(f"outerloop init: {exc}", file=sys.stderr)
+        return 2
+
+    if answers.author_backend == "hermes":
+        from outerloop.harness import hermes_resume_max_chars
+
+        try:
+            hermes_resume_max_chars()
+        except ValueError as exc:
+            print(f"outerloop init: {exc}", file=sys.stderr)
+            return 2
     if not answers.target:
         print("outerloop init: a target repo is required (--target owner/repo)", file=sys.stderr)
         return 2
@@ -578,6 +901,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if not answers.claude_model and not args.github_app:
+        # The focused --github-app run preserves existing deployment settings;
+        # only a full setup insists on configuring every Claude role.
+        print(
+            "outerloop init: --claude-model is required (or OUTERLOOP_CLAUDE_MODEL in the "
+            "shell): every Claude role reads it — the default verify/review panel judges, "
+            "a claude author, the steward — and there is no built-in default",
+            file=sys.stderr,
+        )
+        return 2
     if answers.image and not Path(answers.image).is_file():
         # a typo here would surface as an uncontained loop later
         print(f"outerloop init: --image {answers.image} is not a file", file=sys.stderr)
@@ -585,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Never clobber a working setup silently: a re-run of init on a configured
     # machine must ask (or be told --force). Checked before any App is created.
-    env_path = CONFIG_DIR / ENV_FILE.name
+    env_path = _env_path()
     if env_path.exists() and not args.force:
         if not interactive:
             print(f"outerloop init: {env_path} exists; pass --force to overwrite", file=sys.stderr)
@@ -617,18 +950,127 @@ def main(argv: list[str] | None = None) -> int:
             "(hidden; blank to set later): "
         ).strip()
         if pasted:
-            key_path = write_author_key(answers.author_backend, pasted, config_dir=CONFIG_DIR)
+            key_path = write_author_key(
+                answers.author_backend,
+                pasted,
+                config_dir=_env_path().parent,
+            )
             answers.author_key_file = str(key_path)
             print(f"wrote {key_path} (0600)")
 
-    # The image, only now: every check that could still end the run has passed
-    # and the overwrite question is answered, so a download is never wasted.
+    if cli_install_wanted(answers.author_bin, args):
+        try:
+            answers.author_bin = install_harness(answers.author_backend)
+        except ValueError as exc:
+            print(f"outerloop init: {exc}", file=sys.stderr)
+            return 1
+
+    if not args.github_app:
+        settings = env_file_values(env_path, keys=None)
+        judge_keys = (
+            "OUTERLOOP_PANEL",
+            "OUTERLOOP_AUTHOR_OVERRIDES",
+            "REVIEW_BACKEND",
+            "REVIEW_MODEL",
+            "REVIEW_HERMES_PROVIDER",
+            "REVIEW_HERMES_REPO",
+        )
+        from outerloop.endpoints import endpoint_config_key
+
+        deployment_env = effective_overrides
+        override_keys = {
+            key
+            for selected in selected_authors
+            for key in (
+                f"OUTERLOOP_{selected.backend.upper()}_KEY_FILE",
+                f"OUTERLOOP_{selected.backend.upper()}_BIN",
+            )
+        }
+        if selected_authors:
+            override_keys.update(key for key in deployment_env if endpoint_config_key(key))
+        for key in (*judge_keys, *sorted(override_keys)):
+            if key in os.environ:
+                settings[key] = os.environ[key]
+            if key in settings:
+                answers.preserved_env[key] = settings[key]
+        from outerloop.panel import parse_lenses
+
+        try:
+            panel = settings.get("OUTERLOOP_PANEL", "")
+            lenses = parse_lenses(panel, answers.author_backend) if panel.strip() else ()
+            for backend in sorted({a.backend for a in selected_authors}):
+                if backend in (answers.author_backend or AUTHOR_BACKENDS[0], "hermes"):
+                    continue
+                binary = locate_harness(backend)
+                if cli_install_wanted(binary, args):
+                    binary = install_harness(backend)
+                if binary:
+                    answers.preserved_env[author_bin_env(backend)] = binary
+            needs_hermes = (
+                answers.author_backend == "hermes"
+                or any(a.backend == "hermes" for a in selected_authors)
+                or settings.get("REVIEW_BACKEND", "").lower() == "hermes"
+            ) or any(backend == "hermes" for _, backend, _ in lenses)
+            if needs_hermes:
+                repo = Path(
+                    (answers.author_bin if answers.author_backend == "hermes" else "")
+                    or settings.get("REVIEW_HERMES_REPO")
+                    or Path.home() / "hermes-agent"
+                )
+                repo = repo.expanduser().resolve()
+                if cli_install_wanted(str(repo) if hermes_ready(repo) else "", args):
+                    install_harness("hermes", target=repo)
+                answers.preserved_env["REVIEW_HERMES_REPO"] = str(repo)
+        except ValueError as exc:
+            print(f"outerloop init: {exc}", file=sys.stderr)
+            return 1
+
+    # Provision the image before checking backend prerequisites; the override
+    # syntax and overwrite checks have already passed.
     # An existing image is used, else the published one is fetched on a machine
     # that can run it (asked first when interactive); --no-image opts out.
     if not answers.image and not args.no_image:
         # the container probe is for local mode: on Slurm the image runs on
         # compute nodes, which the login node cannot speak for
         answers.image = ensure_image(interactive=interactive, probe=(answers.compute == "local"))
+
+    try:
+        validate_overrides(
+            {**effective_overrides, **answers.preserved_env},
+            answers.image or effective_overrides.get("OUTERLOOP_IMAGE", ""),
+        )
+    except ValueError as exc:
+        print(f"outerloop init: {exc}", file=sys.stderr)
+        return 2
+
+    if answers.author_backend == "hermes":
+        from outerloop.attempt import author_config_error
+        from outerloop.endpoints import author_model_setting
+
+        effective = dict(os.environ)
+        effective.update(
+            (key, value)
+            for key, value in (line.split("=", 1) for line in render_env(answers, "").splitlines())
+        )
+        image = effective.get("OUTERLOOP_IMAGE", "")
+        if image and not Path(image).expanduser().is_file():
+            print(f"outerloop init: Hermes container image {image} is not a file", file=sys.stderr)
+            return 2
+        try:
+            model = author_model_setting(
+                "hermes", effective.get("OUTERLOOP_AUTHOR_MODEL", ""), effective
+            )
+            error = author_config_error(
+                "hermes",
+                model,
+                effective.get("OUTERLOOP_IMAGE", ""),
+                environ=effective,
+            )
+        except ValueError as exc:
+            error = str(exc)
+        if error:
+            print(f"outerloop init: {error}; configure Hermes and rerun init", file=sys.stderr)
+            return 2
 
     # The App is the recommended credential (scoped, revocable, no plaintext
     # token); the PAT is the fallback. Offer it first when interactive.
@@ -662,7 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
             "Paste a GitHub PAT with write access to the target (hidden; blank to skip): "
         ).strip()
 
-    env_path, pat_path = write_config(answers, token, pat_file, config_dir=CONFIG_DIR)
+    env_path, pat_path = write_config(answers, token, pat_file, config_dir=_env_path().parent)
     print(f"wrote {env_path}")
     if pat_path:
         print(f"wrote {pat_path} (0600)")
@@ -704,16 +1146,25 @@ def main(argv: list[str] | None = None) -> int:
             )
     else:
         print("  no PAT set — add OUTERLOOP_PAT_FILE before the agents can open PRs")
+    _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
     print("next: outerloop start")
     return 0
 
 
+def _claude_model_hint(answers: InitAnswers) -> None:
+    if not answers.claude_model:
+        print(
+            "  OUTERLOOP_CLAUDE_MODEL not recorded — add OUTERLOOP_CLAUDE_MODEL=<model> to "
+            f"{_env_path()} before `outerloop start` (every Claude role reads it)"
+        )
+
+
 def _author_key_hint(answers: InitAnswers) -> None:
     if not answers.author_key_file:
         print(
             "  no author key set — put it in "
-            f"{author_key_path(answers.author_backend, config_dir=CONFIG_DIR)} "
+            f"{author_key_path(answers.author_backend, config_dir=_env_path().parent)} "
             "before the first climb"
         )

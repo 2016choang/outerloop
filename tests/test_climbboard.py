@@ -46,15 +46,23 @@ def _terminal_run(root: Path, run_id: str, *, state="ended", ending="negative-re
     (run_dir(root, run_id) / "report.md").write_text(REPORT)
 
 
+def _eval_dir(run_directory: Path, name: str, stdout: str) -> Path:
+    """One eval directory with its job's stdout, as the measurer leaves it."""
+    ev = run_directory / name
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "stdout").write_text(stdout)
+    return ev
+
+
 def test_collect_rows_reads_terminal_records_and_reports(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     _terminal_run(tmp_path, "speedrun-2", ending="merged")
-    # non-terminal runs stay off the board: an in-review run's outcome is not
+    # non-terminal runs stay off the board: an parked run's outcome is not
     # known yet (its PR may be rejected), and a waiting run is mid-flight
-    _terminal_run(tmp_path, "speedrun-3", state="in-review", ending="")
+    _terminal_run(tmp_path, "speedrun-3", state="parked", ending="")
     save_record(
         tmp_path,
-        RunRecord(run_id="w", target="org/repo", task_title="t", state="waiting"),
+        RunRecord(run_id="w", target="org/repo", task_title="t", state="parked"),
         1.0,
     )
     # the ledger's marker gates the report link: archived -> linked,
@@ -107,10 +115,9 @@ def test_views_render_the_rows_and_respect_direction(tmp_path: Path) -> None:
     assert "best candidate: **0.7** (max)" in render_md("org/repo", two, {"acc": "max"})
     assert "best candidate: **0.3** (min)" in render_md("org/repo", two, {"acc": "min"})
     # the chart data is EMBEDDED (fetch() is blocked on a file:// page) and
-    # carries the direction
+    # carries the direction; the one fetch in the page is the optional live
+    # strip, which fails silently there
     html = render_html("org/repo", boards, {"speedrun": "min"})
-    # the CHART data is embedded (fetch is blocked on a file:// page); the one
-    # fetch in the page is the optional live strip, which fails silently there
     assert '"boards"' in html and "38146" in html
     assert html.count("fetch('") == 1 and "climb/status.json" in html
     # agent-written text cannot break out of the inline script: "<" is
@@ -134,7 +141,18 @@ def test_row_cap_is_loud_not_silent() -> None:
     capped = merge_rows(_json.dumps(many), [])
     assert len(capped) <= MAX_ROWS_PER_BENCHMARK
     md = render_md("org/repo", {"b": capped}, {"b": "min"})
-    assert f"Only the newest {MAX_ROWS_PER_BENCHMARK} attempts" in md
+    assert f"Only the newest {len(capped)} attempts" in md
+    # bounded by bytes too: whole-paragraph hypotheses must never push the
+    # data file past what the contents API returns inline; the newest survive
+    from outerloop.climbboard import MAX_ROWS_BYTES
+
+    heavy = [{**r, "hypothesis": "h" * 1000} for r in many]
+    bounded = merge_rows(_json.dumps(heavy), [])
+    assert len(_json.dumps(bounded, indent=1).encode()) <= MAX_ROWS_BYTES
+    assert 0 < len(bounded) < len(heavy) and bounded[-1]["ended"] == max(r["ended"] for r in heavy)
+    assert f"Only the newest {len(bounded)} attempts" in render_md(
+        "org/repo", {"b": bounded}, {"b": "min"}
+    )
     small = render_md("org/repo", {"b": rows}, {"b": "min"})
     assert "Only the newest" not in small
 
@@ -170,13 +188,14 @@ def test_terminal_transition_keeps_the_spend_for_the_board(tmp_path: Path) -> No
         run_id="r",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         stage={"phase": "candidate", "afterany": "afterany:1", "gpu_hours_used": 36.0},
         wake_attempts=2,
         deadline=9.0,
     )
-    cleared = _clear_stage(record)
+    save_record(tmp_path, record, 1)
+    cleared = _clear_stage(record, tmp_path)
     assert cleared.stage == {"gpu_hours_used": 36.0}
     assert cleared.wake_attempts == 0 and cleared.deadline == 0.0
     save_record(tmp_path, dc_replace(cleared, state="ended", ending="negative-result"), 2.0)
@@ -259,6 +278,36 @@ class _BoardGitHub:
         return True
 
 
+def _blackout(gh: _BoardGitHub, *paths: str) -> set[str]:
+    """Make gh.get_file raise 500 on `paths`; emptying the set ends the outage."""
+    dead = set(paths)
+    real = gh.get_file
+
+    def flaky(repo, path, ref):
+        if path in dead:
+            raise _GitHubError(500)
+        return real(repo, path, ref)
+
+    gh.get_file = flaky  # type: ignore[method-assign]
+    return dead
+
+
+class _NoPublishedCurves:
+    """get_file 404s: no curves on the branch yet."""
+
+    def get_file(self, repo, path, ref):
+        raise _GitHubError(404)
+
+
+def _remembered_benchmark(gh: _BoardGitHub) -> None:
+    """A benchmark published long ago, its local records reaped since: the
+    branch index is the board's only memory of it."""
+    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
+    gh.files["climb/data/old-bench.json"] = json.dumps(
+        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
+    )
+
+
 def test_service_publishes_once_per_change(tmp_path: Path) -> None:
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
@@ -286,10 +335,7 @@ def test_board_remembers_benchmarks_whose_local_records_are_gone(tmp_path: Path)
     long ago (records reaped since) keeps its place in every view when a
     different benchmark publishes."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    gh.files["climb/data/old-bench.json"] = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
+    _remembered_benchmark(gh)
     _terminal_run(tmp_path, "speedrun-1")
     assert service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"}) >= 3
     md = gh.files["CLIMB.md"]
@@ -304,20 +350,8 @@ def test_transient_json_read_failure_never_orphans_an_indexed_benchmark(tmp_path
     index (its history is still on the branch), and the views render it
     again once a later read succeeds."""
     gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"old-bench": "max"})
-    old_rows = json.dumps(
-        [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 0.5, "outcome": "improved"}]
-    )
-    gh.files["climb/data/old-bench.json"] = old_rows
-    real_get = gh.get_file
-    blackout = {"climb/data/old-bench.json"}
-
-    def flaky_get(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    _remembered_benchmark(gh)
+    blackout = _blackout(gh, "climb/data/old-bench.json")
     _terminal_run(tmp_path, "speedrun-1")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert "## old-bench" not in gh.files["CLIMB.md"]  # skipped this pass...
@@ -337,15 +371,7 @@ def test_unreadable_board_json_is_never_overwritten(tmp_path: Path) -> None:
         [{"run_id": "old-1", "ended": "2026-01-01 00:00", "candidate": 9472}]
     )
     _terminal_run(tmp_path, "speedrun-1")
-    real_get = gh.get_file
-    blackout = {"climb/data/speedrun.json"}
-
-    def flaky(repo, path, ref):
-        if path in blackout:
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky  # type: ignore[method-assign]
+    blackout = _blackout(gh, "climb/data/speedrun.json")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert json.loads(gh.files["climb/data/speedrun.json"])[0]["run_id"] == "old-1"  # untouched
     assert json.loads(gh.files["climb/index.json"]) == {"speedrun": "min"}
@@ -436,7 +462,7 @@ def test_status_strip_publishes_on_shape_change_only(tmp_path: Path) -> None:
         run_id="live-1",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         agent_id="agent-02",
         created=100.0,
@@ -447,7 +473,7 @@ def test_status_strip_publishes_on_shape_change_only(tmp_path: Path) -> None:
     assert service_status(tmp_path, gh, "org/repo", 300.0) is True
     body = json.loads(gh.files["climb/status.json"])
     assert body["runs"][0]["agent"] == "agent-02"
-    assert body["runs"][0]["state"] == "waiting" and body["runs"][0]["since"] == 200.0
+    assert body["runs"][0]["state"] == "parked" and body["runs"][0]["since"] == 200.0
     # same shape, later timestamp: no write
     assert service_status(tmp_path, gh, "org/repo", 999.0) is False
     # spend moving with no state/phase change (a same-phase re-park after new
@@ -456,6 +482,21 @@ def test_status_strip_publishes_on_shape_change_only(tmp_path: Path) -> None:
     save_record(tmp_path, moved, 250.0)
     assert service_status(tmp_path, gh, "org/repo", 260.0) is True
     assert json.loads(gh.files["climb/status.json"])["runs"][0]["gpu_hours_used"] == 40.0
+    # the wait word moving (gate done, PR open, now in review) is a shape change too
+    reviewing = dc_replace(
+        moved,
+        pr_url="https://github.com/org/repo/pull/9",
+        stage={**moved.stage, "phase": "author-sleep"},
+    )
+    save_record(tmp_path, reviewing, 270.0)
+    assert service_status(tmp_path, gh, "org/repo", 280.0) is True
+    assert json.loads(gh.files["climb/status.json"])["runs"][0]["waiting"] == "review"
+    assert service_status(tmp_path, gh, "org/repo", 290.0) is False
+    for suffix in ("First detail.", "Different detail."):
+        reviewing = dc_replace(reviewing, stage={"hypothesis": "Same direction. " + suffix})
+        save_record(tmp_path, reviewing, 295.0)
+        assert service_status(tmp_path, gh, "org/repo", 296.0) is True
+        assert json.loads(gh.files["climb/status.json"])["runs"][0]["hypothesis"].endswith(suffix)
     # a state change writes again; a terminal run leaves the strip
     save_record(tmp_path, dc_replace(record, state="ended", ending="negative-result"), 400.0)
     assert service_status(tmp_path, gh, "org/repo", 500.0) is True
@@ -478,6 +519,11 @@ def test_html_carries_the_live_strip() -> None:
     # the page lists the kernel's Slurm jobs when the strip carries them
     assert "Array.isArray(strip.queue)" in html and "'JOBID'" in html
     assert "'run queue'" in html and "createTHead" in html  # a card with a table, not a <pre>
+    # the queue's cells never wrap, so the card scrolls sideways on a phone
+    # instead of overflowing the page, and the name column is narrowed first
+    assert ".run.queue{width:100%;padding-bottom:.55rem;overflow-x:auto;max-width:100%}" in html
+    assert "@media (max-width:640px){.run.queue td.name{max-width:9rem}}" in html
+    assert "<meta name='viewport' content='width=device-width, initial-scale=1'>" in html
 
 
 def test_service_boards_publishes_strip_and_views_before_any_terminal_run(tmp_path: Path) -> None:
@@ -491,7 +537,7 @@ def test_service_boards_publishes_strip_and_views_before_any_terminal_run(tmp_pa
         run_id="live-1",
         target="org/repo",
         task_title="t",
-        state="implementing",
+        state="running",
         benchmark="speedrun",
         agent_id="agent-01",
         created=100.0,
@@ -519,7 +565,7 @@ def test_service_boards_publishes_strip_and_views_before_any_terminal_run(tmp_pa
             run_id="live-2",
             target="org/repo",
             task_title="t",
-            state="waiting",
+            state="parked",
             benchmark="speedrun",
             agent_id="agent-02",
             created=100.0,
@@ -545,7 +591,7 @@ def test_status_outage_is_not_a_missing_file(tmp_path: Path) -> None:
     assert service_status(tmp_path / "no-runs", gh, "org/repo", 1.5) is True
     assert json.loads(gh.files["climb/status.json"])["runs"] == []
     gh.files["climb/status.json"] = json.dumps(["not", "a", "dict"])
-    _live = RunRecord(run_id="r", target="org/repo", task_title="t", state="waiting", benchmark="b")
+    _live = RunRecord(run_id="r", target="org/repo", task_title="t", state="parked", benchmark="b")
     save_record(tmp_path, _live, 1.0)
     assert service_status(tmp_path, gh, "org/repo", 2.0) is True
     assert json.loads(gh.files["climb/status.json"])["runs"][0]["run_id"] == "r"
@@ -564,9 +610,7 @@ def test_curves_come_from_eval_stdout_downsampled(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_POINTS, _curve_from_eval
 
     _terminal_run(tmp_path, "speedrun-1")
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc-def"
-    ev.mkdir()
-    (ev / "stdout").write_text(STDOUT_WITH_CURVE)
+    ev = _eval_dir(run_dir(tmp_path, "speedrun-1"), "eval-candidate-abc-def", STDOUT_WITH_CURVE)
     # eval output is job output: a malformed number must not abort collection
     with open(ev / "stdout", "a") as fh:
         fh.write("step 9999 val loss 1.2.3 (fp32)\n")
@@ -585,12 +629,8 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 
     _terminal_run(tmp_path, "speedrun-3")
     rd = run_dir(tmp_path, "speedrun-3")
-    worse = rd / "eval-launch-wide"
-    worse.mkdir()
-    (worse / "stdout").write_text("step 128 val loss 5.0\nstep 256 val loss 4.8\n")
-    better = rd / "eval-launch-deep"
-    better.mkdir()
-    (better / "stdout").write_text("step 128 val loss 4.9\nstep 256 val loss 3.9\n")
+    _eval_dir(rd, "eval-launch-wide", "step 128 val loss 5.0\nstep 256 val loss 4.8\n")
+    _eval_dir(rd, "eval-launch-deep", "step 128 val loss 4.9\nstep 256 val loss 3.9\n")
     # no candidate eval -> the best (lowest final) launch is used
     assert _curve_from_eval(rd) == [[128, 4.9], [256, 3.9]]
 
@@ -598,15 +638,13 @@ def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
 def test_merge_curves_caps_five_per_agent(tmp_path: Path) -> None:
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)  # no published curves yet
-
     rows = [{"run_id": f"a{i}", "agent": "agent-01"} for i in range(8)] + [
         {"run_id": f"b{i}", "agent": "agent-02"} for i in range(3)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, [])
+    )
     assert merged is not None
     kept = merged["data"]
     a_kept = [k for k in kept if k.startswith("a")]
@@ -621,16 +659,14 @@ def test_curveless_rows_do_not_consume_the_per_agent_quota(tmp_path: Path) -> No
     the fifth CURVE should still be kept even behind curveless newer rows."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     # newest four rows have no curve; the five older rows do
     rows = [{"run_id": f"c{i}", "agent": "agent-01"} for i in range(5)] + [
         {"run_id": f"n{i}", "agent": "agent-01"} for i in range(4)
     ]
     have = {f"c{i}": [[1, 1.0]] for i in range(5)}  # only the c-rows have curves
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: have.get(rid, []))
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: have.get(rid, [])
+    )
     assert merged is not None
     assert set(merged["data"]) == {"c0", "c1", "c2", "c3", "c4"}  # all five curves kept
 
@@ -640,15 +676,11 @@ def test_quiet_agent_curve_survives_a_busy_agent(tmp_path: Path) -> None:
     curve — the per-agent cap is applied across ALL rows, not a global slice."""
     from outerloop.climbboard import _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [{"run_id": "quiet", "agent": "agent-09"}] + [
         {"run_id": f"busy{i}", "agent": "agent-01"} for i in range(300)
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     assert "quiet" in merged["data"]  # not buried by 300 busy rows
 
@@ -658,17 +690,13 @@ def test_every_agent_is_kept_beyond_any_total_ceiling(tmp_path: Path) -> None:
     all kept (the per-agent cap is the only bound)."""
     from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
 
-    class _GH:
-        def get_file(self, repo, path, ref):
-            raise _GitHubError(404)
-
     rows = [
         {"run_id": f"a{a}-r{i}", "agent": f"agent-{a:02d}"}
         for a in range(40)
         for i in range(6)  # six each; the cap keeps five
     ]
     curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_GH(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
     assert merged is not None
     agents_kept = {k.split("-r")[0] for k in merged["data"]}
     assert len(agents_kept) == 40  # every agent represented
@@ -681,9 +709,9 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
     from outerloop.climbboard import _curve_from_eval
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
+    _eval_dir(
+        rd,
+        "eval-candidate-x",
         "step 1 val loss 4.5\n"
         f"step 2 val loss {'9' * 400}\n"
         f"step {'9' * 400} val loss 4.4\n"
@@ -691,34 +719,31 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
         "step 5 val loss 1e999\n"
         "step 3 val loss 4.3\n"
         "step 4 val loss 3.2e0\n"
-        "step 5 val loss 3.1"  # no trailing newline: the point still counts
+        "step 5 val loss 3.1",  # no trailing newline: the point still counts
     )
     assert _curve_from_eval(rd) == [[1, 4.5], [3, 4.3], [4, 3.2], [5, 3.1]]
 
 
-def test_cap_truncation_never_publishes_a_partial_number(tmp_path: Path, monkeypatch) -> None:
+def test_curve_stdout_scan_stops_at_the_byte_cap(tmp_path: Path, monkeypatch) -> None:
+    """A verbose eval must not exhaust the tick: the scan stops at the byte
+    cap, keeping the points before it and never publishing a number the cap
+    cut in half; the cap is bytes, not characters."""
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)  # cuts inside 4.4444
+    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
+    _eval_dir(
+        rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
+    )
+    assert cb._curve_from_eval(rd) == [[1, 4.5]]  # the point beyond the cap is dropped
+    # the cut can land inside a number: the partial tail line is dropped
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\nstep 2 val loss 4.4444\n")
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
-    # the cap is bytes, not characters: 4-byte emoji count 4x
-    (ev / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
+    # one giant line without newlines must not buffer past the cap either
+    _eval_dir(rd, "eval-candidate-x", "step 1 val loss 4.5\n" + "x" * 100_000)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
-
-
-def test_fresh_curve_bounds_a_newline_free_stdout(tmp_path: Path, monkeypatch) -> None:
-    """One giant line without newlines must not buffer past the cap."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\n" + "x" * 100_000)
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 64)
+    # 4-byte emoji count 4x
+    (rd / "eval-candidate-x" / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
@@ -740,21 +765,6 @@ def test_published_curves_cost_no_stdout_scan(tmp_path: Path) -> None:
     assert merged is not None
     assert asked == ["r2"]  # r1 is published: no scan
     assert merged["data"] == {"r1": [[1, 4.0]], "r2": [[2, 3.5]]}
-
-
-def test_fresh_curve_abandons_oversized_stdout(tmp_path: Path, monkeypatch) -> None:
-    """A verbose eval must not exhaust the tick: scanning stops at the
-    byte cap, keeping the points already parsed."""
-    import outerloop.climbboard as cb
-
-    rd = tmp_path / "r"
-    ev = rd / "eval-candidate-x"
-    ev.mkdir(parents=True)
-    ev.joinpath("stdout").write_text(
-        "step 1 val loss 4.5\n" + "noise\n" * 50 + "step 2 val loss 4.1\n"
-    )
-    monkeypatch.setattr(cb, "MAX_CURVE_STDOUT_BYTES", 40)
-    assert cb._curve_from_eval(rd) == [[1, 4.5]]
 
 
 def test_curves_publish_capped_and_never_clobbered(tmp_path: Path) -> None:
@@ -809,9 +819,11 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
     the page rewrite instead of publishing a curveless page."""
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
-    ev = run_dir(tmp_path, "speedrun-1") / "eval-candidate-abc"
-    ev.mkdir(parents=True)
-    (ev / "stdout").write_text("step 1 val loss 4.5\nstep 2 val loss 4.1\n")
+    _eval_dir(
+        run_dir(tmp_path, "speedrun-1"),
+        "eval-candidate-abc",
+        "step 1 val loss 4.5\nstep 2 val loss 4.1\n",
+    )
 
     gh.batch_fail = True
     assert service_climb_board(tmp_path, gh, "org/repo") == 0
@@ -825,14 +837,7 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
 
     # curve-file outage: CLIMB.md may still refresh, index.html sits out
     html_before = gh.files["index.html"]
-    real_get = gh.get_file
-
-    def flaky_get(repo, path, ref):
-        if path.startswith("climb/curves/"):
-            raise _GitHubError(500)
-        return real_get(repo, path, ref)
-
-    gh.get_file = flaky_get  # type: ignore[method-assign]
+    _blackout(gh, "climb/curves/speedrun.json")
     _terminal_run(tmp_path, "speedrun-2")
     service_climb_board(tmp_path, gh, "org/repo")
     assert gh.files["index.html"] == html_before
@@ -847,9 +852,7 @@ def test_curve_survives_a_vanishing_eval_dir(tmp_path: Path, monkeypatch) -> Non
 
     rd = tmp_path / "r"
     for name in ("eval-candidate-a", "eval-candidate-b"):
-        d = rd / name
-        d.mkdir(parents=True)
-        (d / "stdout").write_text("step 1 val loss 3.0\n")
+        _eval_dir(rd, name, "step 1 val loss 3.0\n")
     orig = Path.stat
 
     def vanishing(self, **kw):
@@ -902,7 +905,7 @@ def test_rows_carry_the_gates_verdict_note(tmp_path: Path) -> None:
 
 
 def test_report_link_uses_the_markers_own_path(tmp_path: Path) -> None:
-    """An in-review archive keeps its date after the ENDED transition
+    """An parked archive keeps its date after the ENDED transition
     re-stamps `updated`: the marker's second line wins over a re-derived
     date (which could 404 across a UTC midnight)."""
     _terminal_run(tmp_path, "speedrun-9")
@@ -960,22 +963,38 @@ def test_status_carries_the_working_direction(tmp_path: Path) -> None:
         run_id="live-9",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         agent_id="agent-03",
         created=1.0,
         updated=2.0,
         stage={
             "phase": "author-sleep",
-            "syscall_note": (
-                "Hypothesis: very long warmdowns preserve late LR. Sweeping 6 lengths now."
-            ),
+            "report": ("Hypothesis: very long warmdowns preserve late LR. Sweeping 6 lengths now."),
         },
     )
     save_record(tmp_path, record, 2.0)
     runs = collect_status(tmp_path, "org/repo", 3.0)["runs"]
     assert runs[0]["direction"].startswith("very long warmdowns preserve late LR")
     assert "Sweeping 6 lengths" not in runs[0]["direction"]
+
+
+def test_review_status_keeps_published_hypothesis(tmp_path: Path) -> None:
+    from outerloop.climbboard import collect_status
+
+    hyp = "Longer warmdowns help. " + "Preserve late updates. " * 60
+    record = RunRecord(
+        run_id="review",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        pr_url="https://github.com/org/repo/pull/9",
+        stage={"hypothesis": hyp},
+    )
+    run = collect_status(tmp_path, "org/repo", 3.0, records=[record])["runs"][0]
+    assert run["direction"] == "Longer warmdowns help."
+    assert run["hypothesis"] == hyp[:1000]
+    assert run["pr_url"] == record.pr_url
 
 
 def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:
@@ -989,12 +1008,12 @@ def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:
         run_id="bare-1",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         agent_id="agent-04",
         created=1.0,
         updated=2.0,
-        stage={"phase": "candidate", "syscall_note": "**Bold** claim: details later."},
+        stage={"phase": "candidate", "report": "**Bold** claim: details later."},
     )
     save_record(tmp_path, record, 2.0)
     contract = SimpleNamespace(
@@ -1031,7 +1050,7 @@ def test_status_progress_depth_and_phrases(tmp_path: Path) -> None:
         run_id="live-10",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         agent_id="agent-01",
         created=1.0,
@@ -1044,7 +1063,7 @@ def test_status_progress_depth_and_phrases(tmp_path: Path) -> None:
                 {"name": "warmdown-length", "array": 3, "minutes": 180},
                 {"name": "probe", "minutes": 30},
             ],
-            "syscall_note": "Hypothesis: longer warmdown helps: sweeping 3 lengths plus a probe.",
+            "report": "Hypothesis: longer warmdown helps: sweeping 3 lengths plus a probe.",
         },
     )
     save_record(tmp_path, record, 2.0)
@@ -1059,6 +1078,7 @@ def test_status_progress_depth_and_phrases(tmp_path: Path) -> None:
     )
     (r,) = collect_status(tmp_path, "org/repo", 3.0, contract)["runs"]
     assert (r["exp_done"], r["exp_total"]) == (3, 4)
+    assert r["waiting"] == "jobs"  # the pill says what the park waits on
     assert (r["depth_k"], r["sleep_k"]) == (16, 20)
     assert r["eval_minutes"] == 240
     assert r["exp_minutes"] == 180
@@ -1083,8 +1103,8 @@ def test_md_baseline_chip_is_the_ledger_starting_position() -> None:
     assert "baseline" not in without
 
 
-def test_service_loads_the_starting_baseline_from_the_ledger(tmp_path: Path) -> None:
-    """The chip's value travels get_file_content -> starts -> CLIMB.md; a
+def test_service_loads_the_starting_baseline_from_the_ledger(tmp_path: Path, monkeypatch) -> None:
+    """The chip's value travels pinned get_file -> starts -> CLIMB.md; a
     NaN in the ledger is dropped instead of aborting the publish."""
     _terminal_run(tmp_path, "speedrun-1")
     gh = _BoardGitHub()
@@ -1092,7 +1112,18 @@ def test_service_loads_the_starting_baseline_from_the_ledger(tmp_path: Path) -> 
         {"speedrun": {"baseline": 9472.0}, "broken": {"baseline": float("nan")}},
         allow_nan=True,
     )
+    original_get = gh.get_file
+    pin = gh.head
+
+    def pinned_get(repo, path, ref):
+        if path == "results/leader.json":
+            assert ref == pin
+        return original_get(repo, path, ref)
+
+    monkeypatch.setattr(gh, "get_file", pinned_get)
     assert service_climb_board(tmp_path, gh, "org/repo") >= 1
+    assert "This page is attempt history. Confirmed results:" in gh.files["CLIMB.md"]
+    assert "This page is attempt history. Confirmed results:" in gh.files["index.html"]
     assert "baseline (start): **9472**" in gh.files["CLIMB.md"]
 
 
@@ -1125,7 +1156,7 @@ def test_status_carries_the_kernel_queue_attributed_to_agents(tmp_path: Path) ->
         run_id="speedrun-20260905-063328-agent-01",
         target="org/repo",
         task_title="t",
-        state="waiting",
+        state="parked",
         benchmark="speedrun",
         agent_id="agent-01",
         created=1.0,
@@ -1161,7 +1192,7 @@ def test_status_carries_the_kernel_queue_attributed_to_agents(tmp_path: Path) ->
         job("777", "eval-speedrun-2-cand-ab12", "RUNNING", "0:10", "gpu"),
         job("778", "speedrun-20260905-063328-agent-01-launch-sweep", "PENDING", "0:00", "gpu"),
         job("779", "my-own-notebook", "RUNNING", "5:00", "cpu"),
-        job("780", "autoresearch-resident", "RUNNING", "4:00:00", "cpu"),
+        job("780", "outerloop-resident", "RUNNING", "4:00:00", "cpu"),
         job("781", "eval-my-model-please-ignore", "RUNNING", "0:01", "gpu"),  # the operator's
         job("782", "rocket-launch-sim", "RUNNING", "0:01", "cpu"),  # -launch- alone is nobody's
         job("783", f"wake-{long_id}"[:60], "PENDING", "0:00", "cpu"),  # cut as the kernel cuts
@@ -1174,10 +1205,12 @@ def test_status_carries_the_kernel_queue_attributed_to_agents(tmp_path: Path) ->
             "cpu",
         ),
         job("786", "wake-speedrun-20260905-063328-agent-09", "PENDING", "0:00", "cpu"),  # not ours
+        job("787", "outerloop-tick-0123456789ab", "PENDING", "0:00", "cpu"),  # a second instance
+        job("788", "outerloop-resident-mine", "RUNNING", "0:01", "cpu"),  # not an instance suffix
     ]
     body = collect_status(tmp_path, "org/repo", 3.0, queue=snap)
     q = {j["id"]: j for j in body["queue"]}
-    assert set(q) == {"777", "778", "780", "783", "784", "785"}
+    assert set(q) == {"777", "778", "780", "783", "784", "785", "787"}
     assert q["777"]["agent"] == "agent-01" and q["777"]["run_id"] == record.run_id
     assert q["778"]["agent"] == "agent-01" and q["778"]["run_id"] == record.run_id
     assert q["780"]["agent"] == "" and q["785"]["agent"] == "agent-04"
@@ -1211,3 +1244,222 @@ def test_status_carries_the_kernel_queue_attributed_to_agents(tmp_path: Path) ->
     assert "queue" not in json.loads(gh.files["climb/status.json"])
     assert service_status(tmp_path, gh, "org/repo", 10.0, queue=[]) is True
     assert json.loads(gh.files["climb/status.json"])["queue"] == []
+
+
+def test_status_says_what_a_parked_run_waits_on(tmp_path: Path) -> None:
+    """One derived word beside the state, never a new state: jobs while
+    launches run, gate while a submit is measured, review once a PR is open
+    with nothing pending, wake otherwise (a checkpoint sleep, or a message
+    already in the inbox); running runs carry none."""
+    from outerloop.climbboard import _waiting_on
+
+    parked = RunRecord(
+        run_id="w-1",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        benchmark="b",
+        agent_id="agent-01",
+        created=1.0,
+        updated=2.0,
+    )
+    in_review = dc_replace(parked, pr_url="https://github.com/org/repo/pull/9")
+    assert _waiting_on(parked, 1, 3, False) == "jobs"
+    assert _waiting_on(dc_replace(parked, stage={"phase": "candidate"}), 0, 0, False) == "gate"
+    assert _waiting_on(in_review, 0, 0, False) == "review"
+    assert _waiting_on(in_review, 0, 0, True) == "wake"  # a message waits: the sweep wakes it
+    measured = dc_replace(parked, stage={"phase": "candidate"})
+    assert _waiting_on(measured, 0, 0, True) == "wake"  # the verdict is in: no longer the gate
+    assert _waiting_on(measured, 1, 2, True) == "jobs"  # messages wait behind jobs
+    assert _waiting_on(parked, 0, 0, False) == "wake"
+    assert _waiting_on(dc_replace(parked, state="running"), 1, 3, False) == ""
+
+
+def test_hypothesis_is_the_whole_paragraph_and_a_cut_one_heals() -> None:
+    """The board row carries the whole hypothesis paragraph (the table shows a
+    summary); only past the cap is it cut, at a word, with an ellipsis. A row
+    an earlier board cut at 160 characters takes the fresh, longer text on
+    the next publish; nothing else about a published row changes."""
+    import json
+
+    from outerloop.climbboard import (
+        MAX_HYPOTHESIS_CHARS,
+        ClimbRow,
+        _report_fields,
+        merge_rows,
+    )
+
+    first = "The instantaneous AdamW weights retain late-update noise."
+    second = "An exponential moving average should give a lower loss without changing the updates."
+    report = f"# EMA\n\n## Hypothesis\n\n{first} {second}\n\n## Change\n\nkeeps a copy.\n"
+    _b, _c, hyp = _report_fields(report)
+    from outerloop.hypothesis import report_hypothesis
+
+    assert hyp == report_hypothesis(report) == f"{first} {second}"
+    _b, _c, long = _report_fields("Hypothesis: " + "word " * 400)
+    assert len(long) <= MAX_HYPOTHESIS_CHARS and long.endswith("…") and not long.endswith(" …")
+    _b, _c, token = _report_fields("Hypothesis: " + "x" * 1200)
+    assert len(token) == MAX_HYPOTHESIS_CHARS and token.endswith("…")  # no word to keep whole
+    # the three formats reports use: a bullet list, plain field lines, a heading
+    # followed by a paragraph that wraps; a Change field never rides along
+    assert _report_fields("- **Hypothesis:** A helps.\n- **Change:** B\n")[2] == "A helps."
+    assert _report_fields("Hypothesis: A helps.\nChange: B\nBaseline: 1\n")[2] == "A helps."
+    wrapped = "## Hypothesis\n\nA helps\nbecause C.\n   ## Change\n\nB\n"
+    assert _report_fields(wrapped)[2] == "A helps because C."
+    # prose after a heading may wrap onto a line with a colon; only the field
+    # format ("Hypothesis: ..." starting its line) ends at the next field line
+    prose = "## Hypothesis\n\nA helps.\nThis means: score each candidate.\n\n## Change\n"
+    assert _report_fields(prose)[2] == "A helps. This means: score each candidate."
+    assert (
+        _report_fields("- Hypothesis: A.\nThis means: B.\n- Change: C\n")[2] == "A. This means: B."
+    )
+    assert (
+        _report_fields("Hypothesis:\nA helps.\nChange: B\n")[2] == "A helps."
+    )  # text on the next line
+    assert (
+        _report_fields("**Hypothesis:** A helps.\n**Change:** B\n")[2] == "A helps."
+    )  # bold labels
+    cut = json.dumps(
+        [{"run_id": "r1", "hypothesis": hyp[:160], "candidate": 5312.0, "outcome": "merged"}]
+    )
+    fresh = ClimbRow(
+        run_id="r1",
+        agent="agent-04",
+        ended="2026-09-13T05:30:00Z",
+        outcome="merged",
+        baseline=6528.0,
+        candidate=4.0,
+        gpu_hours=1.0,
+        hypothesis=hyp,
+        note="",
+        pr_url="",
+        report="",
+    )
+    (row,) = merge_rows(cut, [fresh])
+    assert row["hypothesis"] == hyp and row["candidate"] == 5312.0  # text healed, numbers kept
+    other = json.dumps([{"run_id": "r1", "hypothesis": "A different sentence.", "candidate": 1.0}])
+    (row,) = merge_rows(other, [fresh])
+    assert row["hypothesis"] == "A different sentence."  # not a prefix: history stands
+
+
+def test_submit_report_cannot_replace_measured_board_numbers(tmp_path: Path) -> None:
+    from outerloop.orchestrator import AttemptResult, RunConfig
+
+    record = RunRecord(
+        run_id="measured",
+        target="org/repo",
+        task_title="t",
+        state="ended",
+        ending="merged",
+        benchmark="speedrun",
+        stage={"hypothesis": "Keep the measured direction."},
+    )
+    save_record(tmp_path, record, 100.0)
+    result = AttemptResult(
+        outcome="improved",
+        baseline=14.0,
+        candidate=11.0,
+        submit_report="Hypothesis: Author claim.\n\nBaseline: 99\nCandidate: 98",
+    )
+    report = result.report(RunConfig(target=record.target, benchmark=record.benchmark))
+    report_path = run_dir(tmp_path, record.run_id) / "report.md"
+    report_path.write_text(report)
+    row = collect_rows(tmp_path, record.target)[record.benchmark][0]
+    assert (row.baseline, row.candidate) == (14.0, 11.0)
+    assert row.hypothesis == record.stage["hypothesis"]
+    assert "Hypothesis" not in report and "## Submit report" not in report
+    assert report_path.read_text() == report
+
+    report_path.write_text(report + "\nHypothesis: Report direction.\n")
+    row = collect_rows(tmp_path, record.target)[record.benchmark][0]
+    assert row.hypothesis == "Report direction."
+
+
+def test_hypothesis_needs_a_real_label_and_status_falls_back(tmp_path: Path) -> None:
+    """The word inside prose is not a section: a note without a Hypothesis
+    label yields nothing, and the live status then shows the direction the
+    record retained through publish."""
+    from outerloop.climbboard import collect_status
+    from outerloop.hypothesis import report_hypothesis
+
+    assert report_hypothesis("We tested the hypothesis that EMA helps; it did.") == ""
+    assert report_hypothesis("## Hypothesis\n\nEMA helps.\n") == "EMA helps."
+    assert report_hypothesis("- Hypothesis: EMA helps.\n") == "EMA helps."
+    # an empty section never turns the next heading or field into a direction
+    assert report_hypothesis("## Hypothesis\n\n## Change\n\nB\n") == ""
+    assert report_hypothesis("Hypothesis:\nChange: B\n") == ""
+    assert report_hypothesis("## Hypothesis\n\nChange: B\n") == ""  # heading form, then a field
+    record = RunRecord(
+        run_id="live-h",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        benchmark="b",
+        agent_id="agent-02",
+        created=1.0,
+        updated=2.0,
+        pr_url="https://github.com/org/repo/pull/16",
+        stage={
+            "report": "Rerunning the confirm with more seeds.",
+            "hypothesis": "EMA helps.",
+        },
+    )
+    save_record(tmp_path, record, 2.0)
+    (r,) = collect_status(tmp_path, "org/repo", 3.0)["runs"]
+    assert r["hypothesis"] == "EMA helps." and r["direction"]
+
+
+def test_endpoint_wait_is_invisible_to_published_board_and_strip(tmp_path):
+    from outerloop.climbboard import collect_status
+    from outerloop.endpoint_wait import recovered, unavailable
+    from outerloop.endpoints import EndpointUnavailable
+
+    _terminal_run(tmp_path, "finished")
+    live = RunRecord(
+        "live",
+        "org/repo",
+        "Research",
+        "parked",
+        stage={"phase": "candidate", "hypothesis": "Improve the result"},
+    )
+    save_record(tmp_path, live, 10)
+    gh = _BoardGitHub()
+    service_climb_board(tmp_path, gh, "org/repo")
+    assert service_status(tmp_path, gh, "org/repo", 20)
+    published = dict(gh.files)
+    gh.puts.clear()
+    for now in (30, 40):
+        unavailable(tmp_path, "live", EndpointUnavailable("down", "local"), now)
+        assert service_climb_board(tmp_path, gh, "org/repo") == 0
+        assert not service_status(tmp_path, gh, "org/repo", now)
+        assert gh.files == published
+        assert gh.puts == []
+    recovered(tmp_path, "live", "local", 50)
+    assert not service_status(tmp_path, gh, "org/repo", 50)
+    assert service_climb_board(tmp_path, gh, "org/repo") == 0
+    assert gh.files == published
+    assert gh.puts == []
+
+    # Identical records apart from the additive key produce identical wire bytes,
+    # including a pre-existing configuration block and an ended run's board row.
+    for stage in (live.stage, {**live.stage, "hermes_resume_required_chars": 10**9}):
+        plain = dc_replace(live, stage=stage)
+        waiting = dc_replace(
+            plain, stage={**stage, "endpoint_wait": {"endpoint": "local", "since": 1}}
+        )
+        before = collect_status(tmp_path, "org/repo", 60, records=[plain])
+        after = collect_status(tmp_path, "org/repo", 60, records=[waiting])
+        assert json.dumps(before, indent=1) == json.dumps(after, indent=1)
+        assert "endpoint_wait" not in after["runs"][0]
+
+    from outerloop.runstate import load_record
+
+    ended = load_record(tmp_path, "finished")
+    waited = dc_replace(
+        ended, stage={**ended.stage, "endpoint_wait": {"endpoint": "local", "since": 1}}
+    )
+    fresh = _BoardGitHub()
+    with_wait = _BoardGitHub()
+    service_climb_board(tmp_path, fresh, "org/repo", records=[ended])
+    service_climb_board(tmp_path, with_wait, "org/repo", records=[waited])
+    assert fresh.files == with_wait.files

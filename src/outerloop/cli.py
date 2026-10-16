@@ -3,6 +3,7 @@
 With `sbatch` on PATH it submits the resident tick
 (docs/design/resident-tick.md) and returns; without it, or with
 OUTERLOOP_COMPUTE=local, it runs the local loop in the foreground.
+OUTERLOOP_TICK_HOST=login runs the foreground loop against Slurm.
 Settings come from flags, then the process environment, then
 ~/.config/outerloop/.env, read once here at launch. The running chain
 never takes identity or placement from that file (tick_deploy.sh reads an
@@ -12,32 +13,36 @@ allowlist of author knobs per tick), so editing it later cannot move a chain.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
+import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from outerloop import paths
+from outerloop.endpoints import author_model_setting, endpoint_config_key
+from outerloop.harness import HARNESS_INSTALL, default_binary
+from outerloop.instance import job_name
+
+if TYPE_CHECKING:
+    from outerloop.init import AppPermissionGaps
 
 RESIDENT_JOB_NAME = "outerloop-resident"
-# A resident submitted before the rename. Slurm's singleton serializes jobs by
-# NAME, so `start` must refuse while one of these is queued or running (two
-# residents on one root is what the singleton prevents). Dropped in the
-# release after 0.1.
-LEGACY_RESIDENT_JOB_NAME = "autoresearch-resident"
 DEFAULT_RESIDENT_MINUTES = 360  # cpu_short's ceiling on Torch; the loop hands over to itself
 DEFAULT_LOCAL_ROOT = Path.home() / ".outerloop"
-LEGACY_LOCAL_ROOT_NAME = ".autoresearch"  # pre-rename; honored until the release after 0.1
-ENV_FILE = paths.ENV_FILE  # ~/.config/outerloop/.env, or the pre-rename dir (see paths.py)
+ENV_FILE = paths.ENV_FILE
 
 # What start itself decides from: mode, placement, root, cadence, walltime.
 START_KEYS = (
     "OUTERLOOP_COMPUTE",
+    "OUTERLOOP_TICK_HOST",
     "OUTERLOOP_ROOT",
     "OUTERLOOP_ACCOUNT",
     "OUTERLOOP_PARTITION",
@@ -49,22 +54,47 @@ START_KEYS = (
 # local loop has no deploy step, so start exports them once at launch; a test
 # keeps this list identical to tick_deploy.sh's.
 TICK_ENV_KEYS = (
+    "OUTERLOOP_CLAUDE_VERSION",
+    "OUTERLOOP_CODEX_VERSION",
+    "OUTERLOOP_CLAUDE_SHA256",
+    "OUTERLOOP_CODEX_SHA256",
+    "OUTERLOOP_CODEX_CODE_MODE_HOST_SHA256",
+    "OUTERLOOP_HERMES_REF",
+    "OUTERLOOP_HERMES_SHA",
+    "OUTERLOOP_CACHE_ROOT",
+    "REVIEW_BACKEND",
+    "OUTERLOOP_BRIDGE_RUNTIME",
+    "OUTERLOOP_AUTHOR_ENDPOINT",
+    "REVIEW_ENDPOINT",
+    "REVIEW_MODEL",
     "OUTERLOOP_AUTHOR_BACKEND",
     "OUTERLOOP_AUTHOR_MODEL",
+    "OUTERLOOP_AUTHOR_OVERRIDES",
+    "OUTERLOOP_CLAUDE_MODEL",
     "OUTERLOOP_CLAUDE_BIN",
     "OUTERLOOP_CODEX_BIN",
     "OUTERLOOP_CODEX_KEY_FILE",
+    "OUTERLOOP_HERMES_KEY_FILE",
+    "OUTERLOOP_HERMES_RESUME_MAX_CHARS",
     "OUTERLOOP_CLAUDE_KEY_FILE",
-    "OUTERLOOP_HARNESS_KEY_FILE",
+    "OUTERLOOP_STEWARD_KEY_FILE",
     "OUTERLOOP_VERTEX_PROJECT",
     "OUTERLOOP_VERTEX_REGION",
     "OUTERLOOP_VERTEX_ADC",
+    "OUTERLOOP_VERTEX_SMALL_MODEL",
     "OUTERLOOP_TARGET",
     "OUTERLOOP_GITHUB_APP_FILE",
     "OUTERLOOP_BOT_LOGIN",
     "OUTERLOOP_BOT_ALIASES",
     "OUTERLOOP_GPU_PARTITION",
     "OUTERLOOP_GPU_ACCOUNT",
+    "OUTERLOOP_GPU_LANES",
+    "OUTERLOOP_EVAL_CPUS_PER_GPU",
+    "OUTERLOOP_EVAL_MEM_GB_PER_GPU",
+    "OUTERLOOP_TOKEN_PRICES",
+    "OUTERLOOP_CODEX_WEB_SEARCH",
+    "OUTERLOOP_QOS",
+    "OUTERLOOP_APPTAINER_BIN",
     "OUTERLOOP_IMAGE",
     "OUTERLOOP_PANEL",
     "OUTERLOOP_PANEL_KEY_FILE",
@@ -75,16 +105,26 @@ TICK_ENV_KEYS = (
 )
 
 
-class StartError(Exception):
+class StartError(paths.ConfigError):
     """A start that cannot proceed; the message is the whole diagnosis."""
 
 
-def env_file_values(path: Path = ENV_FILE, keys: tuple[str, ...] = START_KEYS) -> dict[str, str]:
+def operator_env_file(default: Path | None = None) -> Path:
+    try:
+        return paths.env_file(ENV_FILE if default is None else default)
+    except paths.ConfigError as exc:
+        raise StartError(str(exc)) from exc
+
+
+def env_file_values(
+    path: Path | None = None, keys: tuple[str, ...] | None = START_KEYS
+) -> dict[str, str]:
     """`keys` from the operator's .env under the deploy step's trust rule: the
     file must be ours and not group/world-writable, or it is refused. Last
     assignment wins; surrounding quotes and a CR are stripped; a key set to
     an empty value is present (an off-switch), an absent key is absent.
-    No file: nothing."""
+    `keys=None` reads all assignments. No file: nothing."""
+    path = operator_env_file() if path is None else path
     try:
         st = path.stat()
     except OSError:
@@ -98,32 +138,30 @@ def env_file_values(path: Path = ENV_FILE, keys: tuple[str, ...] = START_KEYS) -
     except OSError as e:
         raise StartError(f"cannot read {path}: {e}") from None
     out: dict[str, str] = {}
-    canonical: set[str] = set()  # keys set by their OUTERLOOP_ spelling
     for raw in text.splitlines():
         line = raw.rstrip("\r").strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        legacy = key.startswith("AUTORESEARCH_")  # the pre-rename name, one more release
-        if legacy:
-            key = "OUTERLOOP_" + key[len("AUTORESEARCH_") :]
-        if key not in keys:
+        if key == "OUTERLOOP_ENV_FILE":
             continue
-        if legacy and key in canonical:
-            continue  # the OUTERLOOP_ spelling wins whatever the file order
+        if (
+            keys is not None
+            and key not in keys
+            and not ("OUTERLOOP_AUTHOR_ENDPOINT" in keys and endpoint_config_key(key))
+        ):
+            continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         out[key] = value
-        if not legacy:
-            canonical.add(key)
     return out
 
 
 @dataclass(frozen=True)
 class StartPlan:
-    mode: str  # "slurm" | "local"
+    mode: str  # "slurm" (resident) | "local" | "login"
     root: Path
     home: Path = Path(".")
     account: str = ""
@@ -131,6 +169,7 @@ class StartPlan:
     cadence_min: str = ""
     resident_minutes: int = DEFAULT_RESIDENT_MINUTES
     pat_file: str = ""
+    qos: str = ""
 
     def export_env(self) -> dict[str, str]:
         """The knobs the resident job needs. They ride the inherited environment
@@ -144,6 +183,8 @@ class StartPlan:
             "OUTERLOOP_ROOT": str(self.root),
             "OUTERLOOP_RESIDENT_MINUTES": str(self.resident_minutes),  # successors reuse it
         }
+        if self.qos:
+            env["OUTERLOOP_QOS"] = self.qos
         if self.account:
             env["OUTERLOOP_ACCOUNT"] = self.account
         if self.partition:
@@ -155,19 +196,21 @@ class StartPlan:
         return env
 
     def command(self) -> list[str]:
-        if self.mode == "local":
+        if self.mode in ("local", "login"):
             return [sys.executable, "-m", "outerloop.tick", "--root", str(self.root), "--loop"]
         argv = [
             "sbatch",
             "--parsable",
             "--dependency=singleton",  # two starts can both submit; only one ever runs
             f"--time={self.resident_minutes}",
-            f"--job-name={RESIDENT_JOB_NAME}",
+            f"--job-name={job_name()}",
         ]
         if self.account:  # unset bills the caller's default Slurm association
             argv.append(f"--account={self.account}")
         if self.partition:  # unset lets Slurm choose its default partition
             argv.append(f"--partition={self.partition}")
+        if self.qos:
+            argv.append(f"--qos={self.qos}")
         # --export=ALL carries export_env() from the inherited environment; a
         # comma-joined K=V list here would break on any value containing a comma.
         argv += ["--export=ALL", str(self.home / "scripts" / "tick_chain.sbatch")]
@@ -184,13 +227,13 @@ def _setting(key: str, flag: str, environ: dict[str, str], from_file: dict[str, 
 
 
 def _home(environ: dict[str, str], cwd: Path, *, local: bool, root: Path) -> Path:
-    """The directory the loop runs from. On Slurm it must be a source
+    """The directory the loop runs from. A resident needs a source
     checkout (OUTERLOOP_HOME, else the current directory): the chain
     deploys from it and every job runs from a flight snapshot of its HEAD.
-    The local loop has no deploy step and runs the installed package, so it
+    A foreground loop has no deploy step and can run the installed package, so it
     uses a checkout when one is at hand and otherwise a `home` directory
     under the state root, where flights and logs land."""
-    named = environ.get("OUTERLOOP_HOME") or environ.get("AUTORESEARCH_HOME")
+    named = environ.get("OUTERLOOP_HOME")
     home = Path(named).expanduser() if named else cwd
     if (home / "scripts" / "tick_chain.sbatch").is_file():
         return home
@@ -212,9 +255,17 @@ def plan_start(
     from_file: dict[str, str],
     sbatch_on_path: bool,
     cwd: Path,
+    tick_host: str = "",
 ) -> StartPlan:
     compute = _setting("OUTERLOOP_COMPUTE", "local" if local else "", environ, from_file)
     mode = "local" if compute.strip().lower() == "local" or not sbatch_on_path else "slurm"
+    host = _setting("OUTERLOOP_TICK_HOST", tick_host, environ, from_file).strip().lower()
+    if host not in ("", "resident", "login"):
+        raise StartError("OUTERLOOP_TICK_HOST must be resident or login")
+    if host == "login" and compute.strip().lower() != "local":
+        if not sbatch_on_path:
+            raise StartError("login tick host needs sbatch on PATH")
+        mode = "login"
     root_s = _setting("OUTERLOOP_ROOT", root, environ, from_file)
     cadence = _setting("OUTERLOOP_CADENCE_MIN", "", environ, from_file)
     if cadence:
@@ -229,11 +280,11 @@ def plan_start(
                 f"OUTERLOOP_CADENCE_MIN must be a positive number of minutes, got {cadence!r}"
             )
     pat = _setting("OUTERLOOP_PAT_FILE", "", environ, from_file)
-    # Slurm runs from a checkout; the local loop runs the installed package
-    # and needs only a directory (the launch lanes and GitHub servicing
+    # Foreground loops can run the installed package and need only a
+    # directory (the launch lanes and GitHub servicing
     # switch off without OUTERLOOP_HOME, so one is always set)
     local_root = Path(root_s).expanduser() if root_s else default_local_root(environ)
-    home = _home(environ, cwd, local=(mode == "local"), root=local_root)
+    home = _home(environ, cwd, local=(mode in ("local", "login")), root=local_root)
     if mode == "local":
         return StartPlan(
             mode="local",
@@ -242,17 +293,22 @@ def plan_start(
             cadence_min=cadence,
             pat_file=pat,
         )
+    if mode == "login":
+        root_s = str(local_root)
     if not root_s:
         raise StartError(
             "Slurm mode needs the state root on the shared filesystem: "
             "--root, OUTERLOOP_ROOT in the environment, or OUTERLOOP_ROOT= in "
-            "~/.config/outerloop/.env"
+            f"{operator_env_file()}"
         )
     acc = _setting("OUTERLOOP_ACCOUNT", account, environ, from_file)
     part = _setting("OUTERLOOP_PARTITION", partition, environ, from_file)
+    qos = _setting("OUTERLOOP_QOS", "", environ, from_file)
     # Account and partition are both optional: left unset, Slurm bills the
     # caller's default association and places the job on its default partition.
-    minutes_s = _setting("OUTERLOOP_RESIDENT_MINUTES", "", environ, from_file)
+    minutes_s = (
+        _setting("OUTERLOOP_RESIDENT_MINUTES", "", environ, from_file) if mode == "slurm" else ""
+    )
     try:
         minutes = int(minutes_s) if minutes_s else DEFAULT_RESIDENT_MINUTES
     except ValueError:
@@ -268,6 +324,7 @@ def plan_start(
         ("root", root_s),
         ("account", acc),
         ("partition", part),
+        ("QOS", qos),
         ("cadence", cadence),
         ("PAT file", pat),
         ("checkout path", str(home)),
@@ -275,8 +332,9 @@ def plan_start(
         if "\n" in value or "\r" in value:
             raise StartError(f"{name} {value!r} cannot contain a newline")
     return StartPlan(
-        mode="slurm",
-        root=Path(root_s).expanduser(),
+        mode=mode,
+        qos=qos,
+        root=Path(root_s).expanduser().resolve(),
         home=home,
         account=acc,
         partition=part,
@@ -287,20 +345,13 @@ def plan_start(
 
 
 def default_local_root(environ: Mapping[str, str]) -> Path:
-    """The local-mode state root when none is given: ~/.outerloop, or the
-    pre-rename ~/.autoresearch when only that one exists (state is never moved
-    behind the operator's back). The home comes from `environ` so a caller
-    with no HOME gets the plain default."""
-    home_s = environ.get("HOME", "")
-    if not home_s:
-        return DEFAULT_LOCAL_ROOT
-    home = Path(home_s)
-    new, old = home / DEFAULT_LOCAL_ROOT.name, home / LEGACY_LOCAL_ROOT_NAME
-    return old if (not new.exists() and old.is_dir()) else new
+    """The local-mode state root defaults to ~/.outerloop."""
+    home = environ.get("HOME", "")
+    return Path(home) / DEFAULT_LOCAL_ROOT.name if home else DEFAULT_LOCAL_ROOT
 
 
 def _resident_jobs() -> list[str] | None:
-    """Ids of queued or running resident ticks under either name, lowest first;
+    """Ids of queued or running resident ticks by name, lowest first;
     None when the scheduler could not be asked (a failed lookup must never
     read as 'none')."""
     try:
@@ -309,7 +360,7 @@ def _resident_jobs() -> list[str] | None:
                 "squeue",
                 "-u",
                 os.environ.get("USER", ""),
-                f"--name={RESIDENT_JOB_NAME},{LEGACY_RESIDENT_JOB_NAME}",
+                f"--name={job_name()}",
                 "-h",
                 "-o",
                 "%i",
@@ -372,43 +423,254 @@ def _setting_of(key: str, values: Mapping[str, str], environ: Mapping[str, str])
     return (environ[key] if key in environ else values.get(key, "")).strip()
 
 
+def _tick_image(values: Mapping[str, str], environ: Mapping[str, str], mode: str) -> str:
+    """The image the launched tick runs with, resolved the way its launch mode passes
+    settings on: the resident chain's deploy step lets a settings-file line win (even
+    empty, meaning no image); a local or login loop keeps the shell's value and fills
+    only what is missing from the file. Absent everywhere: the default image."""
+    from outerloop.tick import _default_image
+
+    key = "OUTERLOOP_IMAGE"
+    first, second = (values, environ) if mode == "slurm" else (environ, values)
+    for source in (first, second):
+        if key in source:
+            return source[key].strip()
+    return _default_image()
+
+
 def missing_harness_binary(values: Mapping[str, str], environ: Mapping[str, str]) -> str:
-    """Why start must not launch: the CONFIGURED author backend's recorded
-    binary is not there (init records the path; a moved or uninstalled CLI
-    would end every climb with spawn-error). The other backend's path is not
-    consulted: a stale entry for a backend the loop never spawns must not block
-    it. "" when the binary exists or none is recorded."""
+    """Check all configured authors' host CLIs using the harness's lookup."""
+    from outerloop.author_overrides import override_entries
+
+    env = {**values, **environ}
     backend = _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, environ).lower() or "claude"
-    key = f"OUTERLOOP_{backend.upper()}_BIN"
-    if key not in HARNESS_BIN_KEYS:
-        return ""  # an unknown backend is init's error to report, not this check's
-    path = _setting_of(key, values, environ)
-    if path and not Path(path).expanduser().is_file():
-        return f"{key}={path} is not a file; reinstall the CLI or run `outerloop init --force`"
+    backends = dict.fromkeys([backend, *(value.backend for _, value in override_entries(env))])
+    for selected in backends:
+        problem = _missing_author_binary(selected, env)
+        if problem:
+            return problem
     return ""
+
+
+def _missing_author_binary(backend: str, env: Mapping[str, str]) -> str:
+    key = f"OUTERLOOP_{backend.upper()}_BIN"
+    if backend == "hermes":
+        from outerloop.hermes_install import hermes_ready
+
+        repo = env.get("REVIEW_HERMES_REPO", "")
+        return (
+            ""
+            if repo and hermes_ready(Path(repo).expanduser())
+            else "hermes author needs REVIEW_HERMES_REPO with pinned source and runtime"
+        )
+    if key not in HARNESS_BIN_KEYS:
+        return f"unsupported author backend {backend!r}; choose claude, codex or hermes."
+    recorded = env.get(key, "")
+    binary = default_binary(backend, env)
+    if (not recorded and not os.path.isabs(binary)) or not (
+        Path(binary).is_file() and os.access(binary, os.X_OK)
+    ):
+        looked_for = (
+            f"{key}={recorded}" if recorded else f"`{backend}` on PATH or ~/.local/bin/{backend}"
+        )
+        return (
+            f"{backend} author CLI: {looked_for} is not an executable file; "
+            f"install it with `{HARNESS_INSTALL[backend]}`, then run "
+            "`outerloop init --force` to re-record its path"
+        )
+    return ""
+
+
+DEFAULT_PANEL = "verify,review"  # the tick's default when OUTERLOOP_PANEL is absent
+
+
+def _configured(key: str, values: Mapping[str, str], environ: Mapping[str, str]) -> str | None:
+    """`key`'s setting with presence kept: None when neither the process
+    environment nor .env has it (a present empty value is an off-switch)."""
+    if key in environ:
+        return environ[key]
+    return values.get(key)
+
+
+def missing_panel_model(values: dict[str, str], environ: Mapping[str, str]) -> str:
+    """Refuse a panel lens that names no model and does not run on the author's
+    backend: it would run on whatever that backend's CLI defaults to, a model
+    nobody chose. Empty when every lens has a model or inherits the author's."""
+    backend = _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, environ).lower() or "claude"
+    panel = _configured("OUTERLOOP_PANEL", values, environ)
+    panel = DEFAULT_PANEL if panel is None else panel.strip()
+    if not panel:
+        return ""
+    from outerloop.panel import resolve_lenses
+
+    try:
+        env = {**values, **environ}
+        model = author_model_setting(
+            backend, _setting_of("OUTERLOOP_AUTHOR_MODEL", values, environ), env
+        )
+        resolve_lenses(panel, backend, model, environ=env)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def missing_claude_model(values: Mapping[str, str], environ: Mapping[str, str]) -> str:
+    """Why this start would run a Claude role with no model ("" when it won't).
+    OUTERLOOP_CLAUDE_MODEL is a required deployment setting, never a code
+    default: it is needed by a claude author without its own OUTERLOOP_AUTHOR_MODEL,
+    by a panel lens on the claude backend without an explicit model, and by the
+    steward lane (always claude) once its key is provisioned. Reads the settings
+    the way the tick will: the process environment wins over .env."""
+    if _setting_of("OUTERLOOP_CLAUDE_MODEL", values, environ):
+        return ""
+    roles: list[str] = []
+    backend = _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, environ).lower() or "claude"
+    if (
+        backend == "claude"
+        and not _setting_of("OUTERLOOP_AUTHOR_MODEL", values, environ)
+        and not _setting_of("OUTERLOOP_AUTHOR_ENDPOINT", values, environ)
+    ):
+        roles.append("the claude author (no OUTERLOOP_AUTHOR_MODEL)")
+    panel = _configured("OUTERLOOP_PANEL", values, environ)
+    panel = DEFAULT_PANEL if panel is None else panel.strip()
+    if panel:
+        from outerloop.panel import resolve_lenses
+
+        try:
+            lenses = resolve_lenses(
+                panel,
+                backend,
+                _setting_of("OUTERLOOP_AUTHOR_MODEL", values, environ),
+                environ={**values, **environ},
+            )
+        except ValueError:
+            lenses = ()  # missing_panel_model reports invalid panel configuration
+        unnamed = [kind for kind, on, model in lenses if on == "claude" and not model]
+        if unnamed:
+            roles.append(
+                f"the claude panel judge(s) {', '.join(unnamed)} (no model in OUTERLOOP_PANEL)"
+            )
+    if _setting_of("OUTERLOOP_STEWARD_KEY_FILE", values, environ):
+        roles.append("the steward")
+    if not roles:
+        return ""
+    return (
+        "OUTERLOOP_CLAUDE_MODEL is not set, but this deployment runs Claude roles: "
+        f"{'; '.join(roles)}. Add the line OUTERLOOP_CLAUDE_MODEL=<model> to {operator_env_file()} "
+        "(or export it in the shell) and start again"
+    )
+
+
+APP_PERMISSION_KEYS = ("OUTERLOOP_GITHUB_APP_FILE", "OUTERLOOP_TARGET", "OUTERLOOP_PAT_FILE")
+
+
+def _app_gaps_from_env(values: Mapping[str, str]) -> AppPermissionGaps | None:
+    from outerloop.appauth import app_provider_from_file
+    from outerloop.init import AppPermissionGaps, app_permission_gaps
+
+    app_file = values.get("OUTERLOOP_GITHUB_APP_FILE", "").strip()
+    if not app_file:
+        return None
+    try:
+        return app_permission_gaps(
+            app_provider_from_file(Path(app_file).expanduser()),
+            values.get("OUTERLOOP_TARGET", "").strip(),
+        )
+    except Exception:
+        return AppPermissionGaps((), "", "", "could not check the App permissions on GitHub.")
+
+
+def permissions(args: argparse.Namespace) -> int:
+    from outerloop.appmanifest import DEFAULT_PERMISSIONS
+
+    try:
+        values = {**env_file_values(operator_env_file(ENV_FILE), APP_PERMISSION_KEYS), **os.environ}
+        gaps = _app_gaps_from_env(values)
+        if gaps is None:
+            if values.get("OUTERLOOP_PAT_FILE", "").strip():
+                print("A PAT needs no App permissions.")
+                return 0
+            print(
+                "App permissions need OUTERLOOP_GITHUB_APP_FILE; run outerloop init --github-app."
+            )
+            return 1
+        labels = {name: f"{name}: {level}" for name, level in DEFAULT_PERMISSIONS.items()}
+        width = max(map(len, labels.values()))
+        if gaps.known:
+            for name, label in labels.items():
+                print(f"{label:<{width}}  {'missing' if name in gaps.missing else 'ok'}")
+        if gaps.problem and not gaps.edit_url:
+            print(gaps.problem)
+            return 1
+        if not gaps.problem:
+            print(
+                "All required App permissions are granted; restart the loop with outerloop start."
+            )
+            return 0
+        if args.open:
+            url = gaps.edit_url if gaps.configured_missing else gaps.accept_url
+            if gaps.configured_missing:
+                print(f"Edit the App permissions: {url}")
+            else:
+                print(f"Accept the installation permissions: {url}")
+            print("After saving, run outerloop permissions --open again to check the next step.")
+            if not webbrowser.open(url):
+                print("Could not open a browser; follow the URL above.")
+        else:
+            print(gaps.problem)
+            print("Next: outerloop permissions --open")
+        return 1
+    except Exception:
+        print("could not check or open the App permissions; retry outerloop permissions.")
+        return 1
 
 
 def start(args: argparse.Namespace) -> int:
     try:
-        values = env_file_values(ENV_FILE, START_KEYS + TICK_ENV_KEYS)  # one read for everything
-        problem = missing_harness_binary(values, os.environ)
+        values = env_file_values(
+            operator_env_file(ENV_FILE), START_KEYS + TICK_ENV_KEYS
+        )  # one read for everything
+        problem = "" if args.dry_run else missing_harness_binary(values, os.environ)
+        try:
+            author_model_setting(
+                _setting_of("OUTERLOOP_AUTHOR_BACKEND", values, os.environ) or "claude",
+                _setting_of("OUTERLOOP_AUTHOR_MODEL", values, os.environ),
+                {**values, **os.environ},
+            )
+        except ValueError as exc:
+            raise StartError(str(exc)) from exc
+        # the model check holds for --dry-run too: it is configuration, not a host lookup
+        problem = problem or missing_claude_model(values, os.environ)
+        problem = problem or missing_panel_model(values, os.environ)
         if problem:
             raise StartError(problem)
-        from_file = {k: v for k, v in values.items() if k in START_KEYS}
+        from_file = values
         plan = plan_start(
             root=args.root or "",
             account=args.account or "",
             partition=args.partition or "",
             local=args.local,
+            tick_host=getattr(args, "tick_host", ""),
             environ=dict(os.environ),
             from_file=from_file,
             sbatch_on_path=shutil.which("sbatch") is not None,
             cwd=Path.cwd(),
         )
-    except StartError as e:
+        from outerloop.author_overrides import validate_overrides
+
+        try:
+            # validate with the image the tick this start launches will actually run with
+            validate_overrides({**values, **os.environ}, _tick_image(values, os.environ, plan.mode))
+        except ValueError as exc:
+            raise StartError(str(exc)) from exc
+    except (StartError, ValueError, OSError) as e:
         print(f"outerloop start: {e}", file=sys.stderr)
         return 2
-    cmd = plan.command()
+    try:
+        cmd = plan.command()
+    except (ValueError, OSError) as exc:
+        print(f"outerloop start: {exc}", file=sys.stderr)
+        return 2
     if args.dry_run:
         print(shlex.join(cmd))
         return 0
@@ -424,14 +686,52 @@ def start(args: argparse.Namespace) -> int:
     path_env = {"PATH": uv_dir + os.pathsep + os.environ.get("PATH", "")} if uv_dir else {}
     if uv_dir:
         print(f"uv found at {uv}; {uv_dir} is added to the loop's PATH", file=sys.stderr)
-    if plan.mode == "local":
+    gaps = _app_gaps_from_env({**values, **os.environ})
+    if gaps is not None and gaps.problem:
+        print(gaps.problem, file=sys.stderr)
+    # one loop per root: a foreground loop (local or login) holds the root's
+    # tick lease, a resident chain holds the scheduler's singleton; every
+    # start refuses over a held lease, and the two Slurm modes refuse over
+    # each other (the resident submission re-checks the lease below)
+    import socket
+    import time
+
+    from outerloop.runstate import tick_lease_holder
+    from outerloop.tick import _loop_cadence_s
+
+    ttl = 3 * _loop_cadence_s(float(plan.cadence_min or 0))
+    held_by = tick_lease_holder(plan.root, time.time(), ttl, socket.gethostname())
+    if held_by:
+        print(
+            f"outerloop start: a loop already holds this root's tick lease ({held_by}); "
+            "stop it first",
+            file=sys.stderr,
+        )
+        return 2
+    if plan.mode == "login":
+        existing = _resident_jobs()
+        if existing is None or existing:
+            reason = (
+                f"resident job {existing[0]} is queued or running"
+                if existing
+                else "could not ask the scheduler (squeue failed)"
+            )
+            print(f"outerloop start: {reason}", file=sys.stderr)
+            return 2
+    if plan.mode in ("local", "login"):
         # the loop has no deploy step, so the author knobs the chain would
         # export from .env each tick are exported here once; the shell wins
         env = {**os.environ, **path_env}
         for key, value in values.items():
-            if key in TICK_ENV_KEYS:
+            if key in TICK_ENV_KEYS or endpoint_config_key(key):
                 env.setdefault(key, value)
-        env["OUTERLOOP_COMPUTE"] = "local"
+        env["OUTERLOOP_COMPUTE"] = "local" if plan.mode == "local" else "slurm"
+        env.pop("OUTERLOOP_TICK_HOST", None)  # the plan decided; nothing inherited
+        if plan.mode == "login":
+            env.update(plan.export_env())
+            env.pop("OUTERLOOP_RESIDENT", None)
+            env["OUTERLOOP_TICK_HOST"] = "login"
+            os.nice(10)  # Yield CPU to other users of the login node.
         env["OUTERLOOP_ROOT"] = str(plan.root)
         env["OUTERLOOP_HOME"] = str(plan.home)
         plan.home.mkdir(parents=True, exist_ok=True)  # <root>/home when there is no checkout
@@ -440,7 +740,7 @@ def start(args: argparse.Namespace) -> int:
         if plan.pat_file:
             env["OUTERLOOP_PAT_FILE"] = plan.pat_file
         print(
-            f"local loop: state in {plan.root}; Ctrl-C stops it, the records resume it",
+            f"{plan.mode} loop: state in {plan.root}; Ctrl-C stops it, the records resume it",
             file=sys.stderr,
         )
         return _exec(cmd, env)
@@ -449,7 +749,7 @@ def start(args: argparse.Namespace) -> int:
         print(
             "outerloop start: could not ask the scheduler whether a resident tick "
             "exists (squeue failed); nothing submitted. Retry, or check "
-            f"`squeue --name {RESIDENT_JOB_NAME},{LEGACY_RESIDENT_JOB_NAME}`.",
+            f"`squeue --name {job_name()}`.",
             file=sys.stderr,
         )
         return 1
@@ -490,11 +790,23 @@ def start(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    # a foreground loop can take the root's lease between the check above and
+    # the submission; the later party yields, here by withdrawing the job
+    held_by = tick_lease_holder(plan.root, time.time(), ttl, socket.gethostname())
+    if held_by:
+        cancelled = _cancel(job)
+        print(
+            f"a loop took this root's tick lease ({held_by}) while the resident tick was "
+            "submitted; "
+            + (f"withdrew job {job}." if cancelled else f"cancel it by hand: scancel {job}"),
+            file=sys.stderr,
+        )
+        return 0 if cancelled else 1
     print(
         f"resident tick submitted: job {job} on {plan.partition}, "
         f"{plan.resident_minutes} min walltime, hands over to itself. "
         f"Logs: {plan.root}/logs. Pause: touch {plan.root}/PAUSE. "
-        f"Stop: scancel --name {RESIDENT_JOB_NAME}."
+        f"Stop: scancel --name {job_name()}."
     )
     return 0
 
@@ -537,6 +849,9 @@ def upgrade(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return proc.returncode
+    # the permission check runs in a fresh process so it is the NEW code's
+    # (this process is still the pre-upgrade one)
+    check = subprocess.run([sys.executable, "-m", "outerloop", "permissions"], check=False)
     after = _installed_version(sys.executable)
     if before == after:
         print(f"already up to date: outerloop {after}.")
@@ -545,6 +860,94 @@ def upgrade(args: argparse.Namespace) -> int:
             f"upgraded outerloop {before} -> {after}. Restart the loop to pick it up: "
             f"stop the running tick, then `outerloop start`."
         )
+    if check.returncode != 0:
+        print("outerloop permissions --open")
+    return 0
+
+
+def end(args: argparse.Namespace) -> int:
+    import time
+
+    from outerloop.runstate import request_end
+
+    try:
+        values = env_file_values(keys=("OUTERLOOP_ROOT",))
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        created = request_end(root, args.run_id, args.note, time.time())
+    except (ValueError, OSError) as exc:
+        print(f"outerloop end: {exc}", file=sys.stderr)
+        return 2
+    status = "requested" if created else "already requested"
+    print(
+        f"Run {args.run_id}: ending {status}. At the next tick, the run will end as "
+        "operator and its pending jobs will be cancelled; a session in flight will "
+        "finish its leg and its publish will be refused."
+    )
+    return 0
+
+
+def message(args: argparse.Namespace) -> int:
+    """Deliver one operator note to a run's inbox for its next wake."""
+    import fcntl
+    import time
+    import uuid
+
+    from outerloop.brief import MAX_COMMENT_CHARS, cap
+    from outerloop.inbox import Message, append
+    from outerloop.runstate import RECORD_NAME, load_record, run_dir
+
+    try:
+        values = env_file_values(keys=("OUTERLOOP_ROOT",))
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        if not args.run_id or args.run_id in (".", "..") or Path(args.run_id).name != args.run_id:
+            raise ValueError(f"unknown run id: {args.run_id}")
+        directory = run_dir(root, args.run_id)
+        if not (directory / RECORD_NAME).is_file():
+            raise ValueError(f"unknown run id: {args.run_id}")
+        if args.file and args.text:
+            raise ValueError("give the message text directly or with --file, not both")
+        text = args.file.read_text() if args.file else " ".join(args.text)
+        if not text.strip():
+            raise ValueError("no message text")
+        with (directory / ".record-lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            record = load_record(root, args.run_id)
+            if record.ended():
+                raise ValueError(f"run {args.run_id} already ended ({record.ending})")
+            stored = append(
+                directory,
+                Message(
+                    0,
+                    "note",
+                    "kernel",
+                    "",
+                    time.time(),
+                    f"operator:{uuid.uuid4().hex}",
+                    {
+                        "text": f"Message from the operator:\n\n"
+                        f"{cap(text.strip(), MAX_COMMENT_CHARS)}"
+                    },
+                    origin="operator",
+                ),
+            )
+    except (ValueError, OSError) as exc:
+        print(f"outerloop message: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"Run {args.run_id}: message {stored.seq} queued in its inbox. It is delivered at "
+        "the run's next wake — a run sleeping on jobs sees it when they finish; a paused "
+        "loop delivers when it resumes."
+    )
     return 0
 
 
@@ -579,6 +982,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--local", action="store_true", help="run the local loop even where sbatch exists"
     )
+    p.add_argument(
+        "--tick-host",
+        choices=("resident", "login"),
+        default="",
+        help="run the Slurm tick in a resident job (default) or on this login host",
+    )
     p.add_argument("--dry-run", action="store_true", help="print the command and exit")
     sub.add_parser(
         "tick", help="run one tick now; --loop keeps ticking (the local loop)", add_help=False
@@ -599,7 +1008,12 @@ def main(argv: list[str] | None = None) -> int:
         "--pre", action="store_true", help="include pre-releases even once a stable exists"
     )
     up.add_argument("--dry-run", action="store_true", help="print the command and exit")
+    sub.add_parser("harness", help="inspect or upgrade harness installations", add_help=False)
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["harness"]:
+        from outerloop.harness_cli import main as harness_main
+
+        return harness_main(argv[1:])
     if argv[:1] == ["tick"]:
         # the tick entry owns its own parser; hand it the rest untouched
         from outerloop import tick
@@ -611,7 +1025,105 @@ def main(argv: list[str] | None = None) -> int:
         from outerloop import init
 
         return init.main(argv[1:])
-    args = parser.parse_args(argv)
+    p = sub.add_parser("end", help="request an operator ending at the next tick")
+    p.add_argument("run_id")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p.add_argument("--note", default="", help="reason for ending the run")
+    p = sub.add_parser(
+        "message",
+        help="leave a note in a run's inbox, delivered at its next wake",
+        description="Append one message to a run's inbox from the operator. The run sees "
+        "it at its next wake or resumed leg — a run sleeping on jobs sees it when they "
+        "finish; a paused loop delivers when it resumes. No new wake is scheduled.",
+    )
+    p.add_argument("run_id")
+    p.add_argument("text", nargs="*", help="the message text")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p.add_argument("--file", type=Path, help="read the message text from this path")
+    p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p = sub.add_parser("status", help="show local runs and endpoint outages (read-only)")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p.add_argument("--json", action="store_true", help="print structured JSON")
+    p = sub.add_parser("permissions", help="check and update the App's required permissions")
+    p.add_argument("--open", action="store_true", help="open the next permission settings page")
+    p = sub.add_parser("migrate-ledger", help="seed research-log from a pinned main ledger")
+    p.add_argument("--target", required=True, help="owner/repo")
+    p.add_argument("--main-sha", required=True, help="full current default-branch commit SHA")
+    p.add_argument("--force", action="store_true", help="replace an existing branch ledger")
+    p.add_argument("--dry-run", action="store_true", help="print the table without writing")
+    p = sub.add_parser("rebind", help="request the slot's current author for the next leg")
+    p.add_argument("run_id")
+    p.add_argument("--root")
+    p.add_argument("--note", default="")
+    p.add_argument("--cancel", action="store_true", help="remove a pending rebind request")
+    # older 3.12 releases stop the message text at `--root`; the leftover
+    # words are still the message's, and nothing else accepts strays
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        if args.command != "message" or any(word.startswith("-") for word in extra):
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
+        args.text = [*args.text, *extra]
+    if args.command == "rebind":
+        from outerloop.rebind import cancel, request
+
+        values = env_file_values(keys=("OUTERLOOP_ROOT",)) if not args.root else {}
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        try:
+            if args.cancel:
+                cancel(root, args.run_id)
+                print(f"run {args.run_id}: rebind cancelled")
+                return 0
+            created = request(root, args.run_id, args.note)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"run {args.run_id}: rebind {'requested' if created else 'already pending'}")
+        return 0
+    if args.command == "status":
+        from outerloop.status import collect_status, render_text
+
+        values = env_file_values(keys=("OUTERLOOP_ROOT",)) if not args.root else {}
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        status = collect_status(root)
+        print(json.dumps(status, indent=2) if args.json else render_text(status))
+        return 0
+    if args.command == "migrate-ledger":
+        from outerloop.ledger_migrate import migrate
+
+        return migrate(args)
+    if args.command == "limits":
+        from outerloop.compute import compute_from_env
+        from outerloop.operator_limits import CapacityError, report
+
+        values = env_file_values(keys=None)
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        try:
+            print(report(root, compute_from_env()))
+        except CapacityError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "end":
+        return end(args)
+    if args.command == "message":
+        return message(args)
+    if args.command == "permissions":
+        return permissions(args)
     if args.command == "upgrade":
         return upgrade(args)
     return start(args)

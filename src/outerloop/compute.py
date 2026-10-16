@@ -16,17 +16,22 @@ terminate healthy runs.
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import json
 import logging
 import os
 import re
 import shlex
 import signal
 import subprocess
+import sys
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, NotRequired, Protocol, TypedDict
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +72,39 @@ class CommandResult:
 Runner = Callable[[Sequence[str], int], CommandResult]
 
 
+CACHE_ENV_KEYS = (
+    "XDG_CACHE_HOME",
+    "WANDB_DIR",
+    "WANDB_CACHE_DIR",
+    "UV_CACHE_DIR",
+    "APPTAINER_CACHEDIR",
+)
+
+
+def cache_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """Per-user caches follow an explicit cache root, or the deployment state root."""
+    root = environ.get("OUTERLOOP_CACHE_ROOT")
+    if not root and environ.get("OUTERLOOP_ROOT"):
+        root = str(Path(environ["OUTERLOOP_ROOT"]) / "cache")
+    values = {key: environ[key] for key in CACHE_ENV_KEYS if key in environ}
+    if root:
+        base = Path(root).expanduser().absolute()
+        for key, suffix in zip(
+            CACHE_ENV_KEYS, ("xdg", "wandb", "wandb-cache", "uv", "apptainer"), strict=True
+        ):
+            values.setdefault(key, str(base / suffix))
+            Path(values[key]).mkdir(parents=True, exist_ok=True)
+    return values
+
+
 def _subprocess_runner(argv: Sequence[str], timeout_s: int) -> CommandResult:
     completed = subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=timeout_s, check=False
+        list(argv),
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+        env={**os.environ, **cache_environment(os.environ)} if argv[0] == "sbatch" else None,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -106,6 +141,8 @@ class JobSpec:
     array: str = ""
     extra: tuple[str, ...] = ()
 
+    gpu_type: str = ""
+
     def to_argv(self) -> list[str]:
         if bool(self.command) == bool(self.script):
             raise ValueError("exactly one of command/script must be set")
@@ -127,7 +164,12 @@ class JobSpec:
             # and Slurm submit plugins commonly classify a job by its
             # per-node GRES — the per-job form has been rejected on a GPU
             # partition as "CPU job setup is not valid"
-            argv.append(f"--gpus-per-node={self.gpus}")
+            # Typed --gres is also per-node.
+            argv.append(
+                f"--gres=gpu:{self.gpu_type}:{self.gpus}"
+                if self.gpu_type
+                else f"--gpus-per-node={self.gpus}"
+            )
         if self.qos:
             argv.append(f"--qos={self.qos}")
         if self.nice:
@@ -166,12 +208,17 @@ class Compute(Protocol):
     """The verbs every compute backend implements. Callers (the measurer, the
     launcher, the wake dispatcher) depend on this, never on a backend."""
 
+    # Whether jobs are placed on named lanes (accounts/partitions). A backend
+    # without lanes runs every job on the default placement, GPUs included.
+    has_lanes: ClassVar[bool]
+
     def submit(self, spec: JobSpec) -> str: ...
     def status(self, job_id: str) -> str: ...
     def pending_reason(self, job_id: str) -> str: ...
     def job_partition(self, job_id: str) -> str: ...
     def active_job_names(self) -> list[str]: ...
     def queue_snapshot(self) -> list[dict[str, str]]: ...
+    def gpu_jobs(self) -> list[tuple[str, int]]: ...
     def lane_load(self, partition: str) -> dict[str, int]: ...
     def job_id_for_name(self, name: str) -> str: ...
     def cancel(self, job_id: str) -> bool: ...
@@ -213,6 +260,16 @@ def array_indices(spec: str) -> list[int]:
     return list(range(int(lo), int(hi) + 1))
 
 
+def array_throttle(spec: str) -> int | None:
+    """The optional positive concurrency limit after % in an array spec."""
+    _, sep, limit = spec.partition("%")
+    if not sep:
+        return None
+    if not limit.strip().isdigit() or int(limit) < 1:
+        raise ValueError(f"invalid array throttle: {spec!r}")
+    return int(limit)
+
+
 def combine_states(states: Sequence[str]) -> str:
     """One state for a job array from its tasks' states: running while any
     task runs, pending while any task waits, terminal only when every task
@@ -235,6 +292,8 @@ def combine_states(states: Sequence[str]) -> str:
 @dataclass
 class SlurmCompute:
     """The three verbs, plus afterany for wake jobs."""
+
+    has_lanes: ClassVar[bool] = True
 
     runner: Runner = field(default=_subprocess_runner)
     command_timeout_s: int = 60
@@ -326,6 +385,19 @@ class SlurmCompute:
             raise SlurmQueryError(f"squeue failed ({result.returncode}): {result.stderr.strip()}")
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
+    def gpu_jobs(self) -> list[tuple[str, int]]:
+        """One snapshot includes array throttles even for individually requeued tasks."""
+        try:
+            result = self.runner(["squeue", "--me", "--json"], self.command_timeout_s)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SlurmQueryError(f"squeue did not run: {exc}") from exc
+        if result.returncode:
+            raise SlurmQueryError(f"squeue failed ({result.returncode}): {result.stderr.strip()}")
+        try:
+            return parse_gpu_jobs(result.stdout)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise SlurmQueryError(f"invalid squeue GPU snapshot: {exc}") from exc
+
     def queue_snapshot(self) -> list[dict[str, str]]:
         """This user's PENDING and RUNNING jobs as rows of QUEUE_FIELDS — what
         a queue view needs, nothing a caller acts on. Raises SlurmQueryError
@@ -409,9 +481,38 @@ def _local_state_dir() -> Path | None:
     """Where local job states persist across processes (the tick and the
     attempts it spawns each hold their own LocalCompute): under the state
     root when the deployment names one, else nowhere (memory-only — tests).
-    Local jobs are synchronous, so only TERMINAL states ever need sharing."""
+    Terminal states and GPU holders are shared here."""
     root = os.environ.get("OUTERLOOP_ROOT", "").strip()
     return Path(root) / "local_jobs" if root else None
+
+
+class _GPUHolder(TypedDict):
+    id: str
+    pgid: int
+    name: str
+    start_time: str
+    submitter: NotRequired[int]
+    reserved_at: NotRequired[float]
+    announce: NotRequired[str]
+
+
+class _GPUWaiter(TypedDict):
+    id: str
+    pid: int
+    heartbeat: float
+
+
+class _GPUPool(TypedDict):
+    holders: dict[str, _GPUHolder]
+    queue: list[_GPUWaiter]
+
+
+@dataclass
+class _LocalTasks:
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    running: dict[str, subprocess.Popen[str]] = field(default_factory=dict)
+    on_done: Callable[[], None] = lambda: None
 
 
 @dataclass
@@ -424,23 +525,304 @@ class LocalCompute:
     the identical job scripts the cluster runs (fresh checkout of the sealed
     sha, results to the job dir); only WHERE they run differs."""
 
+    has_lanes: ClassVar[bool] = False
+
     _states: dict[str, str] = field(default_factory=dict)
-    _seq: int = 0
+    _seq: ClassVar[int] = 0
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+    _gpu_pool: ClassVar[_GPUPool] = {"holders": {}, "queue": []}
+    _zero_gpu_warning_pid: ClassVar[int | None] = None
     minute_s: int = 60  # a walltime minute; tests shrink it to exercise the kill
 
+    @staticmethod
+    def _gpu_count() -> int:
+        override = os.environ.get("OUTERLOOP_LOCAL_GPUS")
+        if override is not None:
+            try:
+                count = int(override)
+                if count >= 0:
+                    return count
+            except ValueError:
+                pass
+            raise SlurmError("OUTERLOOP_LOCAL_GPUS must be a non-negative integer")
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return 0
+        lines = result.stdout.splitlines()
+        if result.returncode or not all(line.strip().isdigit() for line in lines):
+            return 0
+        return len(lines)
+
+    @contextlib.contextmanager
+    def _pool(self) -> Iterator[_GPUPool]:
+        state_dir = _local_state_dir()
+        if state_dir is None:
+            with self._lock:
+                yield self._gpu_pool
+            return
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with (state_dir / "gpus.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            path = state_dir / "gpus.json"
+            pool: _GPUPool = (
+                json.loads(path.read_text()) if path.exists() else {"holders": {}, "queue": []}
+            )
+            try:
+                yield pool
+                tmp = state_dir / "gpus.tmp"
+                tmp.write_text(json.dumps(pool))
+                os.replace(tmp, path)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    @staticmethod
+    def _start_time(pid: int) -> str:
+        try:
+            if sys.platform == "linux":
+                # The parenthesized command can itself contain spaces and parentheses.
+                stat = Path(f"/proc/{pid}/stat").read_text()
+                return stat.rsplit(")", 1)[1].split()[19]
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired, IndexError):
+            return ""
+
+    @staticmethod
+    def _live(holder: _GPUHolder) -> bool:
+        if holder["pgid"] == 0:
+            try:
+                pgid = int(Path(holder["announce"]).read_text().strip())
+                if pgid > 0:
+                    try:
+                        os.killpg(pgid, 0)
+                        return True
+                    except PermissionError:
+                        return True
+            except (KeyError, OSError, ValueError):
+                pass
+            try:
+                os.kill(holder["submitter"], 0)
+                return True
+            except PermissionError:
+                return True
+            except ProcessLookupError:
+                return time.time() - holder["reserved_at"] <= 60
+        try:
+            os.killpg(holder["pgid"], 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        recorded = holder.get("start_time", "")
+        current = LocalCompute._start_time(holder["pgid"]) if recorded else ""
+        # Unknown start times on exotic platforms can retain reused pgids; delete the pool to reset.
+        return not (recorded and current and recorded != current)
+
+    @staticmethod
+    def _waiter_live(waiter: _GPUWaiter) -> bool:
+        if time.time() - waiter.get("heartbeat", 0) > 30:
+            return False
+        try:
+            os.kill(waiter["pid"], 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+
+    def _allocate(
+        self,
+        spec: JobSpec,
+        job_id: str,
+        count: int,
+        start: Callable[[list[str], str | None], subprocess.Popen[str]],
+        tasks: _LocalTasks,
+    ) -> subprocess.Popen[str] | None:
+        state_dir = _local_state_dir()
+        announce = str((state_dir / f"{job_id}.announce").resolve()) if state_dir else None
+        waiting = False
+        while not tasks.cancelled.is_set():
+            allocated: list[str] = []
+            with self._pool() as pool:
+                if tasks.cancelled.is_set():
+                    return None
+                holders = pool["holders"]
+                for index, holder in list(holders.items()):
+                    if not self._live(holder):
+                        self._remove_announce(holder)
+                        del holders[index]
+                pool["queue"] = [w for w in pool["queue"] if self._waiter_live(w)]
+                queue = pool["queue"]
+                ticket = next((w for w in queue if w["id"] == job_id), None)
+                if ticket is None:
+                    ticket = {"id": job_id, "pid": os.getpid(), "heartbeat": time.time()}
+                    queue.append(ticket)
+                ticket["heartbeat"] = time.time()
+                free = [str(i) for i in range(count) if str(i) not in holders]
+                if queue[0]["id"] == job_id and len(free) >= spec.gpus:
+                    allocated = free[: spec.gpus]
+                    for index in allocated:
+                        reservation: _GPUHolder = {
+                            "id": job_id,
+                            "pgid": 0,
+                            "name": spec.job_name,
+                            "start_time": "",
+                            "submitter": os.getpid(),
+                            "reserved_at": time.time(),
+                        }
+                        if announce:
+                            reservation["announce"] = announce
+                        holders[index] = reservation
+                    queue.pop(0)
+            if allocated:
+                # The reservation is durable before any child can use the GPUs.
+                with tasks.lock:
+                    if tasks.cancelled.is_set():
+                        self._release(job_id, unstarted=True)
+                        return None
+                    try:
+                        proc = start(allocated, announce)
+                    except SlurmError:
+                        self._release(job_id, unstarted=True)
+                        raise
+                    tasks.running[job_id] = proc
+                    start_time = self._start_time(proc.pid)
+                    with self._pool() as pool:
+                        for index in allocated:
+                            holder = pool["holders"][index]
+                            holder["pgid"] = proc.pid
+                            holder["start_time"] = start_time
+                            holder.pop("submitter", None)
+                            holder.pop("reserved_at", None)
+                log.info("local job %s got GPUs %s", job_id, ",".join(allocated))
+                return proc
+            if not waiting:
+                log.info("local job %s waiting for GPUs", job_id)
+                waiting = True
+            tasks.cancelled.wait(2)
+        return None
+
+    @staticmethod
+    def _remove_announce(holder: _GPUHolder) -> None:
+        if announce := holder.get("announce"):
+            Path(announce).unlink(missing_ok=True)
+
+    def _release(self, job_id: str, *, unstarted: bool = False) -> None:
+        if not unstarted:
+            with self._pool() as pool:
+                pgids = {
+                    holder["pgid"]
+                    for holder in pool["holders"].values()
+                    if holder["id"] == job_id and holder["pgid"] > 0
+                }
+            # Let killed descendants be reaped without holding the pool lock.
+            deadline = time.monotonic() + 2
+            while pgids:
+                for pgid in list(pgids):
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        pgids.remove(pgid)
+                    except PermissionError:
+                        pass
+                remaining = deadline - time.monotonic()
+                if not pgids or remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+        with self._pool() as pool:
+            for index, holder in list(pool["holders"].items()):
+                if holder["id"] == job_id and (
+                    (unstarted and holder["pgid"] == 0) or not self._live(holder)
+                ):
+                    self._remove_announce(holder)
+                    del pool["holders"][index]
+            pool["queue"] = [w for w in pool["queue"] if w["id"] != job_id]
+
+    def gpu_jobs(self) -> list[tuple[str, int]]:
+        state_dir = _local_state_dir()
+        if state_dir is None:
+            return []
+        jobs = []
+        for path in state_dir.glob("*.active-gpu"):
+            try:
+                row = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue  # completed during the snapshot
+            try:
+                os.kill(row["pid"], 0)
+            except ProcessLookupError:
+                continue
+            jobs.append((row["name"], row["gpus"]))
+        return jobs
+
     def submit(self, spec: JobSpec) -> str:
+        state_dir = _local_state_dir()
+        marker = None
+        remaining = len(array_indices(spec.array)) if spec.array else 1
+
+        def update() -> None:
+            with self._lock:
+                if marker is not None:
+                    demand = spec.gpus * min(remaining, array_throttle(spec.array) or remaining)
+                    tmp = marker.with_suffix(".tmp")
+                    tmp.write_text(
+                        json.dumps({"pid": os.getpid(), "name": spec.job_name, "gpus": demand})
+                    )
+                    os.replace(tmp, marker)
+
+        def completed() -> None:
+            nonlocal remaining
+            remaining -= 1
+            update()
+
+        if spec.gpus and state_dir is not None:
+            from uuid import uuid4
+
+            state_dir.mkdir(parents=True, exist_ok=True)
+            marker = state_dir / f"{os.getpid()}-{uuid4().hex}.active-gpu"
+            update()
+        try:
+            return self._submit(spec, completed)
+        finally:
+            with self._lock:
+                if marker is not None:
+                    marker.unlink(missing_ok=True)
+                    marker = None  # cancelled worker callbacks must not recreate it
+
+    def _submit(self, spec: JobSpec, completed: Callable[[], None]) -> str:
         if bool(spec.command) == bool(spec.script):
             # same contract SlurmCompute enforces via to_argv
             raise ValueError("exactly one of command/script must be set")
         argv = ["sh", spec.script, *spec.script_args] if spec.script else ["sh", "-c", spec.command]
-        self._seq += 1
-        # unique across processes: the tick and its attempts each count from 1.
-        # A million-wide slot per (pid mod 10k); exhausting it fails LOUD —
-        # a silent wraparound would let one process read another's terminal
-        # state under a reused id.
-        if self._seq >= 1_000_000:
-            raise SlurmError("local job id space exhausted for this process")
-        job_id = str(_LOCAL_JOB_BASE + (os.getpid() % 10_000) * 1_000_000 + self._seq)
+        count = self._gpu_count() if spec.gpus > 0 else 0
+        if count and spec.gpus > count:
+            raise SlurmError(
+                f"local job {spec.job_name} requests {spec.gpus} GPUs; only {count} available"
+            )
+        with self._lock:
+            if spec.gpus > 0 and count == 0 and self._zero_gpu_warning_pid != os.getpid():
+                log.warning(
+                    "No local GPUs detected; GPU jobs run without CUDA_VISIBLE_DEVICES. "
+                    "Set OUTERLOOP_LOCAL_GPUS to the GPU count to enable the pool."
+                )
+                LocalCompute._zero_gpu_warning_pid = os.getpid()
+            LocalCompute._seq += 1
+            if self._seq >= 1_000_000:
+                raise SlurmError("local job id space exhausted for this process")
+            job_id = str(_LOCAL_JOB_BASE + os.getpid() * 1_000_000 + self._seq)
 
         # An explicit env allowlist:
         # the submitting process holds live keys (and any inherited
@@ -459,24 +841,67 @@ class LocalCompute:
         job_env = {
             k: v
             for k, v in os.environ.items()
-            if k in ("PATH", "HOME", "LANG", "TMPDIR", "SLURM_TMPDIR", "USER", "LOGNAME")
+            if k
+            in (
+                "PATH",
+                "HOME",
+                "LANG",
+                "TMPDIR",
+                "SLURM_TMPDIR",
+                "USER",
+                "LOGNAME",
+                "REVIEW_ENDPOINT",
+                "REVIEW_MODEL",
+                "REVIEW_BACKEND",
+            )
             or (k.startswith(("OUTERLOOP_", "REVIEW_HERMES_")) and not _secret_name(k))
         }
+        job_env.update(cache_environment(os.environ))
         indices = array_indices(spec.array)
         if indices:
-            # a job array runs its tasks in turn — there is no queue here to
-            # throttle; each task keeps its own state and output under
-            # `<id>_<k>`, and the array's own state is theirs combined
-            states = [
-                self._run_and_record(
-                    spec, argv, {**job_env, "SLURM_ARRAY_TASK_ID": str(i)}, f"{job_id}_{i}"
-                )
-                for i in indices
-            ]
+            workers = min(len(indices), count // spec.gpus if count else (os.cpu_count() or 1))
+            throttle = array_throttle(spec.array)
+            if throttle is not None:
+                workers = min(workers, throttle)
+            tasks = _LocalTasks(on_done=completed)
+            executor = ThreadPoolExecutor(max_workers=workers)
+            try:
+                futures = [
+                    executor.submit(
+                        self._run_and_record,
+                        spec,
+                        argv,
+                        {**job_env, "SLURM_ARRAY_TASK_ID": str(i)},
+                        f"{job_id}_{i}",
+                        count,
+                        tasks,
+                    )
+                    for i in indices
+                ]
+                states = [future.result() for future in as_completed(futures)]
+            except BaseException:
+                with tasks.lock:
+                    tasks.cancelled.set()
+                    running = list(tasks.running.items())
+                    for _, proc in running:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(proc.pid, signal.SIGKILL)
+                executor.shutdown(wait=False, cancel_futures=True)
+                for _, proc in running:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2)
+                for i in indices:
+                    task_id = f"{job_id}_{i}"
+                    if count:
+                        self._release(task_id)
+                self._record(spec, job_id, "CANCELLED", "")
+                raise
+            else:
+                executor.shutdown(wait=True)
             state = combine_states(states)
             self._record(spec, job_id, state, "")
         else:
-            state = self._run_and_record(spec, argv, job_env, job_id)
+            state = self._run_and_record(spec, argv, job_env, job_id, count)
         state_dir = _local_state_dir()
         where = (
             f"; output in {state_dir / (job_id + '.out')}"
@@ -487,23 +912,61 @@ class LocalCompute:
         return job_id
 
     def _run_and_record(
-        self, spec: JobSpec, argv: list[str], job_env: dict[str, str], job_id: str
+        self,
+        spec: JobSpec,
+        argv: list[str],
+        job_env: dict[str, str],
+        job_id: str,
+        count: int = 0,
+        tasks: _LocalTasks | None = None,
     ) -> str:
-        try:
-            # the job runs in its OWN session (= process group), so the
-            # walltime kill takes the whole tree — a job script waiting on
-            # children must not leave them running past the walltime, exactly
-            # as Slurm kills the job's group
-            proc = subprocess.Popen(
-                argv,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-                env=job_env,
+        tasks = tasks or _LocalTasks()
+
+        def start(allocated: list[str], announce: str | None = None) -> subprocess.Popen[str]:
+            env = {**job_env, "CUDA_VISIBLE_DEVICES": ",".join(allocated)} if allocated else job_env
+            wrapped = (
+                ["sh", "-c", 'echo "$$" > "$1" && shift && exec "$@"', "sh", announce, *argv]
+                if announce
+                else argv
             )
-        except OSError as exc:
-            raise SlurmError(f"local job {spec.job_name} failed to start: {exc}") from exc
+            try:
+                return subprocess.Popen(
+                    wrapped,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                    env=env,
+                )
+            except OSError as exc:
+                raise SlurmError(f"local job {spec.job_name} failed to start: {exc}") from exc
+
+        try:
+            if count:
+                proc = self._allocate(spec, job_id, count, start, tasks)
+            else:
+                with tasks.lock:
+                    proc = None if tasks.cancelled.is_set() else start([])
+                    if proc is not None:
+                        tasks.running[job_id] = proc
+            if proc is None:
+                self._record(spec, job_id, "CANCELLED", "")
+                return "CANCELLED"
+            return self._run_process(spec, proc, job_id, tasks)
+        finally:
+            if count:
+                self._release(job_id)
+            with tasks.lock:
+                tasks.running.pop(job_id, None)
+                tasks.on_done()
+
+    def _run_process(
+        self,
+        spec: JobSpec,
+        proc: subprocess.Popen[str],
+        job_id: str,
+        tasks: _LocalTasks,
+    ) -> str:
         try:
             output, _ = proc.communicate(timeout=spec.time_minutes * self.minute_s)
             state = "COMPLETED" if proc.returncode == 0 else "FAILED"
@@ -525,6 +988,13 @@ class LocalCompute:
                     "local job %s: an escaped child survived the walltime kill", spec.job_name
                 )
             state = "TIMEOUT"
+        finally:
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        if tasks.cancelled.is_set():
+            state = "CANCELLED"
         self._record(spec, job_id, state, output)
         return state
 
@@ -548,6 +1018,11 @@ class LocalCompute:
                 # is far younger than a day
                 cutoff = time.time() - 24 * 3600
                 for old in state_dir.iterdir():
+                    if old.name in {"gpus.json", "gpus.lock", "gpus.tmp"} or old.suffix in {
+                        ".announce",
+                        ".active-gpu",
+                    }:
+                        continue
                     try:
                         if old.stat().st_mtime < cutoff:
                             old.unlink()
@@ -585,10 +1060,27 @@ class LocalCompute:
         return ""  # no scheduler, no partitions
 
     def active_job_names(self) -> list[str]:
-        return []  # synchronous: nothing is ever pending or running
+        return list(dict.fromkeys(row["name"] for row in self.queue_snapshot()))
 
     def queue_snapshot(self) -> list[dict[str, str]]:
-        return []
+        state_dir = _local_state_dir()
+        if state_dir is not None and not (state_dir / "gpus.json").exists():
+            return []
+        rows: dict[str, dict[str, str]] = {}
+        indices: dict[str, list[str]] = {}
+        with self._pool() as pool:
+            for index, holder in pool["holders"].items():
+                if not self._live(holder):
+                    continue
+                job_id = holder["id"]
+                if job_id not in rows:
+                    rows[job_id] = dict.fromkeys(QUEUE_FIELDS, "")
+                    rows[job_id].update(id=job_id, name=holder["name"], state="RUNNING")
+                    indices[job_id] = []
+                indices[job_id].append(index)
+        for job_id, row in rows.items():
+            row["gres"] = "gpu:" + ",".join(sorted(indices[job_id], key=int))
+        return list(rows.values())
 
     def lane_load(self, partition: str) -> dict[str, int]:
         return {}  # no lanes in the monolith
@@ -652,3 +1144,77 @@ def gpus_in_gres(gres: str) -> int:
 def quote_command(parts: Sequence[str]) -> str:
     """Shell-quote a command for JobSpec.command (--wrap takes a string)."""
     return " ".join(shlex.quote(p) for p in parts)
+
+
+def _slurm_number(value: object) -> int:
+    """Normalize legacy integers and Slurm's nullable numeric wrappers."""
+    if isinstance(value, dict):
+        value = value["number"] if value.get("set") and not value.get("infinite") else 0
+    return int(value) if isinstance(value, (int, str)) else 0
+
+
+def _tres_gpus(tres: str) -> int | None:
+    """GPU total, or None when absent; an untyped total includes typed entries."""
+    total = None
+    typed = None
+    for part in tres.split(","):
+        match = re.fullmatch(r"gres/gpu(?::([^:=,]+))?[:=](\d+)", part.strip())
+        if match:
+            count = int(match[2])
+            if match[1] is None:
+                total = (total or 0) + count
+            else:
+                typed = (typed or 0) + count
+    return total if total is not None else typed
+
+
+def parse_gpu_jobs(output: str) -> list[tuple[str, int]]:
+    """Count running tasks plus pending tasks up to each array's throttle.
+
+    Slurm JSON retains the throttle for individually instantiated/requeued tasks
+    and does not truncate array ranges. Per-node GPU requests scale by node count;
+    per-job requests and requested TRES already describe the whole job.
+    """
+    groups: dict[int, tuple[str, int, int, int, int]] = {}
+    snapshot = json.loads(output)
+    if snapshot.get("errors"):
+        raise SlurmQueryError(f"squeue errors: {snapshot['errors']}")
+    for job in snapshot["jobs"]:
+        state = job["job_state"]
+        states = [state] if isinstance(state, str) else state
+        # CONFIGURING and COMPLETING still reserve resources.
+        holding = any(s in {"RUNNING", "CONFIGURING", "COMPLETING"} for s in states)
+        if any(is_terminal(s) for s in states) or not (holding or "PENDING" in states):
+            continue
+        pending = not holding
+        gpus = _tres_gpus(job.get("tres_per_node") or "")
+        if gpus is not None:
+            gpus *= _slurm_number(job.get("node_count", 1)) or 1
+        else:
+            gpus = _tres_gpus(job.get("tres_per_job") or "")
+        if gpus is None:
+            gpus = _tres_gpus(job.get("tres_req_str") or "") or 0
+        if not gpus:
+            continue
+        parent = _slurm_number(job.get("array_job_id")) or _slurm_number(job["job_id"])
+        throttle = _slurm_number(job.get("array_max_tasks"))
+        if throttle >= 0xFFFFFFFE:
+            throttle = 0
+        count = 0
+        tasks = (job.get("array_task_string") or "0") if pending else "0"
+        for part in tasks.split("%", 1)[0].split(","):
+            span, _, stride = part.partition(":")
+            first, sep, last = span.partition("-")
+            count += (int(last) - int(first)) // int(stride or "1") + 1 if sep else 1
+        name, running, queued, old_throttle, old_gpus = groups.get(
+            parent, (job["name"], 0, 0, throttle, gpus)
+        )
+        if old_gpus != gpus or name != job["name"]:
+            raise SlurmQueryError("inconsistent GPU array rows")
+        running += 0 if pending else count
+        queued += count if pending else 0
+        groups[parent] = (name, running, queued, throttle or old_throttle, gpus)
+    return [
+        (name, gpus * (running + (min(queued, max(0, throttle - running)) if throttle else queued)))
+        for name, running, queued, throttle, gpus in groups.values()
+    ]

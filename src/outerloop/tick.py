@@ -22,18 +22,18 @@ import re
 import socket
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+from outerloop.author_overrides import AuthorOverride
 from outerloop.compute import (
     GONE,
     Compute,
     JobSpec,
     LocalCompute,
-    SlurmError,
     SlurmQueryError,
     compute_from_env,
     is_pending,
@@ -42,21 +42,30 @@ from outerloop.compute import (
     quote_command,
 )
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
-from outerloop.harness import DEFAULT_MAX_TURNS, redact
+from outerloop.endpoint_wait import EndpointWaitReason
+from outerloop.gpu_lanes import GpuLane, gpu_lanes_from_env
+from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
 from outerloop.housekeeping import shed_ended_workspaces
-from outerloop.limits import EffectiveLimits, effective_limits
+from outerloop.job_names import run_job_name
+from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
+from outerloop.limits import EffectiveLimits, bound_limits, capped_limits, effective_limits
 from outerloop.markers import has_marker, marker
+from outerloop.operator_limits import (
+    attempt_width,
+    read_limits,
+    submit,
+)
 from outerloop.runstate import (
     ABORTED,
     ENDED,
-    IMPLEMENTING,
-    IN_REVIEW,
     MAX_WAKE_ATTEMPTS,
+    PARKED,
+    RUNNING,
     STUCK,
-    WAITING,
     Lease,
     RunRecord,
     acquire_lease,
+    acquire_tick_lease,
     lease_is_stale,
     list_runs,
     load_record,
@@ -64,6 +73,7 @@ from outerloop.runstate import (
     read_lease,
     reap_lease,
     release_lease,
+    release_tick_lease,
     run_dir,
     save_record,
     update_lease_holder,
@@ -72,11 +82,13 @@ from outerloop.runstate import (
 log = logging.getLogger(__name__)
 
 PAUSE_SENTINEL = "PAUSE"
-# Operator on-switch for dispatched-wake, mirroring PAUSE: a root-relative
-# sentinel an operator arms/disarms with a touch/rm — no chain restart, no
-# env-var surgery on a live tick. The OUTERLOOP_DISPATCH_WAKE env var still
-# works too (either arms it); the sentinel is the reversible, restart-free path.
-DISPATCH_WAKE_SENTINEL = "DISPATCH_WAKE"
+HOLD_LAUNCHES_SENTINEL = "HOLD_LAUNCHES"
+# Operator off-switch for dispatched wakes, mirroring PAUSE: touch
+# <root>/DISARM_WAKE (or set OUTERLOOP_DISPATCH_WAKE=0) and the waiting-run
+# sweep goes dry at the next tick; rm it and wakes resume, no chain restart.
+# On by default: an unarmed loop strands every parked run, silently.
+DISARM_WAKE_SENTINEL = "DISARM_WAKE"
+_WAKE_OFF = frozenset({"0", "off", "false", "no"})
 HEARTBEAT_NAME = "heartbeat.json"
 # Written at a full tick's END (not its start) — the coalesce guard's signal, so
 # a tick that crashes mid-work cannot suppress the next (recovery) tick.
@@ -139,7 +151,7 @@ class WakeDispatcher(Protocol):
     lease (released by that job on completion; reaped by TTL if it dies).
 
     Contract for real dispatchers: a wake that RESULTS IN PROGRESS
-    must either move the run out of `waiting` or reset `wake_attempts` —
+    must either move the run out of `parked` or reset `wake_attempts` —
     the counter means "wakes since the run last made progress", and layer 5
     ends the run as stuck when it reaches MAX_WAKE_ATTEMPTS."""
 
@@ -155,14 +167,13 @@ class TickReport:
     deferred: tuple[str, ...] = ()  # runs skipped on "Slurm unknown"
     reaped_leases: tuple[str, ...] = ()
     stuck: tuple[str, ...] = ()
-    implementing_ended: tuple[str, ...] = ()  # killed climbs the sweep closed out
+    running_ended: tuple[str, ...] = ()  # killed climbs the sweep closed out
     review_ended: tuple[tuple[str, str], ...] = ()  # (run_id, ending)
-    followups_submitted: tuple[tuple[str, str], ...] = ()  # (run_id, job_id)
     intake: tuple[str, str] = ("", "")  # (issue tag, job_id) when one was claimed
     self_initiated: tuple[str, str] = ("", "")  # (benchmark, job_id) when one launched
     steward: tuple[str, str] = ("", "")  # (issue tag, job_id) when a stewardship launched
     disk: tuple[str, ...] = ()  # preflight warnings (home entries are warn-only)
-    launch_blocked: bool = False  # True when the preflight turned launch lanes off
+    launch_blocked: bool = False  # disk preflight or operator hold turned launch lanes off
     shed: tuple[str, ...] = ()  # ended runs whose workspaces housekeeping removed
 
 
@@ -171,7 +182,7 @@ class TickReport:
 # The DEFAULT matches cpu_short (6 h); an operator moving work jobs to a
 # longer partition (OUTERLOOP_JOB_PARTITION=cpu48) raises the cap with
 # OUTERLOOP_MAX_JOB_MINUTES. Code-side ceiling: the cap must stay under
-# STRANDED_IMPLEMENTING_S or the picker declares live runs stranded — jobs
+# STRANDED_RUNNING_S or the picker declares live runs stranded — jobs
 # longer than 10 h need that window made spec-aware first (named gap). The
 # self-deadline arms at the CLAMPED value, so a job that wanted more time
 # fails safe mid-panel instead of never starting.
@@ -180,7 +191,7 @@ MAX_JOB_MINUTES_CEILING = 10 * 60
 
 
 def _bot_login_default() -> str:
-    """FollowupSpec's login default, resolved at construction (the tick reads
+    """ServiceSpec's login default, resolved at construction (the tick reads
     the chain's env, jobs inherit it); github is imported here on purpose —
     the tick module stays importable without it."""
     from outerloop.github import bot_login_from_env
@@ -189,8 +200,8 @@ def _bot_login_default() -> str:
 
 
 @dataclass(frozen=True)
-class FollowupSpec:
-    """How the tick launches follow-up jobs for in-review runs."""
+class ServiceSpec:
+    """How the tick launches follow-up jobs for parked runs."""
 
     account: str
     partition: str
@@ -200,11 +211,12 @@ class FollowupSpec:
     bot_login: str = field(default_factory=_bot_login_default)
     time_minutes: int = 90  # min()'d with the contract's followup_job_minutes
     max_turns: int = DEFAULT_MAX_TURNS  # session turn budget for follow-up jobs
-    pat_file: str = ""  # forwarded to the job; "" = the followup CLI default
+    pat_file: str = ""  # forwarded to the job; "" = the attempt CLI default
     # GitHub App config path; jobs inherit OUTERLOOP_GITHUB_APP_FILE from
     # the tick environment, so it is never threaded through argv
     github_app_file: str = ""
     target: str = ""  # the repo the intake pass scans for requested-lane issues
+    has_lanes: bool = True  # the compute backend's: False = every job on the default placement
     # the STEWARD'S OWN key (role separation): the steward lane stays off
     # until the operator provisions it
     steward_key_file: str = ""
@@ -225,7 +237,7 @@ class FollowupSpec:
     # run is worse than a loud refusal). gpu_account "" = same as `account`.
     gpu_partition: str = ""
     gpu_account: str = ""
-    # Where submitted WORK jobs (climb/steward/followup) run; empty = same as
+    # Where submitted WORK jobs (climb/steward/wake) run; empty = same as
     # `partition`. The tick chain itself always stays on `partition` — ticks
     # are minutes, work jobs can be hours, and Slurm prices walltime into
     # scheduling priority, so the two deserve independent placement.
@@ -233,6 +245,9 @@ class FollowupSpec:
     # Partition MaxTime for work jobs — the panel-augmented walltime clamps
     # here (see MAX_ATTEMPT_JOB_MINUTES). Raise together with job_partition.
     max_job_minutes: int = MAX_ATTEMPT_JOB_MINUTES
+    qos: str = ""
+    # Preflight only; wake jobs inherit the environment and resolve their own target.
+    gpu_lanes: dict[str, GpuLane] = field(default_factory=dict)
 
 
 # Generous vs the ~2 h job walltimes plus queue wait, tight enough that
@@ -281,19 +296,19 @@ def flight_checkout(home: Path, name: str, now: float) -> Path:
 
 
 def _benchmark_gpus(contract: Any, benchmark: str) -> int:
-    bench = next((b for b in getattr(contract, "benchmarks", []) if b.name == benchmark), None)
+    bench = contract.benchmark(benchmark)
     return int(getattr(bench, "gpus", 0) or 0)
 
 
-def _gpu_lane_error(contract: Any, benchmark: str, spec: FollowupSpec) -> str:
+def _gpu_lane_error(contract: Any, benchmark: str, spec: ServiceSpec) -> str:
     """Why an attempt on `benchmark` cannot launch here, or "": a contract
     with GPU benchmarks needs this deployment to name a GPU lane — otherwise
     evals would queue into jobs that can never run (the climb would then
     park forever on a phantom eval). ANY GPU benchmark in the contract
     counts, not just the climbed one: the suite gate measures siblings.
-    Local compute has no lanes — jobs run on whatever GPUs the machine
-    has — so the check is waived there."""
-    if spec.gpu_partition or local_mode():
+    A backend without lanes (local compute) runs GPU jobs on the default
+    placement, so the check does not apply."""
+    if spec.gpu_partition or spec.target in spec.gpu_lanes or not spec.has_lanes:
         return ""
     gpu_benches = [
         b.name for b in getattr(contract, "benchmarks", []) if int(getattr(b, "gpus", 0) or 0)
@@ -494,8 +509,7 @@ def _client_secrets(github: Any) -> tuple[str, ...]:
 
 
 def _contract_text(github: Any, target: str, ref: str) -> str | None:
-    """The target's contract at `ref` — `.outerloop.yaml`, else the legacy
-    `.autoresearch.yaml` — or None when it has neither."""
+    """The target's contract at `ref` — `.outerloop.yaml`, or None when absent."""
     from outerloop.contract import find_contract
 
     found = find_contract(lambda name: github.get_file_content(target, name, ref))
@@ -524,7 +538,7 @@ def _find_alarm_issue(github: Any, target: str, bot_login: str) -> int:
     )
 
 
-def shape_followup_spec(spec: FollowupSpec, limits: EffectiveLimits, contract: Any) -> FollowupSpec:
+def shape_service_spec(spec: ServiceSpec, limits: EffectiveLimits, contract: Any) -> ServiceSpec:
     """Clamp the operator's follow-up spec by the contract's effective
     limits. Both knobs clamp only when the contract EXPLICITLY sets them:
     a contract shapes spend downward, but an operator's deliberate config
@@ -564,298 +578,215 @@ def _base_dial(
         return "manual"
 
 
-def service_in_review(
-    root: Path,
-    github: Any,  # GitHubClient (Any keeps tick importable without github deps)
-    compute: Compute,
-    spec: FollowupSpec,
-    now: float,
-    dry_run: bool = False,
-    allow_submit: bool = True,
-    contract: Any = None,
-    records: list[RunRecord] | None = None,
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """PR-state transitions + follow-up job submission for in-review runs.
+def _observe_auto_pr(
+    root: Path, record: RunRecord, github: Any, pr: dict, now: float, bot_login: str
+) -> None:
+    from outerloop.github import is_own_login
+    from outerloop.inbox import Message, append, thread_for
 
-    allow_submit=False (disk preflight failed) keeps the cheap state
-    transitions — ending merged/closed runs still matters — but submits no
-    new session jobs.
+    if _base_dial(github, record.target, pr, None) != "auto":
+        return
+    number = int(record.pr_url.rstrip("/").split("/")[-1])
+    if is_own_login(
+        str(((pr.get("auto_merge") or {}).get("enabled_by") or {}).get("login") or ""),
+        bot_login,
+    ):
+        disarmed = github.disable_auto_merge(record.target, number)
+        log.info("auto-merge withdrawal on %s#%s: %s", record.target, number, disarmed)
+    if record.state != PARKED:
+        return
+    head = str((pr.get("head") or {}).get("sha") or "")
+    if record.auto_blessed_head and head and head != record.auto_blessed_head:
+        append(
+            run_dir(root, record.run_id),
+            Message(
+                0,
+                "head-moved",
+                "git",
+                thread_for(record),
+                now,
+                f"head:{head}",
+                {
+                    "head": head,
+                    "text": f"The PR head moved to {head}; it is not the head "
+                    "the kernel measured, so it will not merge itself. Fold it in and submit "
+                    "again, or a human merges it.",
+                },
+            ),
+        )
 
-    The tick only READS GitHub here (cheap, every cycle); the session-running
-    work happens in a submitted job, which takes the run lease itself — a
-    duplicate submission no-ops on the lease, and `followup_job_id` keeps the
-    tick from queueing duplicates in the first place.
-    """
-    from outerloop.followup import (
-        _pr_number,
-        close_if_done,
-        conflict_wake_action,
-        has_new_comments,
-        panel_wake_pending,
+
+def _rebless_candidate(root: Path, record: RunRecord, github: Any, tip: str) -> RunRecord:
+    """Recover only an ancestry refusal; all other merge guards still apply."""
+    from outerloop.attempt import _contains_tip
+    from outerloop.github import Workspace
+    from outerloop.ledger_branch import read_ledger
+
+    if record.auto_blessed_head:
+        return record
+    measured = record.auto_bless_base
+    if record.auto_bless_reason_kind:
+        if record.auto_bless_reason_kind != "base_moved":
+            return record
+    else:
+        sha = r"[0-9a-fA-F]{7,40}"
+        match = re.fullmatch(
+            rf"base moved: \S+ (?:{sha} != measured |tip {sha} moved past measured base )({sha})",
+            record.auto_bless_reason,
+        )
+        if not match:
+            return record
+        measured = match[1]
+    if not measured:
+        return record
+    head = record.auto_publish_head
+    if not head:
+        number = int(record.pr_url.rstrip("/").split("/")[-1])
+        _, _, pendings = read_ledger(github, record.target)
+        heads = {
+            p.published_head
+            for p in pendings.values()
+            if p.run_id == record.run_id and p.pr_number == number
+        }
+        if len(heads) != 1:
+            return record
+        head = heads.pop()
+    ws = Workspace(root=run_dir(root, record.run_id) / "ws")
+    if not head or not _contains_tip(ws, tip, measured, github, record.target):
+        return record
+    if not _contains_tip(ws, tip, head, github, record.target):
+        return record
+    return replace(
+        record,
+        auto_blessed_head=head,
+        auto_bless_reason="",
+        auto_bless_reason_kind="",
+        auto_bless_base=measured,
+        auto_publish_head=head,
     )
 
-    if records is None:
-        records = list_runs(root)
-    ended: list[tuple[str, str]] = []
-    submitted: list[tuple[str, str]] = []
-    for record in records:
-        if record.state != IN_REVIEW or not record.pr_url:
-            continue
+
+def _merge_blessed_pr(
+    root: Path,
+    record: RunRecord,
+    github: Any,
+    pr: dict,
+    holder: str,
+    now: float,
+    bot_login: str = "",
+) -> bool:
+    from outerloop.github import GitHubError
+    from outerloop.inbox import wake_pending
+
+    number = int(record.pr_url.rstrip("/").split("/")[-1])
+
+    def why_not(record: RunRecord, pr: dict, dial: str, tip: str, contains_base: bool) -> str:
+        """Return the first reason this PR cannot be merged now, or "" when it can."""
+        head = str((pr.get("head") or {}).get("sha", ""))
+        checks = (
+            (record.state != PARKED, "the run is not parked"),
+            (record.agent_id.startswith("steward"), "a steward's PR is a human's to merge"),
+            (
+                not record.auto_blessed_head,
+                "no head was blessed at publish"
+                + (f": {record.auto_bless_reason}" if record.auto_bless_reason else ""),
+            ),
+            (bool(_poll_targets(record)), "the run sleeps on jobs"),
+            (wake_pending(run_dir(root, record.run_id), record), "a message waits for the author"),
+            (pr.get("state") != "open" or bool(pr.get("merged")), "the PR is not open"),
+            (bool(pr.get("draft")), "the PR is a draft"),
+            (head != record.auto_blessed_head, f"the head {head[:8]} is not the blessed one"),
+            (
+                not contains_base,
+                f"the head {head[:8]} does not contain the base tip {tip[:8]}",
+            ),
+            (pr.get("mergeable_state") != "clean", f"GitHub says {pr.get('mergeable_state')}"),
+            (dial != "auto", "the base contract is not auto"),
+        )
+        return next((reason for failed, reason in checks if failed), "")
+
+    if not acquire_lease(root, record.run_id, holder, "", now):
+        return False
+    try:
+        # re-read both under the lease: a wake may have moved the record, and
+        # the base may have moved since the sweep read the PR (the merge API
+        # guards only the head)
+        record = load_record(root, record.run_id)
+        pr = github.get_pull_request(record.target, number)
+        dial = _base_dial(github, record.target, pr, None)
+        base_ref = str((pr.get("base") or {}).get("ref") or "")
+        if not base_ref:
+            log.warning("cannot merge PR without a base branch ref")
+            return False
         try:
-            ending = close_if_done(root, load_record(root, record.run_id), github, now)
-            if ending:
-                ended.append((record.run_id, ending))
-                continue
-            # Steward records are serviced with the STEWARD'S key and the
-            # steward scope check (respond_once derives the mode from the
-            # record's agent id); without a provisioned steward key the
-            # lane stays human-answered.
-            is_steward = record.agent_id.startswith("steward")
-            if is_steward and not spec.steward_key_file:
-                continue
-            # per-ROLE outage latch: state transitions above still ran,
-            # only this record's session spawn sits the cooldown out
-            paused = outage_active(root, now, role="steward" if is_steward else "solver")
-            if paused:
-                log.info("follow-up for %s paused (api outage: %s)", record.run_id, paused)
-                continue
+            tip = github.branch_sha(record.target, base_ref)
+        except GitHubError as exc:
+            log.warning("cannot read PR base branch tip (GitHub status %s)", exc.status)
+            return False
+        if not tip:
+            log.warning("cannot merge PR without a base branch tip")
+            return False
+        saved = record
+        record = _rebless_candidate(root, record, github, tip)
+        try:
+            contains_base = bool(record.auto_blessed_head) and github.head_contains(
+                record.target, tip, record.auto_blessed_head
+            )
+        except GitHubError as exc:
+            log.warning("cannot compare PR head with base tip (GitHub status %s)", exc.status)
+            return False
+        reason = why_not(record, pr, dial, tip, contains_base)
+        if reason:
+            from outerloop.github import is_own_login
+            from outerloop.markers import has_marker, marker
+
+            reason = redact(reason, _client_secrets(github))
+            log.info("merge of %s#%s waits: %s", record.target, number, reason)
+            if dial != "auto":
+                # a manual-merge PR is a human's to merge; nothing to explain
+                return False
             try:
-                pr = github.get_pull_request(record.target, _pr_number(record.pr_url))
-            except Exception:
-                continue  # unreadable PR: nothing to decide this tick
-            # Idempotent auto-arm: once GitHub reports the PR CLEAN (green
-            # checks AND up-to-date with the CURRENT base — GitHub's own
-            # freshness proof), the kernel-read contract STILL says auto, and
-            # A dispatched re-measure in flight: nothing else is serviced (the
-            # sealed change lands first, so the next comment is answered on
-            # the tree it will actually see) and nothing is armed. Once every
-            # eval job is terminal, a follow-up is submitted to finish it.
-            measure_ready = False
-            if record.followup_stage:
-                raw_ids = record.followup_stage.get("job_ids")
-                job_ids = [str(j) for j in raw_ids] if isinstance(raw_ids, list) else []
-                if job_ids:
-                    try:
-                        states = [compute.status(j) for j in job_ids]
-                    except SlurmQueryError:
-                        continue  # unknown: neither service nor arm
-                    if not all(is_terminal(s) or s == GONE for s in states):
-                        continue
-                    measure_ready = True
-                else:
-                    # a BLIND park (the measurer could not read the queue at
-                    # dispatch): no ids to poll, so the eval walltime plus the
-                    # climb's queue slack is the floor before a follow-up is
-                    # sent to look — never one per tick (terra #241 r1)
-                    from outerloop.dispatch import effective_eval_minutes
-
-                    parked_at = float(record.followup_stage.get("parked_at", 0.0) or 0.0)  # type: ignore[arg-type]
-                    floor_min = int(record.followup_stage.get("eval_minutes", 0) or 0)  # type: ignore[call-overload]
-                    floor_s = (effective_eval_minutes(floor_min) + BLIND_PARK_SLACK_MIN) * 60
-                    if now - parked_at < floor_s:
-                        continue
-                    measure_ready = True
-            wake_action = conflict_wake_action(record, pr)
-            if wake_action == "clear":
-                # the PR is clean again: re-arm the wake for this head — the
-                # base can move and conflict the SAME head a second time
-                try:
-                    save_record(root, replace(record, dirty_wake_head=""), now)
-                except OSError as exc:
-                    log.warning("conflict cursor clear failed for %s: %s", record.run_id, exc)
-            if (
-                not measure_ready
-                and not has_new_comments(record, github, spec.bot_login)
-                and wake_action != "wake"
-                and not panel_wake_pending(record, pr)
-            ):
-                # NOTHING awaits servicing — only a fully quiet PR may
-                # self-merge (pending reviewer feedback always wins over
-                # arming: a followup must service it first, and a pushed
-                # change would kill the blessing anyway). The RECORD says the
-                # publish was auto-eligible (published under merge:auto with
-                # a clean panel — #171's exact arming condition; a manual
-                # publish never consented, and contracts alone cannot prove
-                # either fact after a dial flip); GitHub's own CLEAN state is
-                # the freshness proof; the PR's base-branch contract is the
-                # governing dial. Running every tick survives any crash
-                # between a sync push and this step; the helper direct-merges
-                # when nothing is pending to arm against.
-                # ...and no follow-up job may be LIVE: a running responder can
-                # have pushed a code change whose record write (clearing the
-                # blessing) has not landed yet — arming on that head would
-                # merge code the panel never saw (terra #228 r7)
-                followup_live = False
-                if record.followup_job_id:
-                    try:
-                        state = compute.status(record.followup_job_id)
-                        followup_live = not (is_terminal(state) or state == GONE)
-                    except SlurmQueryError:
-                        followup_live = True  # unknown = assume live, never arm
-                if (
-                    not dry_run
-                    and not is_steward
-                    and not followup_live
-                    and record.auto_blessed_head
-                    and str((pr.get("head") or {}).get("sha", "")) == record.auto_blessed_head
-                    and contract is not None
-                    and pr.get("state") == "open"
-                    and not pr.get("merged")
-                    and not pr.get("draft")
-                    and pr.get("mergeable_state") == "clean"
-                    and _base_dial(github, record.target, pr, contract, spec.target) == "auto"
-                ):
-                    try:
-                        # the mutation itself is bound to the blessed head: a
-                        # push racing this check is refused by GitHub, not
-                        # merged (terra #228 r9)
-                        github.arm_auto_merge_auto_mode(
-                            record.target,
-                            _pr_number(record.pr_url),
-                            expected_head=record.auto_blessed_head,
+                comments = github.list_comments(record.target, number)
+                latest = next(
+                    (
+                        str(c.get("body") or "")
+                        for c in reversed(comments)
+                        if has_marker(str(c.get("body") or ""), "self-merge-status")
+                        and is_own_login(
+                            str((c.get("user") or {}).get("login") or ""),
+                            bot_login or _bot_login_default(),
                         )
-                    except Exception as exc:
-                        log.warning("auto-arm failed for %s: %s", record.run_id, exc)
-                continue
-            if record.followup_job_id:
-                try:
-                    state = compute.status(record.followup_job_id)
-                    if not (is_terminal(state) or state == GONE):
-                        continue  # a follow-up job is already queued/running
-                except SlurmQueryError:
-                    continue  # unknown — do not stack another job
-            # the wake-attempt counter caps follow-up retries too: a responder
-            # that cannot advance its cursors must not burn a session per tick.
-            # A LANDED re-measure gets its own allowance: the sessions that
-            # synced the base and dispatched it were progress, and capping the
-            # follow-up that pushes the sealed number parks the result forever
-            # (speedrun agent-03, 2026-09-04: three syncs spent the cap, the
-            # measure completed, and the run idled for two days on this
-            # branch). The allowance is counted on the stage itself, so a
-            # finishing session that reverts and leaves the stage intact is
-            # retried MAX_WAKE_ATTEMPTS times, not once per tick; a stage that
-            # finishes is cleared, and with it the count.
-            finish_attempts = (
-                int(record.followup_stage.get("finish_attempts", 0) or 0)  # type: ignore[call-overload]
-                if measure_ready
-                else 0
-            )
-            if measure_ready and finish_attempts >= MAX_WAKE_ATTEMPTS:
-                log.warning(
-                    "run %s: %d follow-ups failed to finish the landed re-measure; parked",
-                    record.run_id,
-                    finish_attempts,
+                    ),
+                    "",
                 )
-                continue
-            if record.wake_attempts >= MAX_WAKE_ATTEMPTS and not measure_ready:
+            except Exception as exc:
                 log.warning(
-                    "run %s: %d follow-up attempts without progress; not resubmitting",
-                    record.run_id,
-                    record.wake_attempts,
+                    "self-merge status lookup failed: %s", redact(str(exc), _client_secrets(github))
                 )
-                continue
-            if not allow_submit:
-                log.warning("run %s has new comments but disk preflight failed", record.run_id)
-                continue
-            if dry_run:
-                submitted.append((record.run_id, "dry-run"))
-                continue
-            # The author follow-up carries the climb's panel so a pushed code
-            # change is RE-READ before the tick may arm it (followup.py). The
-            # panel brings its own walltime, like the climb's allowance — the
-            # contract's followup budget caps the author, not the gate. A
-            # panel that would die at startup is left off: the reply still
-            # goes out, the PR simply stays human-merged (the tick's contract
-            # alarm already names the misconfig).
-            panel_argv: list[str] = []
-            panel_minutes = 0
-            if not is_steward and spec.panel.strip():
-                panel_error = _panel_preflight_error(spec)
-                if panel_error:
-                    log.warning(
-                        "follow-up for %s runs without the panel: %s", record.run_id, panel_error
-                    )
-                else:
-                    from outerloop.panel import panel_read_minutes
+                return False
+            status = f"Self-merge waiting: {reason}."
+            previous = latest.replace(marker("self-merge-status"), "").strip()
+            if previous != status:
+                github.comment(record.target, number, f"{marker('self-merge-status')}\n{status}")
+            return False
+        methods = github.allowed_merge_methods(record.target)
+        if not methods:
+            log.warning("no allowed merge methods for %s; skipping merge this sweep", record.target)
+            return False
+        if record != saved:
+            from outerloop.attempt import _self_merge_line
 
-                    panel_argv = _climb_panel_argv(spec)
-                    panel_minutes = panel_read_minutes(spec.panel)
-            # the author's budget first, the read on top, both under the
-            # partition cap — and the follow-up is told how many minutes the
-            # read actually got (--panel-minutes), so a cap that eats the
-            # allowance costs the READ (skipped, said so), never the author
-            author_minutes = min(spec.time_minutes, spec.max_job_minutes)
-            job_minutes = min(author_minutes + panel_minutes, spec.max_job_minutes)
-            if panel_argv:
-                panel_argv = [*panel_argv, "--panel-minutes", str(job_minutes - author_minutes)]
-            argv = [
-                *_interpreter(spec.home),
-                "-m",
-                "outerloop.followup",
-                "--run-root",
-                str(spec.run_root),
-                "--run-id",
-                record.run_id,
-                *_containment(spec.image),
-                "--bot-login",
-                spec.bot_login,
-                "--job-minutes",
-                # the SAME clamped value Slurm gets: a deadline armed past
-                # the real walltime is a Slurm kill before a clean ending
-                str(job_minutes),
-                "--max-turns",
-                str(spec.max_turns),
-                # the cluster coordinates the climb gets: a GPU benchmark's
-                # re-measure is dispatched to the GPU lane, never run here
-                "--account",
-                spec.account,
-                "--partition",
-                spec.partition,
-                "--gpu-partition",
-                spec.gpu_partition,
-                "--gpu-account",
-                spec.gpu_account,
-                *panel_argv,
-            ]
-            if spec.pat_file:
-                argv += ["--pat-file", spec.pat_file]
-            # config-driven author: the author follow-up resolves its key per the
-            # RUN's backend (from the record) inside followup.main — the tick does
-            # not thread it. The steward is a distinct role with its own key.
-            if is_steward and spec.steward_key_file:
-                argv += ["--key-file", spec.steward_key_file]
-            job_id = compute.submit(
-                JobSpec(
-                    job_name=f"followup-{record.run_id}"[:60],
-                    account=spec.account,
-                    partition=spec.job_partition or spec.partition,
-                    time_minutes=job_minutes,
-                    command=_flight_command(spec.home, f"followup-{record.run_id}"[:60], now, argv),
-                    cpus=4,
-                    mem="8G",
-                )
+            github.append_pull_body(
+                record.target, number, _self_merge_line(record.auto_blessed_head, "")
             )
-            # read-modify-write on the FRESH record: the submitted job may
-            # already be saving its own fields
-            latest = load_record(root, record.run_id)
-            stage = latest.followup_stage
-            if measure_ready and stage:
-                # one finishing attempt billed against this landed measure
-                stage = {**stage, "finish_attempts": finish_attempts + 1}
-            save_record(
-                root,
-                replace(
-                    latest,
-                    followup_job_id=job_id,
-                    followup_stage=stage,
-                    wake_attempts=latest.wake_attempts + 1,
-                ),
-                now,
+            save_record(root, record, now)
+        return bool(
+            github.merge_pull(
+                record.target, number, methods[0].lower(), expected_head=record.auto_blessed_head
             )
-            submitted.append((record.run_id, job_id))
-        except (SlurmError, Exception) as exc:
-            log.warning("in-review service failed for %s: %s", record.run_id, exc)
-    return ended, submitted
+        )
+    finally:
+        release_lease(root, record.run_id)
 
 
 def _last_worked_ts(root: Path) -> float | None:
@@ -946,6 +877,17 @@ def _wake(
     """
     if not acquire_lease(root, record.run_id, holder, holder_job_id="", now=now):
         return False
+    from outerloop.runstate import migrate_inbox
+
+    try:
+        migrate_inbox(root, record.run_id, now)
+        record = load_record(root, record.run_id)
+    except Exception:
+        release_lease(root, record.run_id)
+        raise
+    if record.state == ENDED:
+        release_lease(root, record.run_id)
+        return False
     bumped = replace(
         record,
         wake_attempts=record.wake_attempts + 1,
@@ -977,20 +919,24 @@ WAKE_SPEC_NAME = "wake-spec.json"
 
 
 def dispatch_wake_armed(root: Path) -> bool:
-    """The operator's on-switch for dispatched wakes: the env var, or the
-    sentinel file (touch/rm, no chain restart). Read by the tick and by every
-    park, so a disarm takes effect at once."""
-    return (
-        bool(os.environ.get("OUTERLOOP_DISPATCH_WAKE", "").strip())
-        or (root / DISPATCH_WAKE_SENTINEL).exists()
-    )
+    """Dispatched wakes are on unless the operator turned them off:
+    OUTERLOOP_DISPATCH_WAKE set to 0/off/false/no, or a `<root>/DISARM_WAKE`
+    sentinel (touch/rm, no chain restart). Read by the tick and by every park,
+    so a disarm takes effect at once."""
+    if os.environ.get("OUTERLOOP_DISPATCH_WAKE", "").strip().casefold() in _WAKE_OFF:
+        return False
+    return not (root / DISARM_WAKE_SENTINEL).exists()
 
 
-def write_wake_spec(root: Path, spec: FollowupSpec) -> None:
+def write_wake_spec(root: Path, spec: ServiceSpec) -> None:
     """Publish the tick's wake recipe for the jobs that park runs: a park
     submits its own wake (`arm_wake`) with exactly the tick's settings, so
     dispatched wakes stay one recipe with one owner."""
-    data = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(spec).items()}
+    data = {
+        k: (str(v) if isinstance(v, Path) else v)
+        for k, v in asdict(spec).items()
+        if k != "gpu_lanes"  # deployment config stays out of the persisted wake recipe
+    }
     tmp = root / f".{WAKE_SPEC_NAME}.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(data))
     os.replace(tmp, root / WAKE_SPEC_NAME)
@@ -1001,7 +947,7 @@ def remove_wake_spec(root: Path) -> None:
         (root / WAKE_SPEC_NAME).unlink()
 
 
-def load_wake_spec(root: Path) -> FollowupSpec | None:
+def load_wake_spec(root: Path) -> ServiceSpec | None:
     """The published wake recipe, or None when dispatched wakes are not armed
     (or the file is unreadable — the sweep still delivers)."""
     try:
@@ -1010,12 +956,12 @@ def load_wake_spec(root: Path) -> FollowupSpec | None:
         return None
     if not isinstance(data, dict):
         return None
-    names = {f.name for f in FollowupSpec.__dataclass_fields__.values()}
+    names = {f.name for f in ServiceSpec.__dataclass_fields__.values()}
     kwargs: dict[str, Any] = {
         k: (Path(v) if k in ("run_root", "home") else v) for k, v in data.items() if k in names
     }
     try:
-        return FollowupSpec(**kwargs)
+        return ServiceSpec(**kwargs)
     except TypeError:
         return None
 
@@ -1141,6 +1087,8 @@ def sweep(
     grace_s: float = DEFAULT_GRACE_S,
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     dry_run: bool = False,
+    github: Any = None,
+    bot_login: str = "",
 ) -> TickReport:
     """The backup wake layers, applied to every waiting run.
 
@@ -1152,14 +1100,108 @@ def sweep(
     reaped: list[str] = []
     stuck: list[str] = []
     holder = f"tick:{socket.gethostname()}:{os.getpid()}"
-    records = [r for r in list_runs(root) if r.state == WAITING]
+    all_records = list_runs(root)
+    records = [r for r in all_records if r.state in (PARKED, RUNNING)]
+    ended: list[tuple[str, str]] = []
 
     def wake(record: RunRecord, reason: str, tag: str) -> None:
         if dry_run or _wake(root, record, reason, dispatcher, now, holder):
             woken.append((record.run_id, tag))
 
+    ledger_blocked: set[str] = set()
+    if github is not None and not dry_run:
+        from outerloop.ledger_events import retry_pending
+        from outerloop.runstate import LEDGER_RETRY
+
+        # Materialize every durable publish before any merge observation, so
+        # a deferred ruler reset participates in this sweep's ancestry ordering.
+        for record in all_records:
+            if record.state not in (PARKED, RUNNING, ENDED) or not record.stage.get(LEDGER_RETRY):
+                continue
+            if acquire_lease(root, record.run_id, holder, "", now):
+                try:
+                    record = load_record(root, record.run_id)
+                    record = retry_pending(root, record, github, now)
+                finally:
+                    release_lease(root, record.run_id)
+            if record.stage.get(LEDGER_RETRY):
+                ledger_blocked.add(record.target)
+        records = [load_record(root, r.run_id) for r in records]
+
     for record in records:
         try:
+            if not dry_run and acquire_lease(root, record.run_id, holder, "", now):
+                try:
+                    from outerloop.runstate import migrate_inbox
+
+                    migrate_inbox(root, record.run_id, now)
+                finally:
+                    release_lease(root, record.run_id)
+            from outerloop.attempt import end_on_request, end_requested
+
+            # An operator ending waits for the lease: a live session finishes its
+            # leg (its publish is refused) and a queued wake exits without one.
+            # A running record is a session in flight (a fresh climb holds no lease):
+            # it finishes its leg; _sweep_running ends it if its job died.
+            if (
+                not dry_run
+                and record.state != RUNNING
+                and end_requested(root, record.run_id)
+                and acquire_lease(root, record.run_id, holder, "", now)
+            ):
+                try:
+                    ending = end_on_request(root, record, github, now)
+                finally:
+                    release_lease(root, record.run_id)
+                if ending:
+                    ended.append((record.run_id, ending))
+                    continue
+            merged = False
+            blessed_before = record.auto_blessed_head
+            try:
+                if github is not None and record.pr_url and not dry_run:
+                    from outerloop.attempt import close_if_done
+                    from outerloop.inbox import gather_github_messages
+
+                    ending = (
+                        ""
+                        if record.target in ledger_blocked
+                        else close_if_done(root, record, github, now)
+                    )
+                    if ending:
+                        ended.append((record.run_id, ending))
+                        continue
+                    record = load_record(root, record.run_id)
+                    pr = github.get_pull_request(
+                        record.target, int(record.pr_url.rstrip("/").split("/")[-1])
+                    )
+                    _observe_auto_pr(root, record, github, pr, now, bot_login)
+                    if record.state == PARKED:
+                        gather_github_messages(
+                            run_dir(root, record.run_id), record, github, bot_login, now, pr
+                        )
+                        merged = _merge_blessed_pr(root, record, github, pr, holder, now, bot_login)
+                        if merged and record.target not in ledger_blocked:
+                            ending = close_if_done(
+                                root, load_record(root, record.run_id), github, now
+                            )
+                            if ending:
+                                ended.append((record.run_id, ending))
+                        if merged:
+                            continue
+            except Exception as exc:
+                log.warning(
+                    "GitHub polling failed on %s: %s: %s", record.run_id, type(exc).__name__, exc
+                )
+                if merged:
+                    continue
+            if github is not None and record.pr_url and not dry_run:
+                # the merge pass may have saved a new blessing; never write back a stale copy
+                record = load_record(root, record.run_id)
+                if record.auto_blessed_head and not blessed_before:
+                    continue  # just blessed: its next step is a merge, not a wake
+            if record.state != PARKED:
+                continue
             _sweep_one(
                 root,
                 compute,
@@ -1174,6 +1216,8 @@ def sweep(
                 deferred,
                 reaped,
                 stuck,
+                github,
+                bot_login,
             )
         except Exception as exc:
             log.warning("sweep failed on %s: %s: %s", record.run_id, type(exc).__name__, exc)
@@ -1184,7 +1228,8 @@ def sweep(
         log.warning("cancel-on-end failed: %s: %s", type(exc).__name__, exc)
 
     return TickReport(
-        swept=len(records),
+        swept=sum(r.state == PARKED for r in records),
+        review_ended=tuple(ended),
         woken=tuple(woken),
         deferred=tuple(deferred),
         reaped_leases=tuple(reaped),
@@ -1192,7 +1237,7 @@ def sweep(
         # NOT the global dry_run: that flag only dries WAKE delivery;
         # ending killed climbs' records dispatches nothing and must run
         # live even while wakes stay dry.
-        implementing_ended=tuple(_sweep_implementing(root, compute, now, grace_s)),
+        running_ended=tuple(_sweep_running(root, compute, now, grace_s, github, bot_login)),
     )
 
 
@@ -1247,14 +1292,14 @@ def cancel_ended_launches(
                 failed = True
         if failed:
             continue  # unstamped: the next tick tries again, until the window closes
-        stage["launches_cancelled"] = True
-        save_record(root, replace(record, stage=stage), now)
+        from outerloop.runstate import mark_launches_cancelled
+
+        mark_launches_cancelled(root, record.run_id, now)
     if cancelled:
         log.info("cancel-on-end: cancelled %d launch job(s) of ended runs", len(cancelled))
     return cancelled
 
 
-RESEARCH_LOG_BRANCH = "research-log"
 RESEARCH_LOG_MARKER = marker("research-log")
 RESEARCH_LOG_PER_TICK = 3
 
@@ -1274,7 +1319,7 @@ def _ledger_issue_cache(root: Path, target: str) -> Path:
 def service_research_log(
     root: Path,
     github: Any,
-    spec: FollowupSpec,
+    spec: ServiceSpec,
     now: float,
     records: list[RunRecord] | None = None,
 ) -> int:
@@ -1302,7 +1347,9 @@ def service_research_log(
             since_path.write_text(str(now))
     published = 0
     for record in records:
-        if record.target != spec.target or record.state not in (ENDED, IN_REVIEW):
+        if record.target != spec.target or not (
+            record.state == ENDED or (record.state == PARKED and record.pr_url)
+        ):
             continue
         marker = _ledger_marker(root, record.run_id)
         report_path = run_dir(root, record.run_id) / "report.md"
@@ -1325,7 +1372,7 @@ def service_research_log(
             report = report_path.read_text()
         except OSError:
             continue
-        outcome = record.ending or ("improved" if record.state == IN_REVIEW else "ended")
+        outcome = record.ending or ("improved" if record.state == PARKED else "ended")
         if _publish_ledger_entry(github, spec.target, root, record, outcome, report, marker, state):
             published += 1
     return published
@@ -1353,7 +1400,7 @@ def _publish_ledger_entry(
 
     date = datetime.fromtimestamp(record.updated or record.created, tz=UTC).strftime("%Y-%m-%d")
     path = f"reports/{date}-{record.run_id}.md"
-    # an earlier pass may have archived under an earlier date (an in-review
+    # an earlier pass may have archived under an earlier date (a parked
     # archive whose record re-stamped `updated` at ENDED): the marker's own
     # second line is the authoritative path for retries and pointers
     prior = state.splitlines()
@@ -1425,7 +1472,7 @@ def _publish_ledger_entry(
                     target,
                     "Research log",
                     f"{RESEARCH_LOG_MARKER}\nOne two-line comment per finished "
-                    f"autoresearch run — full reports live on the [`{RESEARCH_LOG_BRANCH}`]"
+                    f"outerloop run — full reports live on the [`{RESEARCH_LOG_BRANCH}`]"
                     f"(https://github.com/{target}/tree/{RESEARCH_LOG_BRANCH}/reports) "
                     "branch. Results relevant to an open order issue are posted "
                     "there instead.",
@@ -1453,8 +1500,15 @@ def _kill_stamp(root: Path, run_id: str) -> Path:
     return run_dir(root, run_id) / "attempt-terminal-seen"
 
 
-def _sweep_implementing(root: Path, compute: Compute, now: float, grace_s: float) -> list[str]:
-    """End `implementing` records whose climb job died without a verdict.
+def _sweep_running(
+    root: Path,
+    compute: Compute,
+    now: float,
+    grace_s: float,
+    github: Any = None,
+    bot_login: str = "",
+) -> list[str]:
+    """End `running` records whose climb job died without a verdict.
 
     A climb that CRASHES contains its own ending (attempt.py); a climb that is
     KILLED — walltime, preemption, scancel after the SIGTERM grace, node
@@ -1466,7 +1520,7 @@ def _sweep_implementing(root: Path, compute: Compute, now: float, grace_s: float
     """
     ended: list[str] = []
     for record in list_runs(root):
-        if record.state != IMPLEMENTING:
+        if record.state != RUNNING:
             continue
         try:
             if record.run_job_id:
@@ -1521,28 +1575,38 @@ def _sweep_implementing(root: Path, compute: Compute, now: float, grace_s: float
                 deadline = record.deadline if record.deadline > 0 else (record.created + 24 * 3600)
                 if now < deadline:
                     continue
-                note = "implementing with no recorded climb job, past its run deadline"
+                note = "running with no recorded climb job, past its run deadline"
             fresh = load_record(root, record.run_id)
-            if fresh.state != IMPLEMENTING:
+            if fresh.state != RUNNING:
                 continue  # the climb landed its own ending meanwhile
             for jid in _poll_targets(fresh):
                 # defensive: no current path records an experiment while
-                # still implementing, but an orphan GPU job burning budget
+                # still running, but an orphan GPU job burning budget
                 # after its run is declared dead must never survive one
                 with contextlib.suppress(Exception):
                     compute.cancel(jid)
-            save_record(
+            from outerloop.attempt import end_requested, finish_run, requested_note
+            from outerloop.runstate import OPERATOR
+
+            # A pending operator request names the ending: its session died first.
+            requested = end_requested(root, fresh.run_id)
+            if requested and fresh.issue_number and github is None:
+                continue  # the operator ending must tell its issue; a later tick ends it
+            if requested:
+                ending, note = OPERATOR, requested_note(root, fresh.run_id)
+            else:
+                ending = ABORTED
+                note += " — ended by the sweep (a killed climb leaves no exception to contain)"
+            finish_run(
                 root,
-                replace(
-                    fresh,
-                    state=ENDED,
-                    ending=ABORTED,
-                    ending_note=(
-                        f"{note} — ended by the sweep (a killed climb "
-                        f"leaves no exception to contain)"
-                    ),
-                ),
+                fresh,
+                ending,
+                note,
                 now,
+                # an operator ending tells the requesting issue, like every other path
+                github if requested else None,
+                auth=getattr(github, "auth", None),
+                bot_login=bot_login,
             )
             # every ending produces a report — but never clobber one the
             # climb already wrote before it was killed
@@ -1551,15 +1615,15 @@ def _sweep_implementing(root: Path, compute: Compute, now: float, grace_s: float
                 try:
                     report_path.write_text(
                         f"# Run report — {record.target} / {record.benchmark}\n"
-                        f"Outcome: **aborted** (climb job killed)\n"
+                        f"Outcome: **{ending}** (climb job killed)\n"
                         f"Note: {note}\n"
                     )
                 except OSError as exc:
                     log.warning("sweep report write failed for %s: %s", record.run_id, exc)
-            log.warning("sweep ended implementing run %s: %s", record.run_id, note)
+            log.warning("sweep ended running run %s: %s", record.run_id, note)
             ended.append(record.run_id)
         except Exception as exc:  # per-record isolation, like the waiting sweep
-            log.warning("implementing-sweep failed on %s: %s", record.run_id, exc)
+            log.warning("running-sweep failed on %s: %s", record.run_id, exc)
     return ended
 
 
@@ -1613,140 +1677,206 @@ def _sweep_one(
     deferred: list[str],
     reaped: list[str],
     stuck: list[str],
+    github: Any = None,
+    bot_login: str = "",
 ) -> None:
-    if True:
-        # Leases first: a LIVE wake in flight owns this run — even the stuck
-        # verdict must wait for it (its session may be the one that succeeds).
-        lease = read_lease(root, record.run_id)
-        if lease is not None:
-            alive = _holder_alive(compute, lease.holder_job_id)
-            if not lease_is_stale(lease, now, lease_ttl_s, alive):
-                if not _armed_wake_lost(root, compute, record, lease, now, grace_s, dry_run):
-                    return
-                record = load_record(root, record.run_id)
-            if dry_run:
-                reaped.append(record.run_id)
+    # Leases first: a LIVE wake in flight owns this run — even the stuck
+    # verdict must wait for it (its session may be the one that succeeds).
+    lease = read_lease(root, record.run_id)
+    if lease is not None:
+        alive = _holder_alive(compute, lease.holder_job_id)
+        if not lease_is_stale(lease, now, lease_ttl_s, alive):
+            if not _armed_wake_lost(root, compute, record, lease, now, grace_s, dry_run):
                 return
-            if not reap_lease(root, record.run_id, reaper=f"{os.getpid()}-{now}", expected=lease):
-                return  # a concurrent tick reaped it first; it owns redelivery
+            record = load_record(root, record.run_id)
+        if dry_run:
             reaped.append(record.run_id)
+            return
+        if not reap_lease(root, record.run_id, reaper=f"{os.getpid()}-{now}", expected=lease):
+            return  # a concurrent tick reaped it first; it owns redelivery
+        reaped.append(record.run_id)
 
-        # Layer 5: too many failed attempts is a terminal, reported state.
-        if record.wake_attempts >= MAX_WAKE_ATTEMPTS:
-            if not dry_run:
-                ended = replace(
-                    record,
-                    state=ENDED,
-                    ending=STUCK,
-                    ending_note=(
-                        f"{record.wake_attempts} wake attempts without the run leaving 'waiting'"
+    from outerloop.attempt import end_requested
+
+    if end_requested(root, record.run_id):
+        return  # an operator ending is pending: never wake the run again
+
+    from outerloop.rebind import requested
+
+    if requested(root, record.run_id):
+        wake(record, "operator rebind", "configuration")
+        return
+
+    from outerloop.inbox import wake_pending
+
+    job_ids = _poll_targets(record)
+    messages = wake_pending(run_dir(root, record.run_id), record)
+    if not job_ids and not messages and record.deadline <= 0:
+        return
+    if outage_active(
+        root, now, role="steward" if record.agent_id.startswith("steward") else "solver"
+    ):
+        return
+
+    from outerloop.harness import resume_config_block
+
+    blocked = resume_config_block(record.stage)
+    if blocked:
+        log.warning("run %s: %s", record.run_id, blocked)
+        deferred.append(record.run_id)
+        return
+
+    from outerloop.endpoints import EndpointUnavailable, resolve_endpoint
+
+    try:
+        _, profile = resolve_endpoint(record.author_model, record.author_backend or "claude")
+        if profile:
+            _ = profile.url
+    except EndpointUnavailable as exc:
+        from outerloop.endpoint_wait import unavailable
+
+        unavailable(None if dry_run else root, record.run_id, exc, now)
+        deferred.append(record.run_id)
+        return
+    except ValueError:
+        pass  # Existing configuration validation reports permanent errors.
+
+    # Layer 5: too many failed attempts is a terminal, reported state.
+    if record.wake_attempts >= MAX_WAKE_ATTEMPTS:
+        if not dry_run:
+            from outerloop.attempt import finish_run
+
+            finish_run(
+                root,
+                record,
+                STUCK,
+                f"{record.wake_attempts} wake attempts without progress",
+                now,
+                auth=getattr(github, "auth", None),
+                bot_login=bot_login,
+            )
+        stuck.append(record.run_id)
+        return
+
+    # Only a positive pending requirement represents a configuration wake.
+    # A successful resume removes it before any subsequent normal sleep.
+    if int(str(record.stage.get("hermes_resume_required_chars", 0))) > 0:
+        wake(record, "resume configuration unblocked", "configuration")
+        return
+
+    job_ids = _poll_targets(record)
+    if not job_ids:
+        if messages:
+            wake(record, "inbox messages", "inbox")
+            return
+        # No job ids to poll. A BLIND PARK (the measurer could not read Slurm,
+        # so `MeasurementPending` carried no ids) still hibernated with a
+        # deadline — the deadline floor is its ONLY wake, so fire on it. A
+        # genuinely mid-write record has no deadline and is left alone.
+        # (A jobless CHECKPOINT SLEEP arrives here too — its deadline is
+        # near-term by construction, attempt.py sizes it to the next sweep
+        # pass, not the 12h queue slack that protects queued jobs.)
+        if record.deadline > 0 and now > record.deadline:
+            wake(record, "blind park past deadline", "deadline")
+        return
+
+    try:
+        states = [compute.status(jid) for jid in job_ids]
+    except SlurmQueryError:
+        # Layer 4's rule: query failure is "Slurm unknown", never "gone".
+        deferred.append(record.run_id)
+        return
+
+    # deadline <= 0 cannot be written by save_record for waiting runs;
+    # if one exists anyway (legacy/hand-edited), treat it as already past
+    # for GONE — a vanished-experiment wake is safe — but never for
+    # PENDING, where the consequence would be cancelling a healthy job.
+    past_deadline = record.deadline <= 0 or now > record.deadline
+
+    if all(is_terminal(s) for s in states):
+        state = ",".join(sorted(set(states)))
+        # Layer 3, with real grace: time runs from when the sweep FIRST
+        # saw every job terminal, not from submission — the afterany
+        # job gets the full window to deliver before the backup steps in.
+        # Local compute has no afterany jobs to wait for (jobs are
+        # terminal at submit): the sweep IS the delivery, so grace would
+        # only cost a whole extra loop iteration.
+        if local_mode():
+            wake(record, f"experiment {state}", state)
+            return
+        if record.terminal_seen <= 0:
+            if dry_run:
+                # no writes in dry-run: report the would-wake now so the
+                # terminal path is visible to live plumbing checks
+                wake(record, f"experiment {state}", state)
+            else:
+                save_record(
+                    root,
+                    replace(
+                        record,
+                        terminal_seen=now,
+                        # repair legacy records as we touch them (see _wake)
+                        deadline=record.deadline if record.deadline > 0 else now,
                     ),
+                    now,
                 )
-                save_record(root, ended, now)
-            stuck.append(record.run_id)
             return
-
-        job_ids = _poll_targets(record)
-        if not job_ids:
-            # No job ids to poll. A BLIND PARK (the measurer could not read Slurm,
-            # so `MeasurementPending` carried no ids) still hibernated with a
-            # deadline — the deadline floor is its ONLY wake, so fire on it. A
-            # genuinely mid-write record has no deadline and is left alone.
-            # (A jobless CHECKPOINT SLEEP arrives here too — its deadline is
-            # near-term by construction, attempt.py sizes it to the next sweep
-            # pass, not the 12h queue slack that protects queued jobs.)
-            if record.deadline > 0 and now > record.deadline:
-                wake(record, "blind park past deadline", "deadline")
-            return
-
-        try:
-            states = [compute.status(jid) for jid in job_ids]
-        except SlurmQueryError:
-            # Layer 4's rule: query failure is "Slurm unknown", never "gone".
-            deferred.append(record.run_id)
-            return
-
-        # deadline <= 0 cannot be written by save_record for waiting runs;
-        # if one exists anyway (legacy/hand-edited), treat it as already past
-        # for GONE — a vanished-experiment wake is safe — but never for
-        # PENDING, where the consequence would be cancelling a healthy job.
-        past_deadline = record.deadline <= 0 or now > record.deadline
-
-        if all(is_terminal(s) for s in states):
-            state = ",".join(sorted(set(states)))
-            # Layer 3, with real grace: time runs from when the sweep FIRST
-            # saw every job terminal, not from submission — the afterany
-            # job gets the full window to deliver before the backup steps in.
-            # Local compute has no afterany jobs to wait for (jobs are
-            # terminal at submit): the sweep IS the delivery, so grace would
-            # only cost a whole extra loop iteration.
-            if local_mode():
-                wake(record, f"experiment {state}", state)
+        if now - record.terminal_seen >= grace_s:
+            wake(record, f"experiment {state}", state)
+    elif any(is_pending(s) for s in states) and record.deadline > 0 and now > record.deadline:
+        # Past the deadline with a job still queued. Ask Slurm WHY before
+        # calling it unschedulable: a busy queue or the account's own cap is
+        # a wait a scientist would sit out, so the deadline moves out by one
+        # slack window instead (Torch 2026-09-06: four launches pending on
+        # QOSMaxGRESPerUser were about to be cancelled and re-launched into
+        # the same cap). Local compute has no queue and no reasons.
+        pending = [j for j, s in zip(job_ids, states, strict=True) if is_pending(s)]
+        reason_of = getattr(compute, "pending_reason", None)
+        reasons: dict[str, str] = {}
+        if reason_of is not None:
+            try:
+                reasons = {j: str(reason_of(j)) for j in pending}
+            except SlurmQueryError:
+                deferred.append(record.run_id)  # unknown is never "cancel"
                 return
-            if record.terminal_seen <= 0:
-                if dry_run:
-                    # no writes in dry-run: report the would-wake now so the
-                    # terminal path is visible to live plumbing checks
-                    wake(record, f"experiment {state}", state)
-                else:
-                    save_record(
-                        root,
-                        replace(
-                            record,
-                            terminal_seen=now,
-                            # repair legacy records as we touch them (see _wake)
-                            deadline=record.deadline if record.deadline > 0 else now,
-                        ),
-                        now,
-                    )
-                return
-            if now - record.terminal_seen >= grace_s:
-                wake(record, f"experiment {state}", state)
-        elif any(is_pending(s) for s in states) and record.deadline > 0 and now > record.deadline:
-            # Past the deadline with a job still queued. Ask Slurm WHY before
-            # calling it unschedulable: a busy queue or the account's own cap is
-            # a wait a scientist would sit out, so the deadline moves out by one
-            # slack window instead (Torch 2026-09-06: four launches pending on
-            # QOSMaxGRESPerUser were about to be cancelled and re-launched into
-            # the same cap). Local compute has no queue and no reasons.
-            pending = [j for j, s in zip(job_ids, states, strict=True) if is_pending(s)]
-            reason_of = getattr(compute, "pending_reason", None)
-            reasons: dict[str, str] = {}
-            if reason_of is not None:
-                try:
-                    reasons = {j: str(reason_of(j)) for j in pending}
-                except SlurmQueryError:
-                    deferred.append(record.run_id)  # unknown is never "cancel"
-                    return
-            if reasons and all(is_queue_wait(r) for r in reasons.values()):
-                extended = now + BLIND_PARK_SLACK_MIN * 60
-                if not dry_run:
-                    save_record(root, replace(record, deadline=extended), now)
-                log.info(
-                    "sweep: %s waits in the queue (%s); deadline extended by %d min",
-                    record.run_id,
-                    ", ".join(f"{j}={r}" for j, r in reasons.items()),
-                    BLIND_PARK_SLACK_MIN,
-                )
-                return
-            # Unschedulable in practice: cancel every non-terminal job
-            # (best-effort — scancel trouble must not abort the sweep), then
-            # wake with that fact.
+        if reasons and all(is_queue_wait(r) for r in reasons.values()):
+            extended = now + BLIND_PARK_SLACK_MIN * 60
             if not dry_run:
-                for jid, s in zip(job_ids, states, strict=True):
-                    if is_terminal(s) or s == GONE:
-                        continue
-                    try:
-                        compute.cancel(jid)
-                    except Exception as exc:  # scancel trouble is never fatal here
-                        log.warning("cancel %s failed: %s", jid, exc)
-            wake(record, "experiment unschedulable (pending past deadline)", "unschedulable")
-        elif all(is_terminal(s) or s == GONE for s in states):
-            # done-or-vanished, at least one GONE (all-terminal handled above)
-            if past_deadline:
-                wake(record, "experiment vanished from Slurm", "vanished")
-            # else: sacct lag right after submission is normal; wait.
-        # something RUNNING (or recently pending): nothing to do yet.
+                save_record(root, replace(record, deadline=extended), now)
+            log.info(
+                "sweep: %s waits in the queue (%s); deadline extended by %d min",
+                record.run_id,
+                ", ".join(f"{j}={r}" for j, r in reasons.items()),
+                BLIND_PARK_SLACK_MIN,
+            )
+            return
+        # Unschedulable in practice: cancel every non-terminal job
+        # (best-effort — scancel trouble must not abort the sweep), then
+        # wake with that fact.
+        if not dry_run:
+            for jid, s in zip(job_ids, states, strict=True):
+                if is_terminal(s) or s == GONE:
+                    continue
+                try:
+                    compute.cancel(jid)
+                except Exception as exc:  # scancel trouble is never fatal here
+                    log.warning("cancel %s failed: %s", jid, exc)
+        wake(record, "experiment unschedulable (pending past deadline)", "unschedulable")
+    elif all(is_terminal(s) or s == GONE for s in states):
+        # done-or-vanished, at least one GONE (all-terminal handled above)
+        if past_deadline:
+            wake(record, "experiment vanished from Slurm", "vanished")
+        # else: sacct lag right after submission is normal; wait.
+    # something RUNNING (or recently pending): nothing to do yet.
+
+
+def _launches_held(root: Path) -> bool:
+    """True when the operator's HOLD_LAUNCHES file is present; says so once."""
+    path = root / HOLD_LAUNCHES_SENTINEL
+    if not path.exists():
+        return False
+    log.info("launches held: %s", path)
+    return True
 
 
 def tick(
@@ -1758,16 +1888,16 @@ def tick(
     lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
     dry_run: bool = False,
     github: Any = None,
-    followup_spec: FollowupSpec | None = None,
-    followup_dry_run: bool = False,
+    service_spec: ServiceSpec | None = None,
+    service_dry_run: bool = False,
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
     min_tick_s: float = DEFAULT_MIN_TICK_S,
 ) -> TickReport:
     """One full tick. Pause sentinel wins over everything: a paused loop
     heartbeats (so the watchdog stays quiet) but touches nothing.
 
-    Disk preflight gates every lane that LAUNCHES new work (follow-up jobs,
-    intake claims, self-initiated climbs): a session started on a full or
+    Disk preflight and HOLD_LAUNCHES gate fresh intake, self-initiated and
+    steward runs; existing runs still receive wakes. A session started on a full or
     nearly-full filesystem dies mid-flight in ways that lose data. The sweep
     still runs — its writes are small, per-record contained, and ending runs
     matters more when storage is failing, not less.
@@ -1778,6 +1908,18 @@ def tick(
     # coalesce guard reads the last COMPLETED tick's marker (not the heartbeat).
     prior_worked = _last_worked_ts(root)
     write_heartbeat(root, now)
+    read_limits(root)
+    legacy = 0
+    for path in (root / "runs").glob("*/state.json"):
+        try:
+            raw = json.loads(path.read_text())
+            legacy += bool(
+                raw.get("state") != ENDED
+                and (raw.get("followup_stage") or raw.get("followup_job_id"))
+            )
+        except (OSError, ValueError, AttributeError):
+            pass
+    log.info("legacy follow-up records: %d", legacy)
     disk_health = check_disk(root, min_free_bytes=min_free_bytes)
     write_heartbeat(root, now, disk=disk_health.as_dict())
     for warning in disk_health.warnings():
@@ -1806,8 +1948,21 @@ def tick(
                 elapsed,
                 min_tick_s,
             )
-            return TickReport(coalesced=True)
-    report = sweep(root, compute, dispatcher, now, grace_s, lease_ttl_s, dry_run=dry_run)
+            return TickReport(coalesced=True, launch_blocked=_launches_held(root))
+    author_errors: set[str] = set()
+    if service_spec is not None:
+        _preflight_claim_overrides(service_spec, author_errors)
+    report = sweep(
+        root,
+        compute,
+        dispatcher,
+        now,
+        grace_s,
+        lease_ttl_s,
+        dry_run=dry_run,
+        github=github,
+        bot_login=service_spec.bot_login if service_spec else "",
+    )
     # Housekeeping: ended runs shed ws/ and ws-home/ after a grace period;
     # when the state filesystem's write probe failed, the grace is waived and
     # the sweep frees oldest-first until the probe passes, then the preflight
@@ -1844,33 +1999,27 @@ def tick(
     launch_ok = disk_health.launch_ok()
     if not launch_ok:
         log.warning("disk preflight failed; launch lanes are OFF this tick")
+    if _launches_held(root):
+        launch_ok = False
+    report = replace(report, disk=tuple(disk_health.warnings()), launch_blocked=not launch_ok)
     # Mid-leg sync is serviced regardless of follow-up/board servicing: it
     # only needs the workspace and the PAT (a git fetch, no GitHub REST and
     # no contract), and a live session waiting on `sync` must not depend on
     # whether github/contract loaded this tick.
-    if followup_spec is not None:
-        # ONE run-record snapshot for every READ-heavy service that follows the
-        # mutation phase (sweep/park/reap and housekeeping have already run and
-        # written what they will). Sharing it means walking runs/ once, not once
-        # per service. The launch lanes read a stale-but-conservative picture on
-        # purpose: the only record-writer between here and them is
-        # service_in_review, and it only ENDS runs (frees slots), so the
-        # snapshot can only OVER-count active runs — never launch a duplicate.
-        # The one exception is service_research_log, which PUBLISHES terminal
-        # outcomes: it reads fresh (below), never the snapshot. Any service
-        # that acts on a single record's CURRENT state re-reads that one
-        # record fresh via load_record (the freshness guard).
+    if service_spec is not None:
+        # Share one snapshot after the sweep's mutations. Services that publish
+        # outcomes or act on a current record read it again before acting.
         tick_records = list_runs(root)
-        service_syncs(root, followup_spec, now, tick_records)
+        service_syncs(root, service_spec, now, tick_records)
     # a dry run reports and writes nothing: no download, no seed
-    if github is not None and followup_spec is not None and followup_spec.target and not dry_run:
+    if github is not None and service_spec is not None and service_spec.target and not dry_run:
         try:
-            service_eval_cache(root, github, followup_spec.target)
+            service_eval_cache(root, github, service_spec.target)
         except Exception as exc:  # advisory: a cold cache costs a download, never a tick
             log.warning("eval cache warm failed: %s: %s", type(exc).__name__, exc)
-    if github is not None and followup_spec is not None:
+    if github is not None and service_spec is not None:
         # expired flight snapshots die with their TTL, not with a human.
-        # One home suffices: every lane's spec derives from followup_spec
+        # One home suffices: every lane's spec derives from service_spec
         # via replace(), so all flights share this checkout's flights/ dir.
         # Blind means delete nothing — but only QUERY failures count as
         # blindness; a compute backend missing the method is a programming
@@ -1882,43 +2031,43 @@ def tick(
             live_names = None
         if live_names is not None:
             with contextlib.suppress(Exception):
-                reaped = reap_flights(followup_spec.home, now, live_job_names=live_names)
+                reaped = reap_flights(service_spec.home, now, live_job_names=live_names)
                 if reaped:
                     log.info("reaped %d expired flight snapshot(s)", reaped)
         # ONE contract fetch per tick feeds every lane: the requested and
         # self-initiated lanes need its benchmarks, and all three lanes now
         # take their session/job limits from its budgets — clamped by our
         # ceilings (limits.py), so a target shapes spend, never raises it.
-        # A failed fetch leaves in-review servicing running on defaults;
+        # A failed fetch leaves parked servicing running on defaults;
         # the launch lanes need the contract and sit out this tick.
         contract = None
-        if followup_spec.target:
+        if service_spec.target:
             contract_error: str | None = "contract file missing on main"
             try:
                 from outerloop.contract import load_contract
 
-                raw = _contract_text(github, followup_spec.target, "main")
+                raw = _contract_text(github, service_spec.target, "main")
                 if raw is not None:
-                    contract = load_contract(raw, followup_spec.target)
+                    contract = load_contract(raw, service_spec.target)
                     contract_error = None
             except Exception as exc:
-                log.warning("contract fetch failed for %s: %s", followup_spec.target, exc)
+                log.warning("contract fetch failed for %s: %s", service_spec.target, exc)
                 contract_error = f"{type(exc).__name__}: {exc}"
             if contract_error is None:
                 # a bad panel config idles the same launch lanes a bad
                 # contract does — same silent-idle class, so it rides the
                 # same alarm
-                panel_error = _panel_preflight_error(followup_spec)
+                panel_error = _panel_preflight_error(service_spec)
                 if panel_error:
                     contract_error = f"panel preflight: {panel_error}"
             try:
                 contract_alarm(
                     root,
                     github,
-                    followup_spec.target,
+                    service_spec.target,
                     contract_error,
                     now,
-                    bot_login=followup_spec.bot_login,
+                    bot_login=service_spec.bot_login,
                 )
             except Exception as exc:
                 log.warning("contract alarm failed: %s", exc)
@@ -1927,29 +2076,24 @@ def tick(
         # set — and only DOWNWARD from the operator's spec value: strictly-
         # downward shaping must hold against operator config too, not just
         # against the module defaults.
-        spec = shape_followup_spec(followup_spec, limits, contract)
-        ended, submitted = service_in_review(
-            root,
-            github,
-            compute,
-            spec,
-            now,
-            dry_run=followup_dry_run,
-            allow_submit=launch_ok,
-            contract=contract,
-            records=tick_records,
-        )
+        spec = shape_service_spec(service_spec, limits, contract)
         try:
-            # research_log reads FRESH, not the shared snapshot: it publishes
-            # terminal outcomes and writes done markers, and service_in_review
-            # just above may have ended a run this tick — a stale in-review
-            # record would be published as 'improved' and locked, wrong.
+            # Outcome publication reads current records after the sweep.
             service_research_log(root, github, spec, now)
         except Exception as exc:  # the ledger is advisory; the tick continues
             log.warning("research-log service failed: %s", exc)
         intake_job = (
             service_intake(
-                root, github, compute, spec, now, contract, limits, dry_run=followup_dry_run
+                root,
+                github,
+                compute,
+                spec,
+                now,
+                contract,
+                limits,
+                dry_run=service_dry_run,
+                records=tick_records,
+                author_errors=author_errors,
             )
             if launch_ok and contract is not None
             else None
@@ -1963,7 +2107,7 @@ def tick(
                 now,
                 contract,
                 limits,
-                dry_run=followup_dry_run,
+                dry_run=service_dry_run,
                 records=tick_records,
             )
             if launch_ok and intake_job is None and contract is not None
@@ -1979,8 +2123,9 @@ def tick(
                     contract,
                     now,
                     limits=limits,
-                    dry_run=followup_dry_run,
+                    dry_run=service_dry_run,
                     records=tick_records,
+                    author_errors=author_errors,
                 )
             except Exception as exc:
                 log.warning("self-initiated selection failed: %s", exc)
@@ -1989,8 +2134,6 @@ def tick(
         service_boards(root, github, spec.target, contract, now, compute)
         report = replace_report(
             report,
-            ended,
-            submitted,
             intake_job,
             self_job,
             disk_health.warnings(),
@@ -2031,7 +2174,7 @@ def service_syncs(
     if records is None:
         records = list_runs(root)
     for record in records:
-        if record.state != IMPLEMENTING:
+        if record.state != RUNNING:
             continue
         workspace = run_dir(root, record.run_id) / "ws"
         if not workspace.is_dir():
@@ -2049,6 +2192,7 @@ def service_syncs(
                 ),
                 url=target_clone_url(record.target),
             )
+            ws.configure_channels(record.channels, record.agent_id)
             ws.fetch_origin()
             mark_synced(workspace, requested_at)
             log.info("synced origin refs for %s", record.run_id)
@@ -2090,8 +2234,6 @@ def service_boards(
 
 def replace_report(
     report: TickReport,
-    ended: list[tuple[str, str]],
-    submitted: list[tuple[str, str]],
     intake_job: tuple[str, str] | None = None,
     self_job: tuple[str, str] | None = None,
     disk_warnings: list[str] | None = None,
@@ -2102,8 +2244,6 @@ def replace_report(
 
     return dc_replace(
         report,
-        review_ended=tuple(ended),
-        followups_submitted=tuple(submitted),
         intake=intake_job or ("", ""),
         self_initiated=self_job or ("", ""),
         disk=tuple(disk_warnings or ()),
@@ -2117,14 +2257,14 @@ SELF_INITIATED_COOLDOWN_S = 6 * 3600
 # the crash-loop floor: a launch that died pre-record backs off at least
 # this long regardless of the contract's cooldown dial
 DEAD_LAUNCH_BACKOFF_S = 30 * 60
-# An implementing run untouched for this long is a crashed climb job; it must
+# An running run untouched for this long is a crashed climb job; it must
 # not block the lane forever, but the window must exceed the LONGEST honest
 # job — the 120-min contract ceiling plus the panel allowance the tick adds
 # (~4.5 h at the defaults) plus queue-start slack — or the picker declares a
 # live run stranded and starts a second one on the same target, breaking the
 # one-active-run serialization. Its cooldown entry still applies, so a
 # crashed benchmark isn't immediately retried.
-STRANDED_IMPLEMENTING_S = 12 * 3600
+STRANDED_RUNNING_S = 12 * 3600
 # A pending marker older than this is dead even if squeue can't be read.
 PENDING_TTL_S = 4 * 3600
 
@@ -2151,7 +2291,7 @@ def pick_self_initiated(
     mine = [r for r in records if r.target == target]
 
     def stranded(r: RunRecord) -> bool:
-        return r.state == IMPLEMENTING and now - max(r.updated, r.created) > STRANDED_IMPLEMENTING_S
+        return r.state == RUNNING and now - max(r.updated, r.created) > STRANDED_RUNNING_S
 
     active = [r for r in mine if r.state != ENDED and not stranded(r)]
     if len(active) >= _attempt_width(contract):
@@ -2243,7 +2383,7 @@ def read_tombstones(root: Path, target: str, contract: Any, now: float) -> dict[
     return out
 
 
-# WIDTH slots are the only suffixed marker names; the pattern also fences
+# WIDTH slots and intake issue IDs use suffixed marker names; the pattern also fences
 # list_pendings against a longer target that shares this one's file-name
 # prefix (org/foo vs org/foobar — "/" encodes as "__", so glob alone is
 # ambiguous)
@@ -2263,7 +2403,7 @@ def _pending_path(root: Path, target: str, agent: str = "") -> Path:
 
 def list_pendings(root: Path, target: str) -> list[tuple[str, dict[str, Any]]]:
     """(agent, marker) for every live pending marker of `target` — one per
-    WIDTH slot, plus the legacy un-suffixed marker from a pre-width deploy
+    WIDTH slot or intake issue, plus the legacy un-suffixed marker from a pre-width deploy
     (attributed to agent-01)."""
     out: list[tuple[str, dict[str, Any]]] = []
     stem = target.replace("/", "__")
@@ -2274,7 +2414,9 @@ def list_pendings(root: Path, target: str) -> list[tuple[str, dict[str, Any]]]:
         name = path.stem
         if name == stem:
             agent = ""
-        elif name.startswith(stem + "@") and _SLOT_AGENT_RE.fullmatch(name[len(stem) + 1 :]):
+        elif name.startswith(stem + "@") and re.fullmatch(
+            r"(?:agent|intake)-\d+", name[len(stem) + 1 :]
+        ):
             agent = name[len(stem) + 1 :]
         else:
             continue  # a longer target sharing this prefix (org/foo vs org/foobar)
@@ -2305,6 +2447,19 @@ def clear_pending(root: Path, target: str, agent: str = "") -> None:
     _pending_path(root, target, agent).unlink(missing_ok=True)
 
 
+def _pending_landed(pending: dict[str, Any], records: list[RunRecord], target: str) -> bool:
+    agent = str(pending.get("agent_id", ""))
+    job_id = str(pending.get("job_id", ""))
+    if agent.startswith("intake-"):
+        return any(r.target == target and r.run_job_id == job_id for r in records)
+    return any(
+        r.target == target
+        and r.created >= float(pending["submitted_at"]) - 60
+        and (not agent or r.agent_id == agent)
+        for r in records
+    )
+
+
 def _attempt_width(contract: Any) -> int:
     width = getattr(getattr(contract, "budgets", None), "max_active_attempts", None)
     return int(width) if width else MAX_ACTIVE_RUNS_PER_TARGET
@@ -2318,7 +2473,7 @@ def _free_agent_slot(occupied: set[str], width: int) -> str | None:
     return None
 
 
-def _climb_panel_argv(spec: FollowupSpec) -> list[str]:
+def _climb_panel_argv(spec: ServiceSpec) -> list[str]:
     """Panel args for a climb job; empty when the operator disabled the panel."""
     if not spec.panel.strip():
         return []
@@ -2328,23 +2483,162 @@ def _climb_panel_argv(spec: FollowupSpec) -> list[str]:
     return argv
 
 
-def _author_config_error(spec: FollowupSpec) -> str:
-    """Why the config-driven author would die at the climb's startup ("" when it
-    won't), checked on the tick host BEFORE a claim/submit so a codex misconfig
-    (e.g. OUTERLOOP_AUTHOR_BACKEND=codex with no non-claude model) never
-    strands a claimed intake issue. Reads the fleet author config from env — the
-    same source the climb defaults from — and the image the tick already knows."""
-    from outerloop.attempt import codex_author_config_error
+def _malformed_override_targets() -> tuple[str, ...] | None:
+    """Recover target scope only from a readable JSON object; otherwise hold all."""
+    from outerloop.author_overrides import SETTING
 
+    try:
+        data = json.loads(os.environ.get(SETTING, ""))
+    except ValueError:
+        return None
+    return tuple(data) if isinstance(data, dict) and data else None
+
+
+def _claim_overrides(target: str) -> Mapping[str, tuple[AuthorOverride, ...]]:
+    from outerloop.author_overrides import overrides
+
+    try:
+        return overrides()
+    except ValueError:
+        targets = _malformed_override_targets()
+        if targets is not None and target not in targets:
+            return {}
+        raise
+
+
+def _claim_author_error(spec: ServiceSpec, agent_id: str, reported: set[str] | None = None) -> str:
+    """Use the author preflight for claims, logging each affected entry once per tick."""
+    error = _author_config_error(spec, agent_id)
+    if not error or isinstance(error, EndpointWaitReason):
+        return error
+    from outerloop.author_overrides import overrides
+
+    try:
+        selected = next((o for o in overrides().get(spec.target, ()) if o.matches(agent_id)), None)
+        slots = ", ".join(selected.slots) if selected and selected.slots else "all"
+        scope = f"target {spec.target}, slots {slots}"
+    except ValueError:
+        targets = _malformed_override_targets()
+        scope = f"targets {', '.join(targets)}, slots all" if targets else "all targets, slots all"
+    message = f"fresh claims held: {scope}: author misconfigured — {error}"
+    if reported is None or message not in reported:
+        log.error("%s", message)
+        if reported is not None:
+            reported.add(message)
+    return error
+
+
+def _preflight_claim_overrides(spec: ServiceSpec, reported: set[str]) -> None:
+    from outerloop.author_overrides import overrides
+
+    try:
+        entries = overrides()
+    except ValueError:
+        targets = _malformed_override_targets()
+        _claim_author_error(
+            replace(spec, target=targets[0] if targets else spec.target), "agent-01", reported
+        )
+        return
+    for target, group in entries.items():
+        for entry in group:
+            _claim_author_error(
+                replace(spec, target=target),
+                entry.slots[0] if entry.slots else "agent-01",
+                reported,
+            )
+
+
+def _selected_author(spec: ServiceSpec, agent_id: str = "agent-01") -> tuple[str, str]:
+    from outerloop.attempt import fleet_author_model
+
+    selected = next(
+        (o for o in _claim_overrides(spec.target).get(spec.target, ()) if o.matches(agent_id)), None
+    )
+    if selected:
+        return selected.backend, selected.resolved_model()
     backend = os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude"
-    model = os.environ.get("OUTERLOOP_AUTHOR_MODEL") or "claude-opus-5"
-    return codex_author_config_error(backend, model, spec.image)
+    return backend, fleet_author_model(backend)
 
 
-def _panel_preflight_error(spec: FollowupSpec) -> str:
+def _selected_author_limits(
+    spec: ServiceSpec, agent_id: str = "agent-01", budgets: Any = None
+) -> EffectiveLimits | None:
+    selected = next(
+        (o for o in _claim_overrides(spec.target).get(spec.target, ()) if o.matches(agent_id)), None
+    )
+    if selected is None or (
+        selected.session_minutes is None and selected.session_max_turns is None
+    ):
+        return None
+    return effective_limits(
+        budgets,
+        session_minutes=selected.session_minutes,
+        session_max_turns=selected.session_max_turns,
+    )
+
+
+def _climb_author_argv(
+    spec: ServiceSpec, agent_id: str = "agent-01", limits: EffectiveLimits | None = None
+) -> list[str]:
+    from outerloop.attempt import effective_author_credential
+    from outerloop.author_overrides import overrides
+
+    try:
+        if not overrides():
+            return []
+    except ValueError:
+        _claim_overrides(spec.target)  # Only unaffected targets may bind the fleet author.
+    backend, model = _selected_author(spec, agent_id)
+    credential = effective_author_credential(backend, model)
+    selected_limits = _selected_author_limits(spec, agent_id)
+    limit_argv = []
+    if selected_limits is not None:
+        from dataclasses import asdict
+
+        bound = capped_limits(limits or selected_limits, spec.max_job_minutes)
+        limit_argv = ["--author-limits", json.dumps(asdict(bound))]
+    return [
+        *limit_argv,
+        "--author-bound",
+        "--author-backend",
+        backend,
+        "--model",
+        model,
+        "--key-file",
+        str(credential.key_file),
+        *(
+            ["--author-overridden"]
+            if any(o.matches(agent_id) for o in _claim_overrides(spec.target).get(spec.target, ()))
+            else []
+        ),
+    ]
+
+
+def _author_config_error(spec: ServiceSpec, agent_id: str = "agent-01") -> str:
+    from outerloop.attempt import author_config_error
+    from outerloop.endpoints import EndpointUnavailable, resolve_endpoint
+
+    try:
+        backend, model = _selected_author(spec, agent_id)
+        _, profile = resolve_endpoint(model, backend)
+        if profile:
+            _ = profile.url  # Readiness before claim: a missing address never spends an attempt.
+        return author_config_error(backend, model, spec.image)
+    except EndpointUnavailable as exc:
+        from outerloop.endpoint_wait import unavailable
+
+        unavailable(None, "", exc, 0)
+        return EndpointWaitReason(str(exc))
+    except (ClaudeModelUnset, ValueError) as exc:
+        return str(exc)
+
+
+def _panel_preflight_error(
+    spec: ServiceSpec, agent_id: str = "agent-01", *, record: RunRecord | None = None
+) -> str:
     """Why the climb would die at startup on this panel config ("" when it
     won't): the lens spec, then the key file — each checked with the climb's
-    OWN rules (parse_lenses for the grammar and claude-only backend;
+    OWN rules (resolve_lenses for grammar and author/model inheritance;
     FileTokenProvider for exists/mode-600/non-empty), so preflight and climb
     cannot disagree.
 
@@ -2355,14 +2649,70 @@ def _panel_preflight_error(spec: FollowupSpec) -> str:
     if not spec.panel.strip():
         return ""
     try:
-        from outerloop.attempt import PANEL_KEY_DEFAULT, resolve_author_key_file
+        from outerloop.attempt import (
+            PANEL_KEY_DEFAULT,
+            _shelled_judge_key_path,
+            effective_author_credential,
+        )
+        from outerloop.endpoints import author_model_setting
         from outerloop.github import FileTokenProvider
-        from outerloop.panel import parse_lenses
+        from outerloop.panel import resolve_lenses
 
         try:
-            lenses = parse_lenses(spec.panel)
+            lenses = resolve_lenses(
+                spec.panel,
+                os.environ.get("OUTERLOOP_AUTHOR_BACKEND", "").strip() or "claude",
+                author_model_setting(
+                    os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude",
+                    os.environ.get("OUTERLOOP_AUTHOR_MODEL", "").strip(),
+                ),
+            )
         except ValueError as exc:
             return str(exc)
+        from outerloop.endpoints import resolve_endpoint
+        from outerloop.harness import hermes_resume_max_chars
+
+        if any(backend == "hermes" for _, backend, _ in lenses):
+            hermes_resume_max_chars()
+        author_key_file = ""
+        if record is None:
+            author_backend, author_model = _selected_author(spec, agent_id)
+        else:
+            from outerloop.attempt import fleet_author_model, resume_author
+
+            fleet_backend = os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude"
+            author_backend, author_model, author_key_file = resume_author(
+                record, fleet_author_model(fleet_backend), fleet_backend
+            )
+        author_credential = effective_author_credential(
+            author_backend, author_model, author_key_file
+        )
+        author_path = author_credential.key_file
+        traditional = []
+        for kind, backend, model in lenses:
+            _, profile = resolve_endpoint(model, backend)
+            if profile is None:
+                traditional.append((kind, backend, model))
+                continue
+            profile.validate_runtime(backend)
+            if not spec.image or not Path(spec.image).is_file():
+                return f"a {backend} endpoint panel lens requires a real container image"
+            from outerloop.endpoints import validate_judge_key_file
+
+            validate_judge_key_file(
+                profile,
+                author_path,
+                spec.panel_key_file or PANEL_KEY_DEFAULT,
+            )
+            if profile.key() == author_credential.key():
+                return "a panel judge key is the author key (role separation)"
+            if backend == "hermes":
+                from outerloop.hermes_install import hermes_ready
+
+                repo = os.environ.get("REVIEW_HERMES_REPO", "")
+                if not repo or not hermes_ready(Path(repo).expanduser()):
+                    return "hermes panel needs REVIEW_HERMES_REPO with pinned source and runtime"
+        lenses = tuple(traditional)
         # non-claude (shelled) lenses: mirror the climb's rules exactly, per
         # backend — image required, the judge's OWN key (set + absolute +
         # neither the author's nor the claude panel key + readable), and for
@@ -2379,51 +2729,48 @@ def _panel_preflight_error(spec: FollowupSpec) -> str:
                     f"a {lens_backend} panel lens requires a real container image "
                     f"(OUTERLOOP_IMAGE={spec.image!r})"
                 )
-            key_raw = os.environ.get(key_env, "").strip()
-            if not key_raw:
-                return (
-                    f"a {lens_backend} panel lens needs {key_env} "
-                    "(role separation: the judge's own key, never the author's)"
+            # the key rules live with the climb's own builder, so the paths
+            # cannot drift
+            try:
+                key_path = _shelled_judge_key_path(
+                    backend=lens_backend,
+                    key_file_env=key_env,
+                    author_backend=author_backend,
+                    claude_panel_path=Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser(),
                 )
-            key_path = Path(key_raw).expanduser()
-            if not key_path.is_absolute():
-                return (
-                    f"{lens_backend} panel key path {key_path} is relative; only absolute paths fly"
-                )
-            author = Path(resolve_author_key_file("codex")).expanduser()
-            if key_path.resolve() == author.resolve():
-                return (
-                    f"{lens_backend} panel key file {key_path} is the codex author "
-                    "key (role separation: the judge needs its own key)"
-                )
-            claude_panel = Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
-            if key_path.resolve() == claude_panel.resolve():
-                return (
-                    f"{lens_backend} panel key file {key_path} is the claude panel "
-                    "key file (an anthropic key must never reach another "
-                    "provider's login)"
-                )
-            FileTokenProvider(key_path).token()
+            except ValueError as exc:
+                return str(exc)
+            key = FileTokenProvider(key_path).token()
+            if key_path.resolve() == author_path.resolve() or (
+                key and key == author_credential.key()
+            ):
+                return "a panel judge key is the author key (role separation)"
             if lens_backend == "hermes":
                 repo = os.environ.get("REVIEW_HERMES_REPO", "").strip()
-                # a REAL clone, not merely a directory: the harness executes
-                # run_agent.py from it with the panel key, so an arbitrary or
-                # empty path must fail here, never after a run is claimed
-                if not repo or not (Path(repo).expanduser() / "run_agent.py").is_file():
+                from outerloop.hermes_install import hermes_ready
+
+                if not repo or not hermes_ready(Path(repo).expanduser()):
                     return (
-                        f"a hermes panel lens needs REVIEW_HERMES_REPO pointing at "
-                        f"the pinned clone (run_agent.py not found under {repo!r})"
+                        "a hermes panel lens needs the pinned source and runtime; "
+                        "run bash scripts/install_hermes.sh "
+                        f"{repo or '$REVIEW_HERMES_REPO'}"
                     )
-                from outerloop.role_runner import _HERMES_PROVIDERS
+                from outerloop.role_runner import HERMES_PROVIDERS
 
                 provider = os.environ.get("REVIEW_HERMES_PROVIDER", "").lower() or "openrouter"
-                if provider not in _HERMES_PROVIDERS:
+                if provider not in HERMES_PROVIDERS:
                     return (
                         f"unknown REVIEW_HERMES_PROVIDER {provider!r} "
-                        f"(have: {sorted(_HERMES_PROVIDERS)})"
+                        f"(have: {sorted(HERMES_PROVIDERS)})"
                     )
         if not any(backend == "claude" for _, backend, _ in lenses):
             return ""  # codex-only panel: the claude key checks below don't apply
+        if any(not model for _, backend, model in lenses if backend == "claude"):
+            # a claude lens without its own model runs the deployment's
+            try:
+                default_claude_model()
+            except ClaudeModelUnset as exc:
+                return str(exc)
         path = Path(spec.panel_key_file or PANEL_KEY_DEFAULT).expanduser()
         if not path.is_absolute():
             # the climb runs from a flight directory, not the tick's cwd — a
@@ -2433,8 +2780,7 @@ def _panel_preflight_error(spec: FollowupSpec) -> str:
         # (claude vs codex keys coexist), config-driven like the climb itself — so
         # the role-separation check compares the panel key against the RIGHT author
         # key, and a codex run is never judged by a stray Claude key.
-        fleet_backend = os.environ.get("OUTERLOOP_AUTHOR_BACKEND") or "claude"
-        author = Path(resolve_author_key_file(fleet_backend))
+        author = author_path
         if not author.is_absolute():
             # same rule as the panel key: the climb resolves paths from a
             # flight directory, so a relative author path both misconfigures
@@ -2450,7 +2796,9 @@ def _panel_preflight_error(spec: FollowupSpec) -> str:
         # time, so the preflight and the climb agree.
         from outerloop.role_runner import role_key
 
-        role_key(path)
+        key = role_key(path)
+        if key and key == author_credential.key():
+            return "a panel judge key is the author key (role separation)"
         return ""
     except Exception as exc:
         # never raises: an unexpected failure (partial deploy, ELOOP, unset
@@ -2459,7 +2807,7 @@ def _panel_preflight_error(spec: FollowupSpec) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
-def _attempt_job_minutes(spec: FollowupSpec, limits: EffectiveLimits) -> int:
+def _attempt_job_minutes(spec: ServiceSpec, limits: EffectiveLimits) -> int:
     """The submitted climb walltime: contract budget + panel allowance,
     clamped at the partition cap. Warns when the cap cuts below the session
     budget — the self-deadline would then fire before the author's own
@@ -2488,7 +2836,7 @@ def _attempt_job_minutes(spec: FollowupSpec, limits: EffectiveLimits) -> int:
     return job
 
 
-def _panel_job_minutes(spec: FollowupSpec, limits: EffectiveLimits) -> int:
+def _panel_job_minutes(spec: ServiceSpec, limits: EffectiveLimits) -> int:
     """Extra walltime the panel needs, ADDED to the contract-clamped job
     budget: the contract's knobs cap the AUTHOR's spend and their ceilings
     deliberately cannot raise ours (limits.py), so the panel — the
@@ -2515,14 +2863,12 @@ def _climb_limit_argv(limits: EffectiveLimits, job_minutes: int) -> list[str]:
     CAPPED job with the same rule limits.effective_limits applies to
     contract values — better a short session that ends cleanly than a full
     one the self-deadline kills mid-flight."""
-    from outerloop.limits import ATTEMPT_OVERHEAD_MINUTES, SESSION_MINUTES_FLOOR
-
-    session = min(limits.session_minutes, job_minutes - ATTEMPT_OVERHEAD_MINUTES)
+    session = capped_limits(limits, job_minutes).session_minutes
     return [
         "--max-turns",
         str(limits.session_max_turns),
         "--session-minutes",
-        str(max(SESSION_MINUTES_FLOOR, session)),
+        str(session),
         "--job-minutes",
         str(job_minutes),
     ]
@@ -2531,12 +2877,13 @@ def _climb_limit_argv(limits: EffectiveLimits, job_minutes: int) -> list[str]:
 def service_self_initiated(
     root: Path,
     compute: Compute,
-    spec: FollowupSpec,
+    spec: ServiceSpec,
     contract: Any,
     now: float,
     limits: EffectiveLimits | None = None,
     dry_run: bool = False,
     records: list[RunRecord] | None = None,
+    author_errors: set[str] | None = None,
 ) -> tuple[str, str] | None:
     """The default background mode: when nothing else needs doing, climb the
     least-recently-attempted benchmark.
@@ -2545,6 +2892,7 @@ def service_self_initiated(
     `compute.submit` and the climb job writing its run record — without it,
     every tick during Slurm queue latency would launch a duplicate climb.
     """
+    author_errors = author_errors if author_errors is not None else set()
     limits = limits if limits is not None else effective_limits(getattr(contract, "budgets", None))
     paused = outage_active(root, now, role="solver")
     if paused:
@@ -2553,7 +2901,7 @@ def service_self_initiated(
     try:
         if records is None:
             records = list_runs(root)
-        width = _attempt_width(contract)
+        width = attempt_width(root, spec.target, _attempt_width(contract))
         # WIDTH: every live pending marker occupies a slot; landed ones
         # clear; dead ones become per-benchmark tombstones and free theirs.
         occupied: set[str] = set()
@@ -2566,12 +2914,7 @@ def service_self_initiated(
             # matching on target+time alone would let a sibling slot's
             # record clear a still-live marker (terra #173). A legacy
             # marker names no slot, so it keeps the lax match.
-            landed = any(
-                r.target == spec.target
-                and r.created >= submitted_at - 60
-                and (not marker_agent or r.agent_id == marker_agent)
-                for r in records
-            )
+            landed = _pending_landed(pending, records, spec.target)
             expired = now - submitted_at > PENDING_TTL_S
             if landed:
                 clear_pending(root, spec.target, marker_agent)
@@ -2584,7 +2927,7 @@ def service_self_initiated(
                 # breaks ties when Slurm can't say.
                 occupied.add(agent)
                 live_pendings.append((str(pending.get("benchmark", "")), submitted_at))
-                if not marker_agent:
+                if not _SLOT_AGENT_RE.fullmatch(marker_agent):
                     # a live un-slotted marker is another lane's submit
                     # (steward/intake, or a pre-width deploy): serial
                     nonslot_busy = True
@@ -2594,10 +2937,10 @@ def service_self_initiated(
                 # this — terra #172 r3), then free the slot.
                 write_tombstone(root, spec.target, str(pending.get("benchmark", "")), submitted_at)
                 clear_pending(root, spec.target, marker_agent)
-        stranded_cutoff = now - STRANDED_IMPLEMENTING_S
+        stranded_cutoff = now - STRANDED_RUNNING_S
         for r in records:
             if r.target == spec.target and r.state != ENDED:
-                if r.state == IMPLEMENTING and max(r.updated, r.created) <= stranded_cutoff:
+                if r.state == RUNNING and max(r.updated, r.created) <= stranded_cutoff:
                     continue  # stranded: pick ignores it, so must occupancy
                 occupied.add(r.agent_id)
                 if not _SLOT_AGENT_RE.fullmatch(r.agent_id):
@@ -2610,6 +2953,9 @@ def service_self_initiated(
         if len(occupied) >= width:
             return None
         slot_agent = _free_agent_slot(occupied, width)
+        while slot_agent is not None and _claim_author_error(spec, slot_agent, author_errors):
+            occupied.add(slot_agent)
+            slot_agent = _free_agent_slot(occupied, width)
         if slot_agent is None:
             return None
         dead_attempts = read_tombstones(root, spec.target, contract, now)
@@ -2632,16 +2978,7 @@ def service_self_initiated(
         if lane_error := _gpu_lane_error(contract, benchmark, spec):
             log.error("attempt on %s not launched: %s", benchmark, lane_error)
             return None
-        author_error = _author_config_error(spec)
-        if author_error:
-            log.error(
-                "climb on %s not launched: author misconfigured — %s "
-                "(fix OUTERLOOP_AUTHOR_BACKEND/_MODEL)",
-                benchmark,
-                author_error,
-            )
-            return None
-        panel_error = _panel_preflight_error(spec)
+        panel_error = _panel_preflight_error(spec, slot_agent)
         if panel_error:
             log.error(
                 "climb on %s not launched: panel misconfigured — %s "
@@ -2652,6 +2989,7 @@ def service_self_initiated(
             return None
         if dry_run:
             return (benchmark, "dry-run")
+        limits = _selected_author_limits(spec, slot_agent, contract.budgets) or limits
         job_minutes = _attempt_job_minutes(spec, limits)
         argv = [
             *_interpreter(spec.home),
@@ -2668,16 +3006,20 @@ def service_self_initiated(
             slot_agent,
             *_climb_limit_argv(limits, job_minutes),
             *_climb_panel_argv(spec),
+            *_climb_author_argv(spec, slot_agent, limits),
         ]
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
-        # config-driven author: climb resolves the author backend/model/key from
-        # OUTERLOOP_AUTHOR_* env (inherited by the job), so the tick threads
-        # neither the backend nor its key — a new backend needs zero tick change.
-        job_id = compute.submit(
+        # With overrides configured the launch args bind the effective author;
+        # otherwise preserve the existing fleet-driven job command.
+        job_id = submit(
+            root,
+            spec.target,
+            compute,
             JobSpec(
                 job_name=f"climb-{benchmark}-{slot_agent}"[:60],
                 account=spec.account,
+                qos=spec.qos,
                 partition=spec.job_partition or spec.partition,
                 time_minutes=job_minutes,
                 command=_flight_command(
@@ -2685,7 +3027,7 @@ def service_self_initiated(
                 ),
                 cpus=4,
                 mem="8G",
-            )
+            ),
         )
         write_pending(root, spec.target, benchmark, job_id, now, agent=slot_agent)
         log.info("self-initiated climb on %s: job %s", benchmark, job_id)
@@ -2699,7 +3041,7 @@ def service_steward(
     root: Path,
     github: Any,
     compute: Compute,
-    spec: FollowupSpec,
+    spec: ServiceSpec,
     now: float,
     contract: Any,
     limits: EffectiveLimits,
@@ -2714,6 +3056,8 @@ def service_steward(
 
     target = spec.target
     if not target or not spec.steward_key_file:
+        return None
+    if attempt_width(root, target, _attempt_width(contract)) == 0:
         return None
     if getattr(contract, "steward", None) is None:
         return None
@@ -2741,15 +3085,9 @@ def service_steward(
         # record yet must block a stewardship the same way an active run
         # does. Liveness first, TTL only breaks unknown ties (queue wait
         # can outlive the TTL).
-        for slot, pending in list_pendings(root, target):
-            marker_agent = "" if not pending.get("agent_id") else slot
+        for _, pending in list_pendings(root, target):
             submitted_at = float(pending.get("submitted_at", 0.0))
-            landed = any(
-                r.target == target
-                and r.created >= submitted_at - 60
-                and (not marker_agent or r.agent_id == marker_agent)
-                for r in records
-            )
+            landed = _pending_landed(pending, records, target)
             expired = now - submitted_at > PENDING_TTL_S
             alive = _holder_alive(compute, str(pending.get("job_id", "")))
             if not landed and (alive is True or (not expired and alive is not False)):
@@ -2767,6 +3105,11 @@ def service_steward(
                 "and the steward job has no GPU allocation",
                 task.benchmark,
             )
+            return None
+        try:
+            default_claude_model()  # the steward runs the claude backend
+        except ClaudeModelUnset as exc:
+            log.error("stewardship on %s not launched: %s", task.benchmark, exc)
             return None
         if dry_run:
             return (f"steward-issue-{task.number}", "dry-run")
@@ -2805,16 +3148,20 @@ def service_steward(
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
         try:
-            job_id = compute.submit(
+            job_id = submit(
+                root,
+                target,
+                compute,
                 JobSpec(
                     job_name=f"steward-issue-{task.number}",
                     account=spec.account,
+                    qos=spec.qos,
                     partition=spec.job_partition or spec.partition,
                     time_minutes=min(limits.attempt_job_minutes, spec.max_job_minutes),
                     command=_flight_command(spec.home, f"steward-issue-{task.number}", now, argv),
                     cpus=4,
                     mem="8G",
-                )
+                ),
             )
         except Exception:
             # release the claim: a claim with no job behind it would orphan
@@ -2841,11 +3188,13 @@ def service_intake(
     root: Path,
     github: Any,
     compute: Compute,
-    spec: FollowupSpec,
+    spec: ServiceSpec,
     now: float,
     contract: Any = None,
     limits: EffectiveLimits | None = None,
     dry_run: bool = False,
+    records: list[RunRecord] | None = None,
+    author_errors: set[str] | None = None,
 ) -> tuple[str, str] | None:
     """The requested lane: claim at most ONE qualifying issue per tick and
     submit a climb job for it. The claim comment (posted by the climb job
@@ -2868,6 +3217,20 @@ def service_intake(
             if contract_raw is None:
                 return None
             contract = load_contract(contract_raw, target)
+        operator_width = read_limits(root).value(target, "max_active_attempts")
+        if operator_width is not None:
+            if records is None:
+                records = list_runs(root)
+            active_attempts = sum(r.target == target and r.state != ENDED for r in records)
+            for _, pending in list_pendings(root, target):
+                if _pending_landed(pending, records, target):
+                    continue
+                alive = _holder_alive(compute, str(pending.get("job_id", "")))
+                expired = now - float(pending["submitted_at"]) > PENDING_TTL_S
+                if alive is True or (not expired and alive is not False):
+                    active_attempts += 1
+            if active_attempts >= min(operator_width, _attempt_width(contract)):
+                return None
         limits = limits if limits is not None else effective_limits(contract.budgets)
         task = pick_issue(github, target, contract, spec.bot_login)
         if task is None:
@@ -2886,14 +3249,7 @@ def service_intake(
         if lane_error := _gpu_lane_error(contract, task.benchmark, spec):
             log.error("attempt on %s not launched: %s", task.benchmark, lane_error)
             return None
-        author_error = _author_config_error(spec)
-        if author_error:
-            log.error(
-                "issue #%d not claimed: author misconfigured — %s "
-                "(fix OUTERLOOP_AUTHOR_BACKEND/_MODEL)",
-                task.number,
-                author_error,
-            )
+        if _claim_author_error(spec, "agent-01", author_errors):
             return None
         panel_error = _panel_preflight_error(spec)
         if panel_error:
@@ -2906,7 +3262,9 @@ def service_intake(
             return None
         if dry_run:
             return (f"issue-{task.number}", "dry-run")
+        limits = _selected_author_limits(spec, budgets=contract.budgets) or limits
         job_minutes = _attempt_job_minutes(spec, limits)
+        author_argv = _climb_author_argv(spec, limits=limits)
         # claim BEFORE submit: Slurm queueing can take minutes, and the next
         # tick must not re-claim the same issue in that window
         from outerloop.intake import CLAIM_MARKER, MAX_INTAKE_ATTEMPTS, RELEASE_MARKER
@@ -2937,22 +3295,26 @@ def service_intake(
             hypothesis_b64,
             *_climb_limit_argv(limits, job_minutes),
             *_climb_panel_argv(spec),
+            *author_argv,
         ]
         if spec.pat_file:
             argv += ["--pat-file", spec.pat_file]
-        # config-driven author: climb resolves the author key from the
-        # OUTERLOOP_AUTHOR_* env by backend; the tick does not thread it.
+        # The selected author was bound before claiming the issue.
         try:
-            job_id = compute.submit(
+            job_id = submit(
+                root,
+                target,
+                compute,
                 JobSpec(
                     job_name=f"climb-issue-{task.number}",
                     account=spec.account,
+                    qos=spec.qos,
                     partition=spec.job_partition or spec.partition,
                     time_minutes=job_minutes,
                     command=_flight_command(spec.home, f"climb-issue-{task.number}", now, argv),
                     cpus=4,
                     mem="8G",
-                )
+                ),
             )
         except Exception:
             # the claim is already posted and pick_issue skips claimed
@@ -2968,6 +3330,7 @@ def service_intake(
                     f"it for a human).",
                 )
             raise
+        write_pending(root, target, task.benchmark, job_id, now, agent=f"intake-{task.number}")
         log.info("issue #%s claimed for climb job %s", task.number, job_id)
         return (f"issue-{task.number}", job_id)
     except Exception as exc:  # intake must not break the tick
@@ -2996,11 +3359,14 @@ class JobWakeDispatcher:
     it completes)."""
 
     compute: Compute
-    spec: FollowupSpec
+    spec: ServiceSpec
     now: float
     wake_minutes: int = 20
 
     def dispatch(self, record: RunRecord, reason: str) -> str:
+        from outerloop.rebind import requested
+
+        rebinding = requested(self.spec.run_root, record.run_id)
         argv = [
             *_interpreter(self.spec.home),
             "-m",
@@ -3023,9 +3389,19 @@ class JobWakeDispatcher:
             *_climb_panel_argv(self.spec),
             # session budget for the depth-axis REVISION (a blocking panel
             # finding wakes the author to revise).
-            "--max-turns",
-            str(self.spec.max_turns),
+            *(
+                ["--max-turns", str(self.spec.max_turns)]
+                if bound_limits(record.author_limits) is None
+                else []
+            ),
         ]
+        panel_skip = (
+            _panel_preflight_error(self.spec, record=record)
+            if self.spec.panel.strip() and not rebinding
+            else ""
+        )
+        if panel_skip:
+            argv += ["--panel-skip", panel_skip]
         # An AUTHOR-SLEEP wake resumes a FULL author session (not the short
         # read-decide a candidate wake runs), so the Slurm job must fit that
         # session or walltime kills the resumed session mid-run and the run just
@@ -3036,7 +3412,28 @@ class JobWakeDispatcher:
         from outerloop.limits import ATTEMPT_OVERHEAD_MINUTES
         from outerloop.roles import author_spec
 
-        if record.stage.get("phase") == "author-sleep":
+        limits = bound_limits(record.author_limits)
+        if rebinding:
+            # The wake reports invalid selections and keeps their requests.
+            with contextlib.suppress(ValueError):
+                limits = _selected_author_limits(self.spec, record.agent_id) or effective_limits()
+        if limits is not None:
+            if record.pr_url or record.stage.get("phase") == "author-sleep":
+                job_minutes = _attempt_job_minutes(self.spec, limits)
+            else:
+                from outerloop.panel import panel_read_minutes
+
+                allowance = panel_read_minutes(self.spec.panel)
+                job_minutes = min(
+                    self.wake_minutes + allowance + limits.session_minutes,
+                    self.spec.max_job_minutes,
+                )
+            argv += _climb_limit_argv(limits, job_minutes)
+        elif record.pr_url:
+            job_minutes = min(self.spec.time_minutes, self.spec.max_job_minutes)
+            session_minutes = max(1, job_minutes - ATTEMPT_OVERHEAD_MINUTES)
+            argv += ["--session-minutes", str(session_minutes)]
+        elif record.stage.get("phase") == "author-sleep":
             session_minutes = author_spec().budget.walltime_s // 60
             argv += ["--session-minutes", str(session_minutes)]
             job_minutes = min(session_minutes + ATTEMPT_OVERHEAD_MINUTES, self.spec.max_job_minutes)
@@ -3047,23 +3444,27 @@ class JobWakeDispatcher:
         # config-driven author: `climb --resume` resolves the author key from the
         # PARKED RUN's backend (persisted on its record) inside climb.main — the
         # tick does not thread the key, so a fleet flip picks the right one.
-        name = f"wake-{record.run_id}"[:60]
+        name = run_job_name(record.run_id, prefix="wake-")
         afterany = str(record.stage.get("afterany", ""))
-        return self.compute.submit(
+        return submit(
+            self.spec.run_root,
+            record.target,
+            self.compute,
             JobSpec(
                 job_name=name,
                 account=self.spec.account,
+                qos=self.spec.qos,
                 partition=self.spec.job_partition or self.spec.partition,
                 time_minutes=job_minutes,
                 command=_flight_command(self.spec.home, name, self.now, argv),
                 dependency=afterany,
                 cpus=2,
                 mem="4G",
-            )
+            ),
         )
 
 
-def _wake_panel_minutes(spec: FollowupSpec) -> int:
+def _wake_panel_minutes(spec: ServiceSpec) -> int:
     """Extra wake walltime for the verification panel it now runs — the base
     `wake_minutes` covers only reading results + opening the PR. Budgeted for
     the worst case a single wake reaches: one read per lens PLUS one revision
@@ -3080,27 +3481,28 @@ def _wake_panel_minutes(spec: FollowupSpec) -> int:
 
 
 def _wake_dispatcher_from_env(
-    compute: Compute, followup_spec: FollowupSpec | None, now: float, root: Path
+    compute: Compute, service_spec: ServiceSpec | None, now: float, root: Path
 ) -> tuple[WakeDispatcher, bool]:
-    """The wake delivery for this tick, behind an EXPLICIT on-switch so the
-    dispatched-wake path lands DARK. Returns `(dispatcher, live)`:
+    """The wake delivery for this tick. Returns `(dispatcher, live)`:
 
-    * armed (the `OUTERLOOP_DISPATCH_WAKE` env var OR a `<root>/DISPATCH_WAKE`
-      sentinel file) AND the chain env carries what a wake job needs -> the real
-      `JobWakeDispatcher` and a LIVE sweep;
+    * armed (the default; the operator disarms with OUTERLOOP_DISPATCH_WAKE=0
+      or a `<root>/DISARM_WAKE` sentinel) AND the chain env carries what a wake
+      job needs -> the real `JobWakeDispatcher` and a LIVE sweep;
     * otherwise -> the `LoggingDispatcher` and a DRY sweep.
 
-    The sentinel mirrors PAUSE: an operator arms/disarms with a touch/rm, no
-    chain restart. So dispatched climbing is turned on deliberately, and a
-    half-configured environment fails safe to dry rather than to a wake job
-    that cannot run."""
+    A half-configured environment fails safe to dry rather than to a wake job
+    that cannot run; the sentinel mirrors PAUSE (touch/rm, no chain restart)."""
     if not dispatch_wake_armed(root):
+        log.info(
+            "dispatched wakes are OFF (OUTERLOOP_DISPATCH_WAKE or <root>/DISARM_WAKE): "
+            "the waiting-run sweep is dry, parked runs wait"
+        )
         return LoggingDispatcher(), False
-    if followup_spec is None:
-        log.warning("dispatch-wake armed but the chain env is incomplete; wake stays dry")
+    if service_spec is None:
+        log.warning("the chain env is incomplete; the waiting-run sweep stays dry")
         return LoggingDispatcher(), False
-    log.info("dispatched-wake ON: the waiting-run sweep delivers real wakes this tick")
-    return JobWakeDispatcher(compute, followup_spec, now), True
+    log.info("dispatched wakes ON: the waiting-run sweep delivers real wakes this tick")
+    return JobWakeDispatcher(compute, service_spec, now), True
 
 
 def _max_job_minutes_from_env() -> int:
@@ -3187,23 +3589,29 @@ def _min_tick_s_from_env() -> float:
 
 
 def _default_image() -> str:
-    """~/outerloop-images/agent-py312.sif, or the pre-rename ~/autoresearch-images
-    path when only that one exists. The fallback is dropped in the release after
-    0.1."""
-    new = os.path.expanduser("~/outerloop-images/agent-py312.sif")
-    old = os.path.expanduser("~/autoresearch-images/agent-py312.sif")
-    return old if (not os.path.isfile(new) and os.path.isfile(old)) else new
+    """The default agent image path."""
+    return os.path.expanduser("~/outerloop-images/agent-py312.sif")
 
 
-def _followup_spec_from_env(root: Path) -> tuple[Any, FollowupSpec | None]:
-    """GitHub client + FollowupSpec from the chain environment, or Nones when
-    the environment is incomplete (the tick then runs without in-review
+def startup_image() -> str:
+    """The image sessions run with: OUTERLOOP_IMAGE, else the default. Startup
+    validation uses the same value, so it can never refuse what the tick would run."""
+    return os.environ.get("OUTERLOOP_IMAGE", _default_image())
+
+
+def _service_spec_from_env(
+    root: Path, *, gpu_lanes: dict[str, GpuLane] | None = None
+) -> tuple[Any, ServiceSpec | None]:
+    """GitHub client + ServiceSpec from the chain environment, or Nones when
+    the environment is incomplete (the tick then runs without parked
     servicing, and logs what is absent)."""
+    lanes = gpu_lanes_from_env() if gpu_lanes is None else gpu_lanes
     pat_file = os.environ.get("OUTERLOOP_PAT_FILE", "")
     app_file = os.environ.get("OUTERLOOP_GITHUB_APP_FILE", "")
     account = os.environ.get("OUTERLOOP_ACCOUNT", "")
     partition = os.environ.get("OUTERLOOP_PARTITION", "")
-    image = os.environ.get("OUTERLOOP_IMAGE", _default_image())
+    qos = os.environ.get("OUTERLOOP_QOS", "")
+    image = startup_image()
     home = os.environ.get("OUTERLOOP_HOME", "")
     # Account and partition are optional on Slurm: empty ones leave the billing
     # association and the partition to Slurm's defaults, as `start` already
@@ -3227,7 +3635,7 @@ def _followup_spec_from_env(root: Path) -> tuple[Any, FollowupSpec | None]:
             log.warning(
                 "local mode: no container image at %s; sessions run under the harness "
                 "sandbox and evaluations run bare on this machine; the panel is %s; a "
-                "codex author needs the image (docs/install.md, local mode)",
+                "codex or hermes author needs the image (docs/install.md, local mode)",
                 image,
                 "on by OUTERLOOP_PANEL_UNCONTAINED=1"
                 if os.environ.get("OUTERLOOP_PANEL_UNCONTAINED") == "1"
@@ -3244,8 +3652,9 @@ def _followup_spec_from_env(root: Path) -> tuple[Any, FollowupSpec | None]:
 
         try:
             github = GitHubClient(auth=resolve_bot_auth(pat_file, app_file))
-            followup_spec = FollowupSpec(
+            service_spec = ServiceSpec(
                 account=account,
+                qos=qos,
                 partition=partition,
                 run_root=root,
                 image=image,
@@ -3259,11 +3668,13 @@ def _followup_spec_from_env(root: Path) -> tuple[Any, FollowupSpec | None]:
                 job_partition=os.environ.get("OUTERLOOP_JOB_PARTITION", ""),
                 gpu_partition=os.environ.get("OUTERLOOP_GPU_PARTITION", ""),
                 gpu_account=os.environ.get("OUTERLOOP_GPU_ACCOUNT", ""),
+                gpu_lanes=lanes,
                 max_job_minutes=_max_job_minutes_from_env(),
+                has_lanes=compute_from_env().has_lanes,
             )
-            return github, followup_spec
+            return github, service_spec
         except Exception as exc:
-            log.warning("in-review servicing disabled: %s", exc)
+            log.warning("parked servicing disabled: %s", exc)
             return None, None
     absent = [
         name
@@ -3277,7 +3688,7 @@ def _followup_spec_from_env(root: Path) -> tuple[Any, FollowupSpec | None]:
     ]
     if not image_ok:
         absent.append(f"image:{image}")
-    log.info("in-review servicing disabled (missing: %s)", ", ".join(absent))
+    log.info("parked servicing disabled (missing: %s)", ", ".join(absent))
     return None, None
 
 
@@ -3290,6 +3701,8 @@ def _loop_cadence_s(cadence_min: float) -> float:
 
 def main() -> int:
     import argparse
+    import signal
+    import socket
     import time
 
     parser = argparse.ArgumentParser(
@@ -3320,8 +3733,7 @@ def main() -> int:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="run a tick every cadence in the foreground — the local-mode "
-        "chain (Slurm deployments use tick_chain.sbatch instead)",
+        help="run a tick every cadence in the foreground (local or login tick host)",
     )
     parser.add_argument(
         "--cadence-min",
@@ -3331,6 +3743,10 @@ def main() -> int:
         "OUTERLOOP_CADENCE_MIN via the chain's own parser (default 30)",
     )
     args = parser.parse_args()
+    try:
+        gpu_lanes = gpu_lanes_from_env()
+    except ValueError as exc:
+        parser.error(str(exc))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     args.root.mkdir(parents=True, exist_ok=True)
@@ -3343,24 +3759,23 @@ def main() -> int:
     if os.environ.get("OUTERLOOP_ROOT", "") != str(args.root.resolve()):
         os.environ["OUTERLOOP_ROOT"] = str(args.root.resolve())
     # In-review servicing is LIVE when credentials + image are available in the
-    # chain environment. The waiting-run sweep delivers real wakes only when the
-    # operator arms it — the OUTERLOOP_DISPATCH_WAKE env var or a
-    # <root>/DISPATCH_WAKE sentinel — and the env is complete; by default it
-    # stays dry with the LoggingDispatcher — dispatched climbing lands DARK.
+    # chain environment. The waiting-run sweep delivers real wakes whenever the
+    # env is complete, unless the operator disarmed it (OUTERLOOP_DISPATCH_WAKE=0
+    # or a <root>/DISARM_WAKE sentinel); then it stays dry with the LoggingDispatcher.
     # ONE compute for the process: LocalCompute remembers its jobs' states
     # in memory, so a --loop deployment must not discard them between ticks.
     compute = compute_from_env()
 
     def run_once() -> None:
-        github, followup_spec = _followup_spec_from_env(args.root)
+        github, service_spec = _service_spec_from_env(args.root, gpu_lanes=gpu_lanes)
         now = time.time()
-        dispatcher, wake_live = _wake_dispatcher_from_env(compute, followup_spec, now, args.root)
+        dispatcher, wake_live = _wake_dispatcher_from_env(compute, service_spec, now, args.root)
         # parks arm their own wake from this recipe; without it the sweep delivers.
         # Local compute never arms: jobs are synchronous, so an afterany wake's
         # dependencies are terminal before submit returns — the next loop
         # iteration's sweep delivers every wake instead (wake latency = cadence).
-        if wake_live and followup_spec is not None and not isinstance(compute, LocalCompute):
-            write_wake_spec(args.root, followup_spec)
+        if wake_live and service_spec is not None and not isinstance(compute, LocalCompute):
+            write_wake_spec(args.root, service_spec)
         else:
             remove_wake_spec(args.root)
 
@@ -3373,8 +3788,8 @@ def main() -> int:
             lease_ttl_s=args.lease_ttl_s,
             dry_run=not wake_live,
             github=github,
-            followup_spec=followup_spec,
-            followup_dry_run=False,
+            service_spec=service_spec,
+            service_dry_run=False,
             min_free_bytes=int(args.min_free_gb * 1024**3),
             min_tick_s=_min_tick_s_from_env(),
         )
@@ -3383,7 +3798,7 @@ def main() -> int:
         mark_tick_complete(args.root, report, time.time())
         log.info(
             "tick done: paused=%s coalesced=%s swept=%d woken=%d deferred=%d reaped=%d stuck=%d "
-            "impl_ended=%s review_ended=%s followups=%s intake=%s self_initiated=%s steward=%s "
+            "impl_ended=%s review_ended=%s intake=%s self_initiated=%s steward=%s "
             "disk=%s launch_blocked=%s shed=%d",
             report.paused,
             report.coalesced,
@@ -3392,9 +3807,8 @@ def main() -> int:
             len(report.deferred),
             len(report.reaped_leases),
             len(report.stuck),
-            report.implementing_ended or "-",
+            report.running_ended or "-",
             report.review_ended,
-            report.followups_submitted,
             report.intake,
             report.self_initiated,
             report.steward,
@@ -3403,20 +3817,60 @@ def main() -> int:
             len(report.shed),
         )
 
-    if not args.loop:
-        run_once()
-        return 0
-    # The local-mode chain: same stateless tick, a foreground loop instead of
-    # sbatch successors. Records on disk carry all state, so killing and
-    # restarting the loop resumes exactly like the Slurm chain would.
     cadence_s = _loop_cadence_s(args.cadence_min)
-    while True:
-        started = time.time()
-        try:
+    lease = None
+    holder = f"{socket.gethostname()}:{os.getpid()}"
+    previous_term = None
+
+    def stop(signum: int, frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    try:
+        # every foreground loop holds the root's tick lease; a resident tick
+        # runs once under the scheduler's singleton and takes none
+        if args.loop:
+            # the handler goes in first: a SIGTERM between taking the lease
+            # and installing it would leave the lease to its TTL
+            previous_term = signal.signal(signal.SIGTERM, stop)
+            try:
+                lease = acquire_tick_lease(args.root, holder, time.time(), 3 * cadence_s)
+            except RuntimeError as exc:
+                log.error("%s", exc)
+                return 2
+            if not local_mode():
+                # a login loop against Slurm: a resident chain queued between
+                # start's check and this lease owns the root (its own start
+                # re-checks the lease after submitting, so one side always yields)
+                from outerloop.cli import _resident_jobs
+
+                resident = _resident_jobs()
+                if resident is None or resident:
+                    log.error(
+                        "a resident tick is %s; this loop stops",
+                        f"queued or running (job {resident[0]})"
+                        if resident
+                        else "unknown (squeue failed)",
+                    )
+                    return 2
+        if not args.loop:
             run_once()
-        except Exception:
-            log.exception("tick failed; the loop continues")
-        time.sleep(max(0.0, cadence_s - (time.time() - started)))
+            return 0
+        while True:
+            started = time.time()
+            if lease is not None:
+                acquire_tick_lease(args.root, holder, started, 3 * cadence_s, lease)
+            try:
+                run_once()
+            except Exception:
+                log.exception("tick failed; the loop continues")
+            if lease is not None:
+                acquire_tick_lease(args.root, holder, time.time(), 3 * cadence_s, lease)
+            time.sleep(max(0.0, cadence_s - (time.time() - started)))
+    finally:
+        if lease is not None:
+            release_tick_lease(lease, holder)
+        if previous_term is not None:
+            signal.signal(signal.SIGTERM, previous_term)
 
 
 if __name__ == "__main__":

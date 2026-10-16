@@ -59,3 +59,54 @@ def _configured_bot_login(monkeypatch: pytest.MonkeyPatch) -> None:
     they unset it themselves to exercise the fail-closed paths."""
     if "OUTERLOOP_BOT_LOGIN" not in os.environ:
         monkeypatch.setenv("OUTERLOOP_BOT_LOGIN", "agentic-learning-bot")
+
+
+@pytest.fixture(autouse=True)
+def _configured_claude_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OUTERLOOP_CLAUDE_MODEL is a required deployment setting with no code
+    default; tests run as a configured deployment unless they unset it to
+    exercise the refusal paths."""
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", "claude-test-model")
+
+
+@pytest.fixture(autouse=True)
+def _no_tick_lease_settle(monkeypatch):
+    """The settle read-back after a fresh tick lease is a one-second sleep in
+    production; tests that want it pass settle_s explicitly."""
+    monkeypatch.setattr("outerloop.runstate.TICK_LEASE_SETTLE_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_result_settle(monkeypatch):
+    """The measurer waits up to RESULT_SETTLE_S for a finished job's files;
+    tests that want the wait set it explicitly."""
+    monkeypatch.setattr("outerloop.measure.RESULT_SETTLE_S", 0.0)
+    monkeypatch.setattr("outerloop.measure.RESULT_POLL_S", 0.0)
+
+
+@pytest.fixture
+def rc1_record(tmp_path):
+    """Install unmodified output of the v0.2.1 record writer."""
+    from pathlib import Path
+
+    source = Path(__file__).parent / "fixtures/rc1_v021"
+
+    def install(kind="open"):
+        directory = tmp_path / "runs/one"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "state.json").write_bytes((source / f"{kind}.json").read_bytes())
+        return directory, source
+
+    return install
+
+
+@pytest.fixture
+def codex_host(tmp_path, monkeypatch):
+    """Supply the companion executable for tests with a fake Codex process."""
+    from outerloop.harness import CodexHarness
+
+    host = tmp_path / "codex-code-mode-host"
+    host.write_text("#!/bin/sh\nexit 0\n")
+    host.chmod(0o755)
+    monkeypatch.setattr(CodexHarness, "_code_mode_host", lambda self: host)
+    return host

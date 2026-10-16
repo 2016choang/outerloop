@@ -8,7 +8,8 @@ review.
 A background agent that co-develops the lab's benchmark-bearing repos (jepa-agent,
 egolearn): picks work from their roadmaps and benchmark gaps, implements on a
 branch, runs GPU experiments, opens a PR when a metric improves, reviews PRs, and
-reports weekly. Humans keep the merge button.
+reports weekly. Humans keep the merge button unless a repo owner opts in to
+`merge: auto` in the contract.
 
 ## Decisions
 
@@ -35,7 +36,7 @@ scope:
 roadmap: docs/roadmap.md
 ```
 
-The schema lives here (`autoresearch.contract`). The loader hard-codes invariants
+The schema lives here (`outerloop.contract`). The loader hard-codes invariants
 no YAML can override: `.github/`, the contract file itself, and the roadmap are
 always forbidden write paths; the contract is read from the default branch only;
 **autoresearch is never a valid target of itself**.
@@ -58,9 +59,9 @@ needs inbound access is a human with the runbook.
   drift), submitted with retry/backoff. One failed submit doesn't kill the loop;
   two consecutive failures leave the watchdog alert as the signal.
   Under scheduler congestion this per-cadence chain is fragile (a moved
-  successor can stall it); **design/resident-tick.md** proposes a six-hour
-  looping job with a single `afterany:self` successor instead — four
-  scheduling events a day instead of 48.
+  successor can stall it), so Slurm deployments run the resident tick
+  (**design/resident-tick.md**): a six-hour looping job with a single
+  `afterany:self` successor, four scheduling events a day instead of 48.
 - **Tick order**: (1) read the pause sentinel on the state branch — if set, exit
   *without resubmitting*; (2) acquire the lease by compare-and-swap commit to the
   state branch — a non-fast-forward push means another tick is alive: exit;
@@ -97,8 +98,9 @@ needs inbound access is a human with the runbook.
 
 ## Task granularity
 
-A task is **one hypothesis, one PR** — but its evaluation scope follows the
-target's artifact structure, declared in the contract:
+A task's evaluation scope follows the target's artifact structure, declared
+in the contract (how an author scopes ideas — the former one-idea-per-PR
+rule — is guidance now, not a mechanism):
 
 - *Independent solvers* (the pilot): scope = a single benchmark; one PR moves
   one metric; solvers never share code (duplication is fine in throwaway code).
@@ -109,13 +111,30 @@ target's artifact structure, declared in the contract:
   contracts may declare suite aggregates (e.g. mean success rate) and
   no-regression floors.
 
-What stays absolute regardless of scope: one hypothesis per PR (attributable
-diffs), full-scope reporting, and **cross-target separation** — separate clones,
+Scope checks compare the full candidate tree with its merge-base against the fetched
+base tip, so changes made only on the base branch do not count as author edits.
+Missing shared history refuses publication; the separate base-tip ancestry check still applies.
+
+What stays absolute regardless of scope: full-scope
+reporting, and **cross-target separation** — separate clones,
 branches, budgets, and report streams per target (`runs/<target>/`,
 `lessons/<target>.md`), never cross-target code reuse. The only global artifact
 is this machinery; the only cross-project channel is process lessons in the
 notebook. Promotion of agent-written code into a target's shared library is a
 human-gated proposal like anyone else's, never implicit.
+
+**Two layers: mechanics in the kernel, taste in guidance.** Agent-facing
+kernel text carries only mechanics (how sessions end, what the report's
+fields are, the fold procedure, the anti-fabrication rules). Research
+taste — how to pick a direction, how much landscape a claim needs, what
+"publishable" means — is a GUIDANCE pack selected by the contract's
+`guidance` key: `default` (the kernel's own pack), `none`, or a
+repo-relative directory with `author.md` and `panel.md` (recommended
+`.github/outerloop/guidance/`, which agents can never write). Guidance is
+read from the same ref as the contract, rendered last and labelled
+advisory, and never blocks a claim: the panel may block only on validity
+(harness exploitation, ruler/seed fishing, data leakage, a confirmed
+claim-vs-evidence contradiction, and scope and measurement facts).
 
 ## The research loop
 
@@ -180,12 +199,12 @@ email, no command grammar to learn or to secure.
    its own.
 
 **In flight — humans steer through the PR.** A run whose PR is open enters
-`in-review` and stays alive: each tick, the sweep checks the PR for new
+`parked` and stays alive: each tick, the sweep checks the PR for new
 comments by org members (the advisory reviewer never comments on bot PRs, so
 no bot-to-bot loop can form). A qualifying comment wakes the run — the same
 resume mechanism as experiment wakes, comment text data-fenced, task-level
-supersession only — and the agent pushes fixes and replies on the thread via
-the bot identity. Review-response sessions are bounded like everything else
+supersession only. The author replies on the thread and submits changes
+through the gate and publish. Comments wait while launched jobs are active. Review-response sessions are bounded like everything else
 (attempt counter, budget). Non-member comments never trigger a wake.
 
 **Death — a run ends in exactly one of six ways, each producing a report:**
@@ -209,7 +228,7 @@ honest wording, rather than waiting for the orphan-reconciliation pass to
 mislabel a deliberate "no" as a crash.
 
 After the report is distilled into `lessons/`, the workspace and per-run HOME
-are garbage-collected (grace period first — an `in-review` run's context must
+are garbage-collected (grace period first — a `parked` run's context must
 survive until its PR closes). The notebook is the memory; the run directory
 is scaffolding.
 
@@ -278,17 +297,27 @@ insights across all targets and must never be part of any public flip. Raw
 metrics stay in W&B; the notebook links to runs. No database or vector store —
 grep + recency + distillation until that provably fails.
 
-## Components (`src/autoresearch/`)
+## Components (`src/outerloop/`)
 
 | Module | Job |
 | --- | --- |
 | `contract` | Schema + loader for `.outerloop.yaml`, incl. the hard-coded invariants |
-| `harness` | Run one agent session in a scrubbed environment (no PAT, no billing keys; per-run HOME, fresh per run; brief on stdin, never argv); capture transcript and cost (the orchestrator captures the diff); secret-scan transcripts before storage. See "Harness and context engineering" below |
+| `harness` | Run one agent session in a scrubbed environment (no PAT, no billing keys; per-run HOME, fresh per run; brief on stdin, never argv); capture private session evidence and usage (the orchestrator captures the diff); redact known secrets before storage. See [session capture](../session-capture.md). See "Harness and context engineering" below |
 | `orchestrator` | Tick logic: sentinel, lease, task selection, session dispatch, state sync |
 | `compute` | sbatch/squeue submit-and-poll behind one interface |
 | `github` | Bot auth and push (orchestrator-side, after sessions end), PR/issue ops |
-| `budget` | Hard caps: $ per run, weekly $, GPU-hours, PRs per week; subscription backends metered by a session/token proxy |
-| `report` | Per-run research reports (takeaways + next steps), notebook writes + distillation, weekly digests, cost ledger, leaderboard history |
+| `limits` | Effective session and job limits — turns, session and job minutes — with each contract wish clamped into our `[floor, ceiling]`; the tick's `OUTERLOOP_MAX_JOB_MINUTES` floors here |
+| `progress` / `climbboard` | `progress` records pending measurements at publish and confirms them when the kernel observes the merge, writing `results/leader.json` and `BENCHMARKS.md` on `research-log`; PRs carry only the measured tree; `climbboard` publishes the climb board — every ended attempt and its outcome, plus the ledger and views — to the target's `research-log` branch whenever runs end |
+
+The ledger's main-commit column links confirmed merges. Imported rows say
+"provenance unknown"; an import SHA identifies only the source snapshot.
+
+Operators seed an existing target with
+`outerloop migrate-ledger --target OWNER/REPO --main-sha FULL_SHA`.
+The SHA must be the current default-branch tip. The command imports the exact
+ledger file at that SHA, preserving numbers and seeds without claiming a
+measured SHA. `--dry-run` prints the table without writes; `--force` permits
+replacing an existing branch ledger. The copies on main are no longer updated.
 
 ## Harness and context engineering
 
@@ -309,7 +338,8 @@ exactly what any given agent saw, and a bad run can be replayed from its brief:
 | Ruler: how the metric is computed, how claims get re-verified | target repo docs | fixed |
 | Lessons: distilled, bounded per-target lessons file | notebook `lessons/<target>.md` | hard cap |
 | Recent history: last N run reports for this target (incl. failures) | notebook `runs/<target>/` | hard cap, newest first |
-| Budget state: remaining GPU-hours/$/PRs this week | `budget` | fixed |
+| Budget state: remaining GPU-hours/$/PRs this week | tick weekly accounting | fixed |
+| Lab guidance: the repo's research preferences, advisory, last | contract `guidance` key | hard cap |
 
 Everything else is deliberately absent: no other targets' data (cross-target
 separation), no raw transcripts (distillation instead), no maintainer-private
@@ -363,11 +393,11 @@ failure can strand a run:
    strand the run.
 3. *Backup — the tick sweeps.* The tick chain (independently kept alive:
    two queued successors, heartbeat, GH-Actions watchdog) scans every run in
-   `waiting` each tick: experiment job terminal per `sacct` + no wake lease
+   `parked` each tick: experiment job terminal per `sacct` + no wake lease
    or completion within a grace window → the tick dispatches the wake
    itself. This covers a lost wake job, a wake killed mid-session, and Slurm
    controller restarts that drop pending jobs.
-4. *Deadline floor.* Every `waiting` run records
+4. *Deadline floor.* Every `parked` run records
    `deadline = submit_time + walltime + slack` (recomputed from `start_time`
    once the job starts, so late scheduling never truncates a healthy run).
    Past the deadline the sweep consults `sacct` and acts on what it finds:
@@ -537,5 +567,9 @@ not yet build-gating.
 - GitHub App (revisit if PAT limits bite)
 - Cloud compute backend (burst valve when Torch queues block)
 - Third-party / self-hosted models
-- Any form of auto-merge on code — never. The sole exception is the prose-only
-  notebook repo.
+- Auto-merge on code is off by default and is never the kernel's decision.
+  A repo owner may turn it on with `merge: auto` in the contract: a PR whose
+  gate and panel read are clean is merged by the kernel sweep, at the blessed
+  head only, through the repo's required checks and branch protection. The
+  kernel never arms GitHub auto-merge in this mode and withdraws old arms.
+  The prose-only notebook repo merges on its secret-scan check alone.

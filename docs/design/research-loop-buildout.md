@@ -32,8 +32,9 @@ kernel prescribes none of it.
   dispatcher, `afterany` wake jobs, `resume_run`. Proven live. The build hands
   the *trigger* to the author; the plumbing underneath is this.
 - **Session resume** — `climb_once`'s resume-entry (`resume_session_id` +
-  `improve_prompt`, the #129 primitives) is the wake-the-same-session
-  mechanism; `supports_resume` gates backends that cannot (hermes).
+  the inbox, the #129 primitives) is the wake-the-same-session
+  mechanism; `supports_resume` gates backends that cannot. Hermes resumes
+  through bounded saved-transcript replay.
 - **The composition seam** (#128) — the decide-next policy extraction. Retained
   as internal structure; no further orchestrator decision policies get built on
   it (the author decides next moves now).
@@ -95,7 +96,7 @@ Build notes, not spec (spec lands with the PR):
   delivers (job output into the resumed session, not a gate decision).
 - **The harness seam.** The wake resumes via `resume_session_id` with the
   results (data-fenced) as the continuation. Per-backend: claude and codex
-  both resume; hermes (`supports_resume=False`) cannot host this.
+  both resume; Hermes also resumes via bounded saved-transcript replay.
 - **Containment unchanged.** Launched jobs run agent-directed code with
   eval-grade containment (the `SubprocessEvaluator` posture).
 
@@ -120,6 +121,16 @@ too").
 a *further experiment*, revises, resubmits, and lands a PR — the interleaving
 the old stage model could not express. A clean first submit still opens a PR
 with no extra machinery.
+
+Lifecycle stage 3's first half is landed: submit also works in review and
+uses the same publish, with fast-forward ancestry and confirmed disarm.
+An unsubmitted review edit is neither measured nor pushed. Every gate
+verdict reaches a resumable author as a message; a failed submitted park ends
+only when no author can resume to receive it. Sessions without the tool are
+still measured at finish and may end on that verdict. Submit requires no
+prior launch and no report. A resumable session with the tool that stops
+without submitting ends unmeasured, or returns to review if it has a PR.
+The `end` verb and review meter top-up follow in the second half.
 
 ## What falls out for free
 
@@ -162,3 +173,15 @@ against fakes before that.)
 3. **Phase B — submit-for-review as a payload** — LANDED (the orchestrator
    panel-revision loop is retired); suite gate + metric taxonomy still to come.
 4. Parallel/coordination helpers only if recurring author patterns earn them.
+5. **Phase C — in review, the author receives messages**: designed in
+   `lifecycle.md`, four reviewed stages, the follow-up module deleted in the
+   last.
+
+## Phase C — in review, the author receives messages
+
+**Status: absorbed into `lifecycle.md` (2026-09-12).** The ruling stands: an
+parked run with a PR is the author receiving messages and doing whatever is
+necessary, not hard-coded steps. The lifecycle note carries the design: three
+states, one park-and-wake engine, the inbox and its message kinds, the
+author's moves (launch, sleep, submit, reply, end), what stays rigid, what is
+deleted, the open decisions and the four-stage sequencing.

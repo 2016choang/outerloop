@@ -26,6 +26,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from outerloop.contract import CONTRACT_NAMES, find_contract
-from outerloop.markers import legacy_marker, marker
+from outerloop.contract import CONTRACT_NAME, find_contract, read_guidance
+from outerloop.markers import marker
 
 
 def bot_login_from_env(default: str = "") -> str:
@@ -126,6 +127,19 @@ class GitHubError(RuntimeError):
 class GitError(RuntimeError):
     """A git subcommand failed; carries git's own explanation."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stderr: str = "",
+        stdout: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = stdout
+
 
 class NothingToCommit(GitError):
     """Nothing staged — an ordinary outcome, not a crash."""
@@ -176,6 +190,11 @@ class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> Any:
+        if (
+            urllib.parse.urlparse(req.full_url).scheme == "https"
+            and urllib.parse.urlparse(newurl).scheme != "https"
+        ):
+            raise urllib.error.URLError("refusing HTTPS redirect downgrade")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         old_parts = urllib.parse.urlparse(req.full_url)
         new_parts = urllib.parse.urlparse(newurl)
@@ -190,6 +209,8 @@ class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
 
 # The one opener every API call shares — a redirect that changes host loses
 # the Authorization header instead of forwarding the credential.
+MAX_LOG_BYTES = 8_000_000
+
 AUTH_SAFE_OPENER = urllib.request.build_opener(_NoAuthRedirect)
 
 
@@ -253,6 +274,63 @@ class GitHubClient:
         path = f"/repos/{urllib.parse.quote(repo)}"
         return str(self._expect_dict(self._request("GET", path), path)["default_branch"])
 
+    def branch_sha(self, repo: str, branch: str) -> str:
+        """Read the current branch tip, independently of a PR's recorded base."""
+        ref = urllib.parse.quote(branch, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/git/ref/heads/{ref}"
+        data = self._expect_dict(self._request("GET", path), path)
+        obj = self._expect_dict(data.get("object"), path)
+        sha = obj.get("sha")
+        if not isinstance(sha, str) or not sha:
+            raise GitHubError(200, path, "missing branch SHA")
+        return sha
+
+    def commit_tree(self, repo: str, sha: str) -> str:
+        """Read the root tree SHA from a commit."""
+        ref = urllib.parse.quote(sha, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/git/commits/{ref}"
+        data = self._expect_dict(self._request("GET", path), path)
+        tree = self._expect_dict(data.get("tree"), path)
+        tree_sha = tree.get("sha")
+        if not isinstance(tree_sha, str) or not tree_sha:
+            raise GitHubError(200, path, "missing commit tree SHA")
+        return tree_sha
+
+    def get_tree(self, repo: str, sha: str) -> dict:
+        """Read a recursive Git tree; callers check truncation."""
+        ref = urllib.parse.quote(sha, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/git/trees/{ref}?recursive=1"
+        return self._expect_dict(self._request("GET", path), path)
+
+    def create_ref(self, repo: str, ref: str, sha: str) -> None:
+        """Create a ref without replacing an existing ref."""
+        if self.dry_run:
+            log.info("[dry-run] create Git ref")
+            return
+        self._request(
+            "POST", f"/repos/{urllib.parse.quote(repo)}/git/refs", {"ref": ref, "sha": sha}
+        )
+
+    def compare(self, repo: str, base: str, head: str) -> dict:
+        """Compare a head with a base using GitHub's commit ancestry."""
+        base_ref = urllib.parse.quote(base, safe="")
+        head_ref = urllib.parse.quote(head, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/compare/{base_ref}...{head_ref}"
+        data = self._expect_dict(self._request("GET", path), path)
+        status, ahead, behind = data.get("status"), data.get("ahead_by"), data.get("behind_by")
+        if (
+            not isinstance(status, str)
+            or status not in ("ahead", "behind", "diverged", "identical")
+            or type(ahead) is not int
+            or type(behind) is not int
+        ):
+            raise GitHubError(200, path, "invalid comparison")
+        return {"status": status, "ahead_by": ahead, "behind_by": behind}
+
+    def head_contains(self, repo: str, base: str, head: str) -> bool:
+        """Whether the head contains the base tip."""
+        return self.compare(repo, base, head)["status"] in ("ahead", "identical")
+
     def get_file(self, repo: str, path: str, ref: str) -> str:
         """Fetch a file's text at a ref — used to read contracts from the
         default branch, never from PR branches."""
@@ -311,6 +389,54 @@ class GitHubClient:
     def get_pull_request(self, repo: str, number: int) -> dict[str, Any]:
         path = f"/repos/{urllib.parse.quote(repo)}/pulls/{number}"
         return self._expect_dict(self._request("GET", path), path)
+
+    def list_check_runs(self, repo: str, ref: str) -> list[dict]:
+        """Read all check runs for this commit, including reruns."""
+        ref = urllib.parse.quote(ref, safe="")
+        path = f"/repos/{urllib.parse.quote(repo)}/commits/{ref}/check-runs"
+        runs: list[dict] = []
+        page = 1
+        while True:
+            data = self._expect_dict(
+                self._request("GET", f"{path}?per_page=100&page={page}&filter=all"), path
+            )
+            batch = data["check_runs"]
+            runs.extend(batch)
+            if len(batch) < 100:
+                return runs
+            page += 1
+
+    def job_log_tail(self, repo: str, job_id: int, max_chars: int) -> str:
+        """Best-effort last lines; storage redirects lose API credentials."""
+        try:
+            if max_chars <= 0:
+                return ""
+            path = f"/repos/{urllib.parse.quote(repo)}/actions/jobs/{job_id}/logs"
+            request = urllib.request.Request(
+                f"{API}{path}",
+                headers={"Authorization": f"Bearer {self.auth.token()}"},
+            )
+            tail_bytes = bytearray()
+            total = 0
+            with AUTH_SAFE_OPENER.open(request, timeout=30) as response:
+                while total < MAX_LOG_BYTES:
+                    chunk = response.read(min(65536, MAX_LOG_BYTES - total))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    tail_bytes.extend(chunk)
+                    del tail_bytes[: max(0, len(tail_bytes) - 4 * max_chars)]
+            text = tail_bytes.decode("utf-8", errors="replace")
+            text = re.sub(
+                r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])", "", text
+            )
+            if len(text) <= max_chars:
+                return text
+            tail = text[-max_chars:]
+            return tail.split("\n", 1)[1] if "\n" in tail else ""
+        except Exception as exc:
+            log.info("job log for %s job %s unavailable: %s", repo, job_id, str(exc)[:200])
+            return ""
 
     def find_open_pull_for_head(
         self, repo: str, head_branch: str, base: str
@@ -394,12 +520,10 @@ class GitHubClient:
         # string (it is public), and splitting on it blindly would truncate
         # the frozen report — the history this method exists to preserve.
         base = current
-        # a previous addendum of ours may carry the pre-rename marker
-        for old in (self.BODY_EDIT_MARKER, legacy_marker("body-edit")):
-            idx = current.rfind(old)
-            if idx != -1 and current[idx + len(old) :].lstrip().startswith("---"):
-                base = current[:idx].rstrip()
-                break
+        idx = current.rfind(self.BODY_EDIT_MARKER)
+        tail = current[idx + len(self.BODY_EDIT_MARKER) :]
+        if idx != -1 and tail.lstrip().startswith("---"):
+            base = current[:idx].rstrip()
         self._request("PATCH", path, {"body": f"{base}\n\n{self.BODY_EDIT_MARKER}\n{addendum}"})
 
     def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
@@ -440,13 +564,33 @@ class GitHubClient:
         ]
         return [m for m, key in order if settings.get(key)]
 
+    def mark_ready_for_review(self, repo: str, number: int, expected_head: str = "") -> None:
+        """Mark a draft PR ready after a clean panel read of `expected_head`."""
+        if self.dry_run:
+            log.info("[dry-run] mark PR ready for review %s#%d", repo, number)
+            return
+        pr = self.get_pull_request(repo, number)
+        head = str((pr.get("head") or {}).get("sha") or "")
+        if expected_head and head != expected_head:
+            log.info("not marking %s#%d ready: head moved since the panel read", repo, number)
+            return
+        node_id = pr.get("node_id")
+        if not node_id:
+            raise GitHubError(0, f"/repos/{repo}/pulls/{number}", "no node_id in PR payload")
+        mutation = (
+            "mutation($pr: ID!) {"
+            " markPullRequestReadyForReview(input: {pullRequestId: $pr})"
+            " { pullRequest { number } } }"
+        )
+        self._graphql(mutation, {"pr": str(node_id)})
+
     def enable_auto_merge(
         self, repo: str, number: int, method: str = "MERGE", expected_head: str = ""
     ) -> None:
         """Arm GitHub's auto-merge on a PR (a GraphQL-only capability).
-        `expected_head` binds the arm to that head oid: GitHub refuses when
-        the PR head has moved, so a push racing the caller's check can never
-        be the thing that merges.
+        `expected_head` checks the head when arming. It does not prevent a
+        later push from merging under that arm. Auto mode uses merge_pull
+        with an expected head instead.
 
         Arming does not merge anything: it hands the merge to whatever
         branch protection still requires. Callers that must preserve the
@@ -503,10 +647,20 @@ class GitHubClient:
         return True
 
     def disable_auto_merge(self, repo: str, number: int) -> bool:
-        """Disarm GitHub auto-merge (GraphQL). The follow-up lane calls this
-        before pushing new commits to an auto-mode PR: an armed PR would
-        merge the NEW head on green CI without a fresh gate/suite/panel
-        (terra #171). Returns False when nothing was armed or on error."""
+        """Ensure GitHub auto-merge will not fire on this PR, and report whether
+        that is confirmed. The follow-up lane calls this before pushing new
+        commits to an auto-mode PR: an armed PR would merge the NEW head on green
+        CI without a fresh gate/suite/panel (terra #171).
+
+        The property to confirm is "auto-merge is not armed". We always run the
+        disarm mutation — never skipping it on a prior read, which would let
+        another actor arm auto-merge between the read and the push. When nothing
+        is armed the mutation errors, and its text varies by the repo's "Allow
+        auto-merge" setting and the token type (App vs PAT), so we confirm by
+        RE-READING the PR's `auto_merge` state rather than matching a string: if
+        auto-merge is off afterward, the safety property holds and pushing is
+        safe. Returns False only when auto-merge is still armed and could not be
+        disarmed."""
         if self.dry_run:
             log.info("[dry-run] disarm auto-merge on %s#%d", repo, number)
             return True
@@ -519,20 +673,25 @@ class GitHubClient:
                 " disablePullRequestAutoMerge(input: {pullRequestId: $pr})"
                 " { pullRequest { number } } }"
             )
-            self._graphql(mutation, {"pr": str(node_id)})
-            return True
-        except GitHubError as exc:
-            if "not enabled" in str(exc).casefold():
-                # nothing was armed — the state we wanted; pushing is safe
+            try:
+                self._graphql(mutation, {"pr": str(node_id)})
                 return True
+            except GitHubError as exc:
+                # Disarming a PR with nothing armed errors; the message is not a
+                # reliable signal (merge:manual repo, "Allow auto-merge" off, or
+                # App-token phrasing), so confirm by state: off now = safe.
+                if not self.get_pull_request(repo, number).get("auto_merge"):
+                    return True
+                log.warning("auto-merge disarm on %s#%s failed: %s", repo, number, exc)
+                return False
+        except GitHubError as exc:
             log.warning("auto-merge disarm on %s#%s failed: %s", repo, number, exc)
             return False
 
     def merge_pull(
         self, repo: str, number: int, method: str = "merge", expected_head: str = ""
     ) -> bool:
-        """Directly merge a pull request (REST). Used only by AUTO merge mode
-        when nothing is pending for auto-merge to arm against. `expected_head`
+        """Directly merge a clean pull request in auto mode (REST). `expected_head`
         rides the API's `sha` guard: GitHub refuses (409) when the head moved
         since the caller checked it."""
         if self.dry_run:
@@ -551,37 +710,6 @@ class GitHubClient:
         except GitHubError as exc:
             log.warning("direct merge of %s#%s failed: %s", repo, number, exc)
             return False
-
-    def arm_auto_merge_auto_mode(self, repo: str, number: int, expected_head: str = "") -> bool:
-        """AUTO merge mode (the contract's `merge: auto` dial): arm
-        auto-merge so the PR merges when its required checks pass; when
-        GitHub declines ONLY because nothing is pending (clean status),
-        merge directly. Any other decline — auto-merge disabled in repo
-        settings, missing permission — is a repo-owner control and STOPS
-        here (terra #171: the broad fallback would have bulldozed a
-        deliberately disabled auto-merge setting). The manual-mode
-        review-required guard deliberately does not apply — the owner
-        opted this repo in, and the gate/panel bound before publish."""
-        methods = self.allowed_merge_methods(repo) or ["MERGE"]
-        try:
-            self.enable_auto_merge(repo, number, method=methods[0], expected_head=expected_head)
-            return True
-        except GitHubError as exc:
-            if "clean status" not in str(exc).casefold():
-                log.warning(
-                    "auto-merge arming on %s#%s failed (%s); NOT merging "
-                    "directly — the decline may be a repo-owner control",
-                    repo,
-                    number,
-                    exc,
-                )
-                return False
-            log.info(
-                "auto-merge arming on %s#%s: PR already clean; merging directly",
-                repo,
-                number,
-            )
-        return self.merge_pull(repo, number, method=methods[0].lower(), expected_head=expected_head)
 
     def get_pull_request_diff(self, repo: str, number: int) -> str:
         """Fetch a PR's unified diff (uses the diff media type)."""
@@ -637,7 +765,9 @@ class GitHubClient:
 
         Best-effort by design (reviewer context): directories, submodules,
         files over the API's inline limit, and missing paths all return None
-        rather than raising.
+        rather than raising. A symlink returns None too — its blob text is
+        the link target, not file content (the same refusal the git-object
+        reader applies).
         """
         api_path = (
             f"/repos/{urllib.parse.quote(repo)}/contents/"
@@ -650,6 +780,8 @@ class GitHubClient:
                 log.warning("context fetch failed for %s@%s: %s", path, ref, exc)
             return None
         if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None
+        if data.get("type") != "file":
             return None
         try:
             raw = base64.b64decode(data.get("content", ""))
@@ -768,15 +900,19 @@ class GitHubClient:
         )
         return int(data.get("number", 0)) if isinstance(data, dict) else 0
 
-    def update_issue(self, repo: str, number: int, body: str) -> None:
-        """Replace an issue's body (the rolling maintenance digest)."""
+    def update_issue(self, repo: str, number: int, body: str, *, title: str | None = None) -> None:
+        """Replace an issue's body (the rolling maintenance digest), and its
+        title when one is given (the digest carries the scan date there)."""
         if self.dry_run:
             log.info("[dry-run] update issue %s#%s (%d chars)", repo, number, len(body))
             return
+        payload: dict[str, str] = {"body": body}
+        if title is not None:
+            payload["title"] = title
         self._request(
             "PATCH",
             f"/repos/{urllib.parse.quote(repo)}/issues/{number}",
-            {"body": body},
+            payload,
         )
 
     def close_issue(self, repo: str, number: int) -> None:
@@ -1116,9 +1252,11 @@ def ensure_regular_git_dir(root: Path | None) -> None:
     sha = _head_commit_sha(git_dir) or _any_ref_sha(git_dir)
     if sha is not None:
         try:
+            # No root, so no filter-override listing: `cat-file -e` never
+            # converts working-tree files, so no filter driver can run in it.
             _run_git(
                 ["git", "-C", str(root), *SAFE_GIT_FLAGS, "cat-file", "-e", f"{sha}^{{commit}}"],
-                _git_env(None, Path(root)),
+                _git_env(None),
                 timeout=GUARD_GIT_TIMEOUT_S,  # a stalled read is refused, not waited on
             )
         except GitError as exc:
@@ -1331,6 +1469,76 @@ def _filter_override_pairs(root: Path | None) -> list[tuple[str, str]]:
     return pairs
 
 
+# Filter listings a hand-off check remembered, keyed by resolved workspace
+# root: between hand-offs only kernel code runs, so a listing cannot go
+# stale. The entry is also the root's hand-off MARK: its presence is what
+# lets Workspace.git skip the per-call guard. A lookup MISS never populates
+# the cache, so a caller that skipped its hand-off check recomputes per call
+# and re-runs the guard — slow, never unsafe.
+_FILTER_OVERRIDES: dict[Path, list[tuple[str, str]]] = {}
+
+
+def handoff_git_dir(root: Path | None) -> None:
+    """The session-boundary check: the full guard plus the root's filter
+    listing, remembered so the kernel git calls until the next untrusted
+    launch neither re-run the guard nor re-list the filters."""
+    ensure_regular_git_dir(root)
+    if root is not None and (Path(root) / ".git").is_dir():
+        _FILTER_OVERRIDES[Path(root).resolve()] = _filter_override_pairs(root)
+
+
+def _filter_pairs_for(root: Path | None) -> list[tuple[str, str]]:
+    """The filter overrides for a root: the hand-off check's listing when one
+    is remembered (a copy — callers append the credential header), computed
+    fresh otherwise."""
+    if root is None:
+        return _filter_override_pairs(None)
+    remembered = _FILTER_OVERRIDES.get(Path(root).resolve())
+    if remembered is None:
+        return _filter_override_pairs(root)
+    return list(remembered)
+
+
+def forget_filter_overrides(root: Path | None) -> None:
+    """Drop a root's remembered listing AND hand-off mark: untrusted code is
+    about to run on it, so the next git call re-runs the guard and
+    recomputes, never reuses."""
+    if root is not None:
+        _FILTER_OVERRIDES.pop(Path(root).resolve(), None)
+
+
+def _guard_git_dir(root: Path) -> None:
+    """The per-call guard behind Workspace.git: skipped on a root a hand-off
+    checked (only kernel code has run on it since), the full check otherwise,
+    so a path no hand-off covers keeps today's per-call protection."""
+    if Path(root).resolve() not in _FILTER_OVERRIDES:
+        ensure_regular_git_dir(root)
+
+
+def _basic(token: str) -> str:
+    """The Basic credential git sends for an installation or PAT token."""
+    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+
+def _run_git_with_credential(
+    args: list[str], token: str | None, root: Path | None = None, timeout: float | None = None
+) -> str:
+    """_run_git with the token in the environment. An empty token is refused
+    before any network call (a provider that yields one is misconfigured,
+    and git would send a bad credential). A failure's message never carries
+    the token or its Basic form, whatever git echoed, and the original
+    exception is not chained (a traceback would print it whole)."""
+    if token == "":
+        raise GitError("the GitHub token is empty; no credentialed git call is made")
+    try:
+        return _run_git(args, _git_env(token, root), timeout=timeout)
+    except GitError as exc:
+        if not token:
+            raise
+        message = str(exc).replace(token, "[redacted]").replace(_basic(token), "[redacted]")
+        raise GitError(message) from None
+
+
 def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
     """Environment for a git invocation: host global/system config never
     loads (a host-configured filter driver must not be selectable by a
@@ -1347,10 +1555,11 @@ def _git_env(token: str | None, root: Path | None = None) -> dict[str, str]:
     # for a real one during post-session verification. The kernel never
     # uses replace refs; disable them on every invocation.
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    pairs = _filter_override_pairs(root)
+    pairs = _filter_pairs_for(root)
     if token is not None:
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        pairs.append(("http.https://github.com/.extraheader", f"Authorization: Basic {basic}"))
+        pairs.append(
+            ("http.https://github.com/.extraheader", f"Authorization: Basic {_basic(token)}")
+        )
     env["GIT_CONFIG_COUNT"] = str(len(pairs))
     for i, (k, v) in enumerate(pairs):
         env[f"GIT_CONFIG_KEY_{i}"] = k
@@ -1372,7 +1581,12 @@ def _run_git(args: list[str], env: dict[str, str], timeout: float | None = None)
             (a for i, a in enumerate(args[1:], 1) if a not in skip and args[i - 1] not in skip),
             "?",
         )
-        raise GitError(f"git {subcommand} failed: {detail}")
+        raise GitError(
+            f"git {subcommand} failed: {detail}",
+            returncode=result.returncode,
+            stderr=result.stderr or "",
+            stdout=result.stdout or "",
+        )
     return result.stdout.strip()
 
 
@@ -1384,29 +1598,34 @@ class Workspace:
     auth: TokenProvider | None = None
     dry_run: bool = False
     url: str | None = None
+    channels: dict[str, bool] | None = None
+    self_agent: str = ""
 
     def git(self, *args: str) -> str:
         """Run a local git subcommand: no credential, no child-spawning config,
         repo-defined filter drivers neutralized. A session-reshaped .git is
-        refused before git runs (ensure_regular_git_dir, which also
-        sanitizes the config first)."""
-        ensure_regular_git_dir(self.root)
+        refused at each hand-off into kernel code (handoff_git_dir); with no
+        hand-off remembered for the root the guard runs per call instead
+        (_guard_git_dir), so an unchecked path is covered either way."""
+        _guard_git_dir(self.root)
         return _run_git(
             ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args], _git_env(None, self.root)
         )
 
     def git_network(self, *args: str) -> str:
         """Run a git subcommand that talks to the remote, with credentials.
-        The config is sanitized first (redirect sections stripped), and the
-        fetch/push pass an explicit URL + refspec, so no session-controlled
-        remote or rewrite can steer a credentialed op."""
+        The full guard runs on every call, hand-off or not, since it also
+        sanitizes the config (redirect sections stripped), and the fetch/push
+        pass an explicit URL + refspec, so no session-controlled remote or
+        rewrite can steer a credentialed op."""
         if args and args[0] not in NETWORK_GIT_COMMANDS:
             raise ValueError(f"{args[0]!r} is not a network git command")
         ensure_regular_git_dir(self.root)  # sanitizes the config first, too
         token = self.auth.token() if self.auth is not None else None
-        return _run_git(
+        return _run_git_with_credential(
             ["git", "-C", str(self.root), *SAFE_GIT_FLAGS, *args],
-            _git_env(token, self.root),
+            token,
+            self.root,
             timeout=NETWORK_GIT_TIMEOUT_S,
         )
 
@@ -1421,10 +1640,62 @@ class Workspace:
         dest: Path,
         auth: TokenProvider | None = None,
         dry_run: bool = False,
+        single_branch: str = "",
     ) -> Workspace:
         token = auth.token() if auth is not None else None
-        _run_git(["git", "clone", "--quiet", *SAFE_GIT_FLAGS, url, str(dest)], _git_env(token))
+        _run_git_with_credential(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                *SAFE_GIT_FLAGS,
+                *(
+                    ["--single-branch", "--branch", single_branch, "--no-tags", "--no-local"]
+                    if single_branch
+                    else []
+                ),
+                url,
+                str(dest),
+            ],
+            token,
+        )
         return cls(root=dest, auth=auth, dry_run=dry_run, url=url)
+
+    @classmethod
+    def clone_for_channels(
+        cls,
+        url: str,
+        dest: Path,
+        target: str,
+        base_branch: str,
+        self_agent: str,
+        auth: TokenProvider | None = None,
+    ) -> Workspace:
+        """Discover policy in a kernel checkout before exposing an author tree.
+
+        Defaults use the original full clone, with no subsequent fetch. Restricted
+        authors get a fresh base-only clone: hidden objects never enter their tree.
+        """
+        from outerloop.contract import contract_text_in_tree, load_contract
+
+        with tempfile.TemporaryDirectory(
+            prefix=".outerloop-bootstrap-", dir=dest.parent
+        ) as directory:
+            bootstrap = cls.clone(url, Path(directory) / "ws", auth=auth)
+            bootstrap.git("checkout", "-q", "-B", base_branch, f"origin/{base_branch}")
+            contract = load_contract(contract_text_in_tree(bootstrap.root), target)
+            channels = contract.channels.model_dump(exclude_defaults=True)
+            if all(channels.get(k, True) for k in ("branches", "siblings", "shared_reports")):
+                bootstrap.root.rename(dest)
+                bootstrap.root = dest
+                ws = bootstrap
+            else:
+                ws = cls.clone(url, dest, auth=auth, single_branch=base_branch)
+                ws.configure_channels(channels, self_agent)
+                ws.fetch_origin()
+            if channels:
+                ws.configure_channels(channels, self_agent)
+            return ws
 
     def branch(self, name: str) -> None:
         self.git("switch", "-c", name)
@@ -1463,6 +1734,37 @@ class Workspace:
             message,
         )
 
+    def configure_channels(self, channels: dict[str, bool], self_agent: str) -> None:
+        self.channels = channels
+        self.self_agent = self_agent
+        unrestricted = all(
+            channels.get(k, True) for k in ("branches", "siblings", "shared_reports")
+        )
+        if unrestricted:
+            # Restore normal clone fetch/tag defaults after the base-only bootstrap.
+            self.git(
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            )
+            self.git("config", "--replace-all", "remote.origin.tagOpt", "")
+        # Remove old advertised refs too, including workspaces resumed after an upgrade.
+        if not unrestricted:
+            refs = self.git("for-each-ref", "--format=%(refname)", "refs/remotes/origin/")
+            for ref in refs.splitlines():
+                branch = ref.removeprefix("refs/remotes/origin/")
+                if not self._offered_branch(branch):
+                    self.git("update-ref", "-d", ref)
+
+    def _offered_branch(self, branch: str) -> bool:
+        channels = self.channels or {}
+        if branch == "research-log":
+            return channels.get("shared_reports", True) and channels.get("siblings", True)
+        if branch.startswith("agents/") and not channels.get("branches", True):
+            return branch == f"agents/{self.self_agent}"
+        return True
+
     def fetch_origin(self) -> None:
         """Refresh refs/remotes/origin/* from the URL captured at clone time —
         never the "origin" remote, whose url and uploadpack live in
@@ -1475,7 +1777,26 @@ class Workspace:
             log.info("[dry-run] fetch into %s", self.root)
             return
         target = self.url or self.remote_url()
-        self.git_network("fetch", "--prune", target, "--", "+refs/heads/*:refs/remotes/origin/*")
+        if self.channels is None or all(
+            self.channels.get(k, True) for k in ("branches", "siblings", "shared_reports")
+        ):
+            self.git_network(
+                "fetch", "--prune", target, "--", "+refs/heads/*:refs/remotes/origin/*"
+            )
+        else:
+            refs = self.git_network("ls-remote", "--heads", target)
+            offered = [
+                line.split()[1].removeprefix("refs/heads/")
+                for line in refs.splitlines()
+                if len(line.split()) == 2
+            ]
+            specs = [
+                f"+refs/heads/{b}:refs/remotes/origin/{b}"
+                for b in offered
+                if self._offered_branch(b)
+            ]
+            if specs:
+                self.git_network("fetch", "--no-tags", target, "--", *specs)
 
     def fetch_branch(self, branch: str) -> None:
         """Fetch one branch into FETCH_HEAD from the canonical URL (resolved
@@ -1494,10 +1815,9 @@ class Workspace:
 
 
 def contract_at(ws: Any, sha: str) -> str:
-    """The target's contract text at `sha` — `.outerloop.yaml`, else the legacy
-    `.autoresearch.yaml`. `ws` is a Workspace (anything with `.git(*args)`); a
-    missing path is a git failure, which is the fallback signal. Raises GitError
-    when the commit has neither, naming both candidates."""
+    """The target's `.outerloop.yaml` at `sha` via Workspace.git.
+
+    Raises GitError naming the contract when it is absent."""
 
     def read(name: str) -> str | None:
         try:
@@ -1507,5 +1827,28 @@ def contract_at(ws: Any, sha: str) -> str:
 
     found = find_contract(read)
     if found is None:
-        raise GitError(f"no contract at {sha} ({' or '.join(CONTRACT_NAMES)})")
+        raise GitError(f"no contract at {sha} ({CONTRACT_NAME})")
     return found[1]
+
+
+def guidance_at(ws: Any, sha: str, mode: str) -> tuple[str, str]:
+    """The target's guidance texts at `sha` via Workspace.git — the same git
+    objects `contract_at` reads the contract from (a wake reads guidance at
+    the pinned base sha, never the session's working tree). This is the one
+    reader: every site reads blobs, never a checked-out file, so a symlink
+    (mode 120000 — whose `git show` text is its TARGET, not file content)
+    cannot read outside the repo or into `.outerloop/`; it is refused as
+    empty guidance, like a missing path."""
+
+    def read(name: str) -> str | None:
+        try:
+            # ls-tree names the MODE first: only a regular file is read — a
+            # path through a symlinked directory never resolves in the tree
+            meta = ws.git("ls-tree", sha, "--", name).split()
+            if not meta or meta[0] not in ("100644", "100755"):
+                return None
+            return ws.git("show", f"{sha}:{name}")
+        except GitError:
+            return None
+
+    return read_guidance(read, mode)

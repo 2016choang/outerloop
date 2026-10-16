@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
+from ledger_fake import LedgerGitHub
 from outerloop.contract import load_contract
 from outerloop.harness import SessionResult
 from outerloop.intake import CLAIM_MARKER
@@ -47,7 +49,7 @@ def test_steward_scope_is_the_solvers_inverse() -> None:
     # solver territory: forbidden even though it IS in someone's scope
     assert steward_out_of_scope(["src/pilot/solvers/tsp.py"], c) == ["src/pilot/solvers/tsp.py"]
     # the always-forbidden set binds the steward too
-    assert steward_out_of_scope([".autoresearch.yaml"], c)
+    assert steward_out_of_scope([".outerloop.yaml"], c)
     assert steward_out_of_scope([".github/workflows/ci.yml"], c)
     # record files are the orchestrator's, not the steward's
     assert steward_out_of_scope(["results/leader.json", "BENCHMARKS.md"], c)
@@ -65,7 +67,7 @@ def test_no_steward_section_means_everything_out_of_scope() -> None:
 
 
 def _issue(
-    number, title, body="", author="renmengye", assoc="OWNER", labels=("autoresearch:steward",)
+    number, title, body="", author="renmengye", assoc="OWNER", labels=("outerloop:steward",)
 ):
     return {
         "number": number,
@@ -107,7 +109,7 @@ def test_pick_steward_issue_gates_on_label_standing_and_claim() -> None:
     # claimed issues are skipped
     github2 = FakeIssues(
         [_issue(4, "re-base the tsp pool")],
-        comments={4: [{"body": "<!-- autoresearch:claimed -->\ntaken", "user": {"login": BOT}}]},
+        comments={4: [{"body": "<!-- outerloop:claimed -->\ntaken", "user": {"login": BOT}}]},
     )
     assert pick_steward_issue(github2, "org/pilot", c, BOT) is None
     # a released claim makes the order claimable again
@@ -115,9 +117,9 @@ def test_pick_steward_issue_gates_on_label_standing_and_claim() -> None:
         [_issue(4, "re-base the tsp pool")],
         comments={
             4: [
-                {"body": "<!-- autoresearch:claimed -->\ntaken", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->\ntaken", "user": {"login": BOT}},
                 {
-                    "body": "<!-- autoresearch:claim-released -->\nsubmission failed",
+                    "body": "<!-- outerloop:claim-released -->\nsubmission failed",
                     "user": {"login": BOT},
                 },
             ]
@@ -130,9 +132,9 @@ def test_pick_steward_issue_gates_on_label_standing_and_claim() -> None:
         [_issue(4, "re-base the tsp pool")],
         comments={
             4: [
-                {"body": "<!-- autoresearch:claimed -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claim-released -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claimed -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claim-released -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->", "user": {"login": BOT}},
             ]
         },
     )
@@ -142,12 +144,12 @@ def test_pick_steward_issue_gates_on_label_standing_and_claim() -> None:
         [_issue(4, "re-base the tsp pool")],
         comments={
             4: [
-                {"body": "<!-- autoresearch:claimed -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claim-released -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claimed -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claim-released -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claimed -->", "user": {"login": BOT}},
-                {"body": "<!-- autoresearch:claim-released -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claim-released -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claim-released -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claimed -->", "user": {"login": BOT}},
+                {"body": "<!-- outerloop:claim-released -->", "user": {"login": BOT}},
             ]
         },
     )
@@ -205,7 +207,7 @@ def steward_repo(tmp_path, monkeypatch):
     (seed / "docs").mkdir()
     (seed / "tests").mkdir()
     (seed / "results").mkdir()
-    (seed / ".autoresearch.yaml").write_text(CONTRACT)
+    (seed / ".outerloop.yaml").write_text(CONTRACT)
     (seed / "docs" / "roadmap.md").write_text("# roadmap\n")
     (seed / "src" / "pilot" / "instances.py").write_text("POOL_SEED = 1\n")
     (seed / "src" / "pilot" / "eval.py").write_text("def eval(): ...\n")
@@ -228,8 +230,10 @@ def steward_repo(tmp_path, monkeypatch):
 
     real_clone = Workspace.clone
 
-    def fake_clone(url, dest, auth=None, dry_run=False):
-        return real_clone(str(bare), dest, auth=None, dry_run=dry_run)
+    def fake_clone(url, dest, auth=None, dry_run=False, single_branch=""):
+        return real_clone(
+            bare.as_uri(), dest, auth=None, dry_run=dry_run, single_branch=single_branch
+        )
 
     monkeypatch.setattr(steward_mod.Workspace, "clone", staticmethod(fake_clone))
     return bare
@@ -274,7 +278,7 @@ class CheckingEvaluator:
 
 
 @dataclass
-class StewardGitHub:
+class StewardGitHub(LedgerGitHub):
     prs: list[dict] = field(default_factory=list)
     issue_comments: list = field(default_factory=list)
     armed: list = field(default_factory=list)
@@ -302,6 +306,14 @@ class NoAuth:
 
 def run_steward(tmp_path, edits, values=None, check_error="", run_id="steward-tsp-1"):
     github = StewardGitHub()
+    import json
+    from dataclasses import asdict
+
+    from outerloop.progress import LeaderEntry
+
+    github.ledger_files["results/leader.json"] = json.dumps(
+        {"tsp": asdict(LeaderEntry("tsp", "mean_tour_length", "min", 13.876, 10.84, "prior", "d"))}
+    )
     evaluator = CheckingEvaluator(values=list(values or [14.9]), check_error=check_error)
     outcome = live_steward(
         config=StewardConfig(target="org/pilot", benchmark="tsp"),
@@ -334,19 +346,25 @@ def test_stewardship_rebased_env_lands_with_orchestrator_records(tmp_path, stewa
             steward_repo, "diff", "--name-only", "main", "feat/steward/steward-01/steward-tsp-1"
         ).split()
     )
-    assert files == {"src/pilot/instances.py", "BENCHMARKS.md", "results/leader.json"}
-    leader = _git(steward_repo, "show", "feat/steward/steward-01/steward-tsp-1:results/leader.json")
-    assert '"baseline": 14.9' in leader and '"best": 14.9' in leader
-    assert "baseline-steward-tsp-1" in leader
+    assert files == {"src/pilot/instances.py"}
+    import json
+
+    pending = next(
+        json.loads(v)
+        for k, v in github.ledger_files.items()
+        if k.startswith("results/submissions/")
+    )
+    assert pending["kind"] == "RESET" and pending["candidate"] == 14.9
+    assert pending["run_id"] == "steward-tsp-1"
     # commits carry the steward identity, not the solver's
     log_out = _git(
         steward_repo, "log", "feat/steward/steward-01/steward-tsp-1", "-1", "--format=%B"
     )
     assert "Agent: steward-01" in log_out
     record = load_record(tmp_path / "state", "steward-tsp-1")
-    assert record.state == "in-review" and record.agent_id == "steward-01"
+    assert record.state == "parked" and record.agent_id == "steward-01"
     # PR body: measured provenance stated, report present — and the
-    # previous best is the PRIOR ledger value, not the fresh overwrite
+    # previous best is the confirmed branch value, before the pending reset
     body = github.prs[0]["body"]
     assert "measured by the orchestrator" in body
     assert "Addresses #21" in body
@@ -461,7 +479,7 @@ def test_outage_releases_do_not_count_toward_the_attempt_cap() -> None:
         "body": "the tsp pool is stale",
         "user": {"login": "renmengye", "type": "User"},
         "author_association": "OWNER",
-        "labels": [{"name": "autoresearch:steward"}],
+        "labels": [{"name": "outerloop:steward"}],
     }
 
     @dataclass
@@ -497,7 +515,7 @@ def test_marker_spoofing_by_strangers_moves_nothing() -> None:
         "body": "the tsp pool is stale",
         "user": {"login": "renmengye", "type": "User"},
         "author_association": "OWNER",
-        "labels": [{"name": "autoresearch:steward"}],
+        "labels": [{"name": "outerloop:steward"}],
     }
 
     @dataclass
@@ -523,7 +541,18 @@ def test_marker_spoofing_by_strangers_moves_nothing() -> None:
     assert pick_steward_issue(G(thread3), "org/pilot", contract, BOT) is not None
 
 
-def test_solver_territory_edit_is_aborted(tmp_path, steward_repo) -> None:
+@pytest.mark.parametrize("committed", [False, True])
+def test_solver_territory_edit_is_aborted(tmp_path, steward_repo, monkeypatch, committed) -> None:
+    if committed:
+        original = EnvEditingHarness.run
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            session = original(self, brief_text, workspace, resume_session_id)
+            _git(workspace, "add", "-A")
+            _git(workspace, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "author")
+            return session
+
+        monkeypatch.setattr(EnvEditingHarness, "run", run)
     outcome, github, _ = run_steward(
         tmp_path,
         edits={
@@ -582,7 +611,7 @@ budgets:""",
 
     work = tmp_path / "rewrite"
     sp.run(["git", "clone", "-q", str(steward_repo), str(work)], check=True)
-    (work / ".autoresearch.yaml").write_text(two_bench)
+    (work / ".outerloop.yaml").write_text(two_bench)
     sp.run(
         [
             "git",
@@ -640,7 +669,7 @@ def test_orphaned_claims_are_released_for_dead_runs() -> None:
             self.posted.append((number, body))
 
     claimed = {
-        "body": "<!-- autoresearch:claimed -->",
+        "body": "<!-- outerloop:claimed -->",
         "created_at": "2026-08-09T00:00:00Z",
         "user": {"login": "agentic-learning-bot"},
     }
@@ -664,7 +693,7 @@ def test_orphaned_claims_are_released_for_dead_runs() -> None:
         run_id="steward-tsp-9",
         target="org/pilot",
         task_title="t",
-        state="implementing",
+        state="running",
         agent_id="steward-01",
         issue_number=7,
     )
@@ -689,7 +718,7 @@ def test_orphaned_claims_are_released_for_dead_runs() -> None:
     )
     # now=2e9 is 2033-05-18T03:33Z; a claim 33 minutes old is not stale
     fresh = {
-        "body": "<!-- autoresearch:claimed -->",
+        "body": "<!-- outerloop:claimed -->",
         "created_at": "2033-05-18T03:00:00Z",
         "user": {"login": "agentic-learning-bot"},
     }
@@ -700,31 +729,6 @@ def test_orphaned_claims_are_released_for_dead_runs() -> None:
         )
         == 0
     )
-
-
-def test_rebase_row_records_the_measurement_seed(tmp_path) -> None:
-    """A re-based baseline on a resampled pool is re-derivable: the row
-    carries the seed the orchestrator measured under."""
-    import json as _json
-
-    from outerloop.steward import rebase_leader_row
-
-    contract = load_contract(CONTRACT, "org/pilot")
-    bench = contract.benchmarks[0]
-    rebase_leader_row(
-        tmp_path,
-        contract,
-        bench.name,
-        bench,
-        14.9,
-        "steward-tsp-s",
-        "2026-08-09",
-        "org/pilot",
-        run_seed=987654321,
-    )
-    raw = _json.loads((tmp_path / "results" / "leader.json").read_text())
-    assert raw[bench.name]["run_seed"] == 987654321
-    assert raw[bench.name]["best_run"] == "baseline-steward-tsp-s"
 
 
 def test_read_only_spec_is_refused_before_any_work(tmp_path, steward_repo) -> None:
@@ -757,3 +761,106 @@ def test_read_only_spec_is_refused_before_any_work(tmp_path, steward_repo) -> No
         )
     # "before any work" made checkable: no run dir, no record, nothing on disk
     assert not (tmp_path / "state").exists()
+
+
+def test_steward_auto_publish_does_not_arm(tmp_path, steward_repo, monkeypatch):
+    from outerloop import steward
+
+    original = steward.load_contract
+    monkeypatch.setattr(
+        steward,
+        "load_contract",
+        lambda *a, **k: original(*a, **k).model_copy(update={"merge": "auto"}),
+    )
+    outcome, github, _ = run_steward(
+        tmp_path, edits={"src/pilot/instances.py": "POOL_SEED = 'per-run'\n"}
+    )
+    assert outcome.outcome == "stewarded"
+    assert not github.armed
+
+
+@pytest.mark.parametrize("channel", ["branches", "siblings", "shared_reports"])
+def test_steward_startup_applies_channels(tmp_path, steward_repo, monkeypatch, channel):
+    from outerloop.github import Workspace
+
+    seed = tmp_path / "seed"
+    path = seed / ".outerloop.yaml"
+    path.write_text(CONTRACT + f"\nchannels: {{{channel}: false}}\n")
+    _git(seed, "add", ".")
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "policy")
+    _git(seed, "push", str(steward_repo), "main")
+    hidden = {}
+    for branch in ("agents/agent-02", "research-log"):
+        _git(seed, "checkout", "-b", branch, "main")
+        (seed / "hidden").write_text(branch)
+        _git(seed, "add", ".")
+        _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "hidden")
+        _git(seed, "push", str(steward_repo), branch)
+        hidden[branch] = _git(seed, "rev-parse", "HEAD").strip()
+
+    original = EnvEditingHarness.run
+
+    def inspect(self, brief_text, workspace, resume_session_id=None):
+        import json
+
+        ws = Workspace(workspace)
+        refs = ws.git("for-each-ref", "--format=%(refname)", "refs/remotes")
+        blocked = "agents/agent-02" if channel == "branches" else "research-log"
+        assert "origin/" + blocked not in refs
+        from outerloop.github import GitError
+
+        with pytest.raises(GitError):
+            ws.git("cat-file", "-e", hidden[blocked])
+        record = load_record(tmp_path / "state", "steward-tsp-1")
+        assert record.channels == {channel: False}
+        assert json.loads((workspace / ".outerloop/policy.json").read_text())["channels"] == {
+            channel: False
+        }
+        return original(self, brief_text, workspace, resume_session_id)
+
+    monkeypatch.setattr(EnvEditingHarness, "run", inspect)
+    outcome, _, _ = run_steward(tmp_path, edits={})
+    assert outcome.outcome == "no-change"
+
+
+def test_steward_reset_is_measured_under_self_report_policy(tmp_path, steward_repo):
+    import json
+
+    seed = tmp_path / "seed"
+    (seed / ".outerloop.yaml").write_text(
+        CONTRACT.replace("direction: min", "direction: min\n    verification: self_report")
+    )
+    _git(seed, "add", ".")
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "policy")
+    _git(seed, "push", str(steward_repo), "main")
+    outcome, github, evaluator = run_steward(
+        tmp_path, edits={"src/pilot/instances.py": "POOL_SEED = 'per-run'\n"}
+    )
+    assert outcome.outcome == "stewarded"
+    assert evaluator.checks and evaluator.values == []
+    from outerloop.progress import parse_pending
+
+    pending = next(
+        parse_pending(v)
+        for k, v in github.ledger_files.items()
+        if k.startswith("results/submissions/")
+    )
+    assert pending and pending.kind == "RESET" and pending.provenance == "measured"
+    assert not github.armed
+    assert "self_reported" not in json.dumps(github.prs)
+
+
+def test_steward_missing_benchmark_ends_with_names(tmp_path, steward_repo):
+    seed = tmp_path / "seed"
+    path = seed / ".outerloop.yaml"
+    path.write_text(path.read_text().replace("name: tsp", "name: renamed"))
+    _git(seed, "add", ".outerloop.yaml")
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "rename")
+    _git(seed, "push", str(steward_repo), "main")
+    outcome, github, _ = run_steward(tmp_path, edits={})
+    record = load_record(tmp_path / "state", "steward-tsp-1")
+    assert outcome.outcome == "steward-error"
+    assert record.state == "ended" and record.ending == "aborted"
+    assert "benchmark 'tsp' not in contract (['renamed'])" in record.ending_note
+    assert "benchmark 'tsp' not in contract (['renamed'])" in Path(outcome.report_path).read_text()
+    assert not github.prs

@@ -1,0 +1,397 @@
+# The run lifecycle: states, messages, and what the kernel decides
+
+**Status: lifecycle redesign landed (2026-09-12).** A re-read of the
+whole lifecycle against one rule, from Mengye: benchmark verification and
+launching jobs are rigid; everything else is the author deciding, through
+tool calls. It absorbs Phase C of `research-loop-buildout.md` and supersedes
+the follow-up sections of `roles.md` and `orchestrator-verify.md`. Built from
+three inventories of the code as of main `8944625` (states and transitions,
+inbound messages and syscalls, standing design rulings) and cross-checked by
+an independent read of the note against the code; the numbers in brackets
+refer to the kernel-decision inventory posted on the PR that carries this
+note.
+
+## The rule
+
+The kernel owns two things because nobody else can be trusted with them:
+
+- **The gate.** The credited number is the kernel's paired measurement of a
+  sealed tree on the fixed benchmark under a private seed, with scope checked
+  on the diff and the suite re-measured when shared paths moved. The author
+  never sees the seed, never edits the ledger, and cannot make a number.
+- **Launching.** Jobs run outside the sandbox under the kernel's containment,
+  on the lane the contract names, metered in counts and GPU-hours, always
+  queued, cancelled when the run ends.
+
+Around those sit invariants that are not science and are not the author's to
+change: who may send a message and who may merge, that a human's commit is
+never overwritten, isolation of the session, crash-proof liveness, a report on
+every ending, the line notebook sealed at every terminal. Everything else is
+judgment, and judgment belongs to the author: what to run, what a result
+means, whether to answer a reviewer with an experiment or a sentence, when to
+submit, when to stop. Where the kernel makes such a call today, that call
+goes.
+
+## What exists
+
+The lifecycle is now the three-state one: `running`, `parked`, `ended`.
+A PR is recorded in `pr_url`. The sweep polls parked runs for terminal jobs,
+checkpoint deadlines and inbox messages. GitHub comments and base moves enter
+the inbox; a run sleeping on jobs receives them with the job results. A PR
+at rest waits without a deadline or idle wake cost. Every author leg resumes
+through `attempt.run_author_leg`, including the steward's review work.
+
+`followup.py` and its job are gone. GitHub collection positions live beside
+the inbox, while the run record carries the delivered sequence. Replies are
+posted by the author leg; only a submit invokes the gate and one publish.
+The endings and reports remain. Old state names and collection positions
+migrate on read. Each tick logs `legacy follow-up records: N` from raw live
+records; operators must confirm zero across every fleet before deployment.
+
+## The lifecycle
+
+### Three states
+
+| State | Meaning | Leaves it |
+| --- | --- | --- |
+| `running` | a session is live in a job | the session ends: it slept (park), or it stopped (end) |
+| `parked` | no session; the run waits for jobs it launched, for messages, or both | a wake (the same session resumes), or a PR or operator ending |
+| `ended` | terminal, with a report | never |
+
+A PR being open is a fact about a run, recorded in `pr_url`, not a state. A
+parked run with a PR is what `in-review` was. `implementing` is `running`;
+`waiting` and `in-review` are `parked`; `concluding` is deleted. The endings
+are merged, rejected, negative result, budget exhausted, aborted, stuck, and
+operator. They are how a human reads the board, and every one still
+produces a report.
+
+### One engine: park and wake
+
+A run parks when its session ends with a sleep. A run wakes when the kernel
+has something to deliver: the jobs the session slept on have finished, or a
+message arrived for a run that is not waiting on jobs. A wake resumes the
+same session with everything in its inbox rendered as one data-fenced text.
+That is the whole engine, the same on every backend and in every phase of a
+run: before a PR, with a PR open, after a reviewer writes. The four park
+shapes become one park with a job list that may be empty; the wake paths
+become one.
+
+A sleep on no jobs is a checkpoint. It wakes when a message arrives or at the
+checkpoint deadline, whichever comes first, and the wake text says which. A
+parked run with a PR and no jobs waits for messages without a deadline; idle
+waiting spends no wake attempt and cannot end as stuck.
+
+### Messages
+
+`message [--to thread|self|agent-NN] [--reply-to <n>] <text>` (or `--file`)
+sends to the public PR or issue by default, to yourself at the next wake,
+or to a live sibling on this target. The kernel keeps a sent copy of sibling
+messages in your inbox as context; it never wakes you for your own sent copy.
+Headers use local numbers and parties named `you` or `agent-NN`, never run ids.
+Reply references use each reader's local number. `message --show <n>` prints
+the chain oldest first from the newest 200 entries. The protocol marks all
+fenced blocks as data once, without repeating it for each message.
+
+The envelope carries `message_id` (global `<recipient run id>/<key>`),
+`context_id` (the run it concerns), `to` (the recipient run id), and
+`in_reply_to` (an optional message id it answers).
+
+A message is the unit the kernel delivers. Every message has a source and an
+origin (the login, job name or run behind that source), a qualified thread
+such as `owner/repo#9` (the PR when one exists, else the issue the run claimed),
+a trust level (everything but the kernel's own budget and clock lines is data, never
+instructions), and an arrival time. The tick writes messages into the run's
+inbox; the wake drains it in arrival order.
+
+| Message | Source | Written by | Delivered |
+| --- | --- | --- | --- |
+| launch result: exit code, bounded tails, declared artifacts | the author's own job | the sweep, when the job is terminal | at the wake the sleep asked for |
+| gate verdict: the paired numbers, the floor, the suite, or an eval error; the sealed tree, the base and the contract it was measured under | the kernel's measurement of a submitted tree | the sweep, when the gate jobs are terminal | at the wake |
+| panel verdict: blocking and advisory findings, the transcript | judge sessions | the panel run | at the wake |
+| human comment or review, on the run's thread | a person with standing; others as context, never as triggers | the tick's poll | at the next wake |
+| check result: the current PR head, check name, conclusion, URL and bounded log tail | CI, with the app slug or check name as origin | the tick, once per check run and conclusion | failures wake runs sleeping on no jobs; success, neutral and skipped wait as context |
+| head moved: the PR head no longer matches the blessed head | git | the tick, once per new head in auto mode | at the next wake |
+| base moved: the digest of what merged and the siblings' numbers | git, main | the tick, once per new base | at the next wake |
+| budget and clock: counts remaining, the review top-up, walltime | the kernel | the wake itself | leads every wake |
+| PR merged or closed | a human, on GitHub | the tick's poll | ends the run; not delivered |
+
+The author's session never sees a raw comment body outside a fence, never
+sees the seed, and never sees a message the kernel did not write into the
+inbox. Advisory findings are delivered like blocking ones; the author decides
+what to do with them. The sibling view is refreshed at every wake, not only
+at start, and `siblings` shows each live run's hypothesis and PR link, including
+runs in review. The hypothesis survives publication for the rest of the run.
+When to check the view — before choosing a direction and again before a
+submit, taking an unused direction unless its angle is distinct — is guidance,
+not a kernel step: the brief states the refresh, the pack carries the advice.
+The inbox keeps a position per GitHub collection, since issue
+comments, reviews and review comments carry independent id sequences, and
+delivers each message once.
+
+Human messages do not interrupt a sleep on jobs. They wait in the inbox and
+arrive with the job results. The author who wants to answer sooner takes a
+checkpoint sleep. The kernel stays out of scheduling.
+
+The inbox is files: a directory beside the run's record, one file per
+message named by a sequence number, written by temp-and-rename, never
+deleted, outside the workspace so the session cannot forge one. The record
+holds the delivered position. A message file is durable before any poll
+position advances, and the delivered position advances only after the wake's
+session leg ends, so a wake that dies re-delivers; double delivery is
+harmless, as it is for today's leases. Records, leases and the inbox all sit behind
+one small storage interface (put, list, get, conditional put) with a
+filesystem implementation for Slurm and local compute; a cloud backend gives
+it an object-store implementation and nothing else changes. No messaging
+service is needed: delivery only happens at a wake, which the kernel
+triggers, so nothing waits on a push. A job-completion callback may later
+wake the tick sooner than its cadence; that is a trigger, not a transport.
+
+### The author's moves
+
+| Move | What the kernel does | Rigid part |
+| --- | --- | --- |
+| `launch` | stages a contained job for the contract's lane; the author keeps working | metering |
+| `sleep` | seals the tree, submits the staged jobs, records them in the ledger, parks the run on them (possibly none); the results arrive at the wake | containment, placement, the sleep count |
+| `submit` | seals the tree, runs the gate and the panel as jobs, delivers the verdict as a message; a credited verdict publishes | the gate; the publish |
+| `message` | sends to the public thread, self or a live agent on this target; public posts are redacted and scrubbed of self-approval | kernel identity, routing, bounds and redaction |
+| `end` | without a PR, ends with the report and last failed verdict; with an open PR, posts a supplied report and parks for messages | the report |
+
+`message` and `end` are new. A session that stops without sleeping or
+submitting ends the run with what it has, unmeasured. That is a change: today
+a plain finish is measured by the gate on the tree it left, and can publish.
+Under this note only a submit is measured, on every benchmark, so the author
+always asks for its number. The read-only verbs stay: `status`, `queue`,
+`history`, `siblings`, `reports`, `sync`. The steward has the same moves under
+its own key, with its own scope.
+
+The research advice now written into the wake text and the brief moves to
+the role's instructions, where it can be edited without a kernel change. The
+kernel's wake text states facts: the messages, the counts, the clock.
+
+### Submit, and the one publish
+
+A submit means: measure this sealed tree, and if it is credited, publish it.
+The verdict comes back as a message whatever it says, naming the sealed
+tree, the base and the contract it was measured under. A gate that says no is
+not a terminal; the author reads the numbers and decides to try again, launch
+more, or end. Today a plain finish's failed gate ends the run and a submitted
+park's failed gate wakes the author; the second is right, and with `end` the
+author can still choose the first.
+
+The publish is the one rigid act after the gate, and there is one of it. When
+no PR exists, the kernel opens one from the sealed tree with the number and
+the author's report. When a PR exists, the kernel moves its head to the
+sealed tree and posts the number, after confirming auto-merge is disarmed.
+The move is a fast-forward only: the sealed tree must contain the PR's
+current head. When a person pushed to the PR since the author last saw it,
+the publish is refused and the fact is delivered as a message; the author
+merges and submits again. A human's commit is never overwritten. The publish
+is also refused when the base's contract no longer defines the benchmark
+with the measurement the verdict was made under; a stale verdict is said,
+not published.
+
+Blocking findings at a publish open a draft, or keep the PR as it is, and are
+delivered to the author with the verdict. The ledger row moves only when a
+credited number beats the recorded best by the floor; every other number is
+posted and leaves the row alone. A submit whose number is worse than the PR's
+current one still moves the head, with the number stated plainly; the author
+chose it, the thread shows it, and the PR is merged or not.
+
+A steward submit is a ruler change and is measured as one: the full suite
+runs, every sibling's eval is smoke-checked, and the credited number resets
+the baseline instead of competing with it. That is the steward's publish; the
+steward's copy of the review pipeline is not.
+
+### The meter
+
+One meter for the run's whole life: the launch count, the sleep count and the
+GPU-hours the contract sets, spent from the first session to the last. When a
+PR opens the counts get a small top-up the contract names, so review has
+headroom, and every wake states the counts remaining and that the top-up was
+added, so the author can plan for review while still climbing. A reply costs
+nothing. A run that has spent everything can still reply and end.
+
+### Endings
+
+A run ends when the author ends it, when its PR is merged or closed,
+when an operator requests it with `outerloop end <run-id>`, when the meter
+runs out, or when the kernel cannot continue: a crash, a tampered workspace,
+or a kernel action that made no progress
+`MAX_WAKE_ATTEMPTS` times, a failed publish retry included. The operator command
+atomically records the request time and optional note in the run directory; it
+does not end the run itself. The tick records the ending as `operator` and keeps
+the note as the ending note. A merge or close
+ends the run at the next tick whatever it is doing: pending jobs are
+cancelled, a session in flight finishes its leg and its publish is refused.
+An operator request waits for the run's lease instead: a session in flight
+finishes its leg, and its publish is refused unless it had already started, a queued wake exits without a leg,
+and the next tick that holds the lease ends the run. If that leg ends the run
+itself (a negative result, budget exhausted, stuck), its own ending stands.
+Every ending writes the report, seals the line notebook, releases the issue
+claim when no PR exists, and cancels the run's live launches. These are the only
+paths that end a run. A gate verdict never ends a run by itself, and a reviewer's
+comment never does.
+
+## What stays rigid
+
+| Kept | Why it is the kernel's |
+| --- | --- |
+| the paired measurement, the private seed, the floor, the suite, the cached baseline rule, the zero-change rule (an unchanged tree cannot be credited), the verdict bound to its sealed tree, base and contract | the number must be nobody's claim |
+| scope on the diff before anything is sealed, launched or measured; uncharged refusals repeat and never end the run | the out-of-scope edit could be to the ruler |
+| containment, the lane from the contract, `--nice` on launches, always queue, cancel on end | the session cannot hold GPUs or credentials |
+| launch, sleep and GPU-hour counts; refusal on exhaustion with the numbers | the meter is the only bound on spend |
+| the publish: open or fast-forward the PR head to the sealed tree, the ledger row rule, disarm before a head moves, refuse when a human pushed or the contract moved; under `merge: auto`, record the blessed head and let the sweep merge a clean, quiet PR at that head only, never arm GitHub auto-merge; otherwise humans merge | credit, merge authority, and nobody's work overwritten |
+| the steward's ruler measurement: full suite, sibling smoke checks, baseline reset | a ruler change must be verified as one |
+| standing: which comments are messages, the bot's own markers, the task label; the issue claim and its release; one delivery per message | authorization and liveness |
+| leases, the sweep, deadline floors, the stuck cap, the outage latch, the tamper guard, the report on every ending, the line seal at every terminal | liveness and audit |
+
+Scope admission for launch, submit, and stale-submit checkpoints refuses every
+out-of-scope request with a kernel inbox note listing up to ten offending paths
+and the contract's allowed scope (up to ten entries and 1,000 characters).
+Later refusals in the same run start with “Refused again:”. Nothing is sealed,
+launched, measured, or charged for a refused request. Refusals repeat and never
+end the run, including requests with malformed content or budget problems.
+When a launch capacity refusal cannot be delivered in another immediate resume,
+the run parks uncharged in capacity wait; its next wake receives the refusal and can retry.
+Authors without resume support start a fresh session with the workspace, line memory,
+and inbox for orientation; resumable authors continue the same session.
+The session walltime and contract sleep, launch, and GPU-hour budgets bound
+the loop. Outside capacity waits, a session that cannot resume ends as
+`session-error`; endpoint loss during refusal delivery ends as `session-outage`
+without sealing the rejected tree. Abandoning a rejected tree ends without
+measuring, sealing, or pushing it.
+Every refusal remains in the inbox for operators and later readers. The
+authoritative scope re-check in `measure_and_decide`, including wake re-entry,
+remains terminal. Judges still receive the run record.
+
+## What becomes the author's, and what is deleted
+
+| Today | After |
+| --- | --- |
+| an in-scope edit during review is re-measured as the PR candidate [25, 29] | nothing is measured unless submitted |
+| the base-sync ladder: sync, conflict, behind, withheld, superseded, "the numbers above still stand" [25, 26, 30, 31] | one message, base moved; the author merges or not and submits or not |
+| six withhold wordings for a reverted change [29] | the change is never reverted; the author's tree is the author's |
+| abandon a finished re-measure when the head moved [34] | the publish is a fast-forward or a refusal delivered as a message |
+| the panel re-read after a push, its two-revision cap [36, 37] | a submit runs the panel; findings are a message; the sleep count bounds revisions |
+| `finish_attempts` | folds into `wake_attempts`: any kernel retry without progress counts |
+| the kernel re-pins the base and tells the agent to merge; kernel-written conflict prompts [26, 54] | the base-moved message says what happened; no instruction |
+| a submit is refused until the run has launched [49]; a metered finish without a submit is scored no-improvement [7]; a submit needs a report [50] | the meter and the gate are the constraints; the report is `end`'s and the publish's |
+| a plain finish is measured; its failed gate ends the run as negative-result [9] | only a submit is measured; the verdict is a message; `end` is the author's |
+| research advice in the wake text and the brief | the role's instructions |
+| advisory findings never reach the author; siblings frozen at start | delivered; refreshed |
+| two first-publish implementations; an inline submit that drops its sibling launches | one publish; one job-and-wake path on every backend |
+| three cursors as record fields, `followup_stage`, `panel_wake_*`, `dirty_wake_head`, `extra_update`, `improve_prompt` | one inbox with per-collection positions, one renderer |
+| the steward's copy of the pipeline; its mission text in kernel code [43, 45] | the steward is a role with the same moves and its own publish; its text is role configuration |
+| `MAX_COMMENTS_PER_WAKE`, `PANEL_WAKE_CAP`, `finish_attempts`, `panel_wake_rounds` | gone; the sleep count and `wake_attempts` are the bounds |
+
+Out of this pass, and named so nobody reads their absence as a decision: the
+outer loop's choices (which issue, which benchmark next, an issue naming one
+benchmark [39–42]) belong to a planner note; the declared-comparison gate and
+the portfolio ledger stay in `research-loop.md`.
+
+## The record
+
+```
+run_id, target, benchmark, agent_id, issue_number
+state: running | parked | ended        ending, ending_note
+pr_url                                 the fact a PR is open
+session: backend, model, key_file, resume_session_id
+park: jobs (afterany ids), sealed_ref, base_sha, base_branch, deadline
+inbox: positions per GitHub collection, last delivered message
+meter: launches_used, sleeps_used, gpu_hours_used, review_topup_added
+wake_attempts                          liveness only
+```
+
+Gone from the record: `followup_stage`, `followup_job_id`, `panel_wake_head`,
+`panel_wake_text`, `panel_wake_rounds`, `dirty_wake_head`. `auto_blessed_head`
+stays only as long as `merge: auto` does.
+
+The candidate and submitted phases remain inside `stage`: they describe what
+its jobs measure and what result handling the shared wake must resume. They
+are metadata within the one park, not separate lifecycle states or wake paths.
+
+## Decisions
+
+Settled (Mengye, 2026-09-12):
+
+1. A human message waits for the jobs a run sleeps on; no interrupt.
+2. One meter for the run's life, with a small top-up when the PR opens, stated
+   in every wake.
+3. A worse submit on an open PR moves the head, with the number posted
+   plainly; the ledger row does not move.
+4. `end` is a verb, so a report is asked for at the moment the author
+   decides; a session that simply stops still ends the run with what it has.
+
+5. **Auto-merge** (Mengye, 2026-09-13): the owner opts in with `merge: auto`.
+   Publish records `auto_blessed_head` and never arms GitHub auto-merge in
+   this mode. The sweep merges a clean, quiet PR at that head only, with the
+   API's expected-head guard, while its base contract still permits auto.
+   Old arms are withdrawn; a changed head is a message to the author.
+   Manual mode keeps its required-human-review arming guard.
+
+### Later
+
+Multi-agent collaboration and sub-agent teams will need real addressing:
+sender and recipient, with routable messages. That is a future design item.
+The per-run inbox and outbox stay until then. Replies store their qualified
+thread when staged, so a later PR change does not change their destination.
+`agent-protocols.md` carries the design for it (decided 2026-09-14): an
+A2A-shaped envelope, one `message` verb with kernel-side routing, and a
+plan-writing planner, in three stages; a kernel-level sub-agent tier waits
+for evidence that in-session sub-agents and job arrays cannot meet a need.
+
+## Sequencing
+
+Each stage is one PR, reviewed, run from its commit on one fleet before any
+release, and deletes what it replaces. A fleet never lacks a working path
+between stages.
+
+1. **One inbox, one renderer.** Every inbound message, including the ones
+   delivered today, is written to the inbox and rendered by one function;
+   pending blocking findings are read from the inbox from this stage on, so
+   `panel_wake_text` can go. Advisory findings and a refreshed sibling view
+   ride along. No lifecycle change yet.
+2. **Messages reach a parked author.** Status: landed. `message` exists. A run with an open PR
+   parks; comments and base moves are inbox messages; the author can launch,
+   use `message` and sleep in review. A session that edits code in review still goes
+   through today's re-measure-and-push until the next stage replaces it.
+3. **Submit in review, and `end`.** Status: landed in full, including `end`
+   and the review top-up. The publish moves the PR head by
+   fast-forward; a gate verdict is a message on every path; the meter's
+   top-up exists; the submit policies [7, 49, 50] go; the follow-up
+   re-measure path no longer runs.
+4. **Three states.** Status: landed. `running`, `parked`, `ended`; the record migrates on
+   read. This stage lands only when no live record on any fleet carries
+   `followup_stage` or a follow-up job; the tick reports the count until it is zero.
+   `followup.py`, the steward's pipeline copy, and the counters are deleted
+   with their tests.
+
+5. **Session memory, message identities, CI results and direct merging.** Status: landed.
+   Memory guidance covers every session boundary. Messages carry origins and
+   qualified threads; staged replies keep their destinations. CI results and
+   head moves use the inbox. Auto mode merges through the sweep at the blessed
+   head and never arms GitHub auto-merge.
+
+## Standing contradictions this settles
+
+- Launches are submitted at sleep time, not when `launch` is called: kept.
+  Staging is the primitive; the author keeps working after a launch and the
+  jobs start when it sleeps.
+- There is a live channel to a running session, the watcher, for read-only
+  questions. `roles.md`'s "no live channel" is stale.
+- A follow-up's change is not re-measured by the orchestrator; only a submit
+  is measured. `roles.md` and `orchestrator-verify.md` are superseded here.
+- The panel re-read loop after a push is retired; a submit runs the panel.
+- A moved base is told, never forced; the finish's "merge and re-measure
+  both sides" in `roles.md`'s flow is retired.
+- One batch in flight per run is not a rule; launch several, sleep once.
+
+An operator may explicitly request `outerloop rebind <run-id>` to move a run to
+its slot's current author. The atomic request survives endpoint outages; the
+sweep dispatches it and the next wake lease holder validates the selection
+before replacing the binding. After three failed applications, the request is
+marked failed and normal sweep handling resumes. Status shows its last error;
+operators can cancel pending requests or replace failed ones with a new rebind.
+Same-backend changes retain the session; backend changes start a fresh briefed
+session. Ordered author history and immutable evaluation/launch provenance keep
+work attributed to the producing author. Judges retain fleet selection semantics.

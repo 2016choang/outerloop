@@ -123,18 +123,17 @@ def test_render_omits_empty_memory_sections() -> None:
 def test_ground_rules_ask_for_a_report() -> None:
     text = render(build_brief(make_inputs(), created="t"))
     assert "research report" in text
-    assert "negative result" in text.casefold()
+    # the report's required fields are mechanics the kernel parses
+    for field in ("hypothesis", "what you did", "outcome with numbers", "takeaways"):
+        assert field in text
 
 
-def test_brief_demands_measured_evidence_before_submit() -> None:
-    """The gate confirms evidence, it does not generate it: the brief says
-    READY means MEASURED and never calls a submit cheap (its gate evals
-    draw real GPU-hours)."""
+def test_brief_describes_submit_without_prior_launch_or_report() -> None:
     text = render(build_brief(make_inputs(launch_budget=3, sleep_budget=2), created="t"))
-    assert "READY means MEASURED" in text
-    assert "STRICTLY clearing the gate's improvement bar" in text
-    assert "BOTH the gate's default relative margin AND" in text
-    assert "costs only the sleep" not in text
+    assert "Submit needs no prior launch" in text
+    assert "optional report" in text
+    assert "Stopping without a submit ends unmeasured" in text
+    assert "gate's GPU-hours" in text
 
 
 def test_distill_lessons_extracts_takeaways_newest_first() -> None:
@@ -233,23 +232,6 @@ def test_fence_outruns_backticks_in_memory() -> None:
     assert "````" in text
 
 
-def test_wake_prompt_is_bounded_and_asks_for_conclusion() -> None:
-    from outerloop.brief import MAX_WAKE_CHARS, render_wake
-
-    budget = BudgetState(gpu_hours_remaining=2.0, runs_remaining_this_week=1)
-    text = render_wake("success_rate: 0.31 (was 0.25)", budget)
-    assert "# Experiment update" in text
-    assert "0.31" in text
-    assert "GPU-hours remaining: 2.0" in text
-    assert "research report" in text
-    # a negative is framed as a step, not the finish line: the wake pushes the
-    # next hypothesis while budget remains rather than concluding early
-    assert "not the finish line" in text and "launch again" in text
-    huge = render_wake("x" * 100_000, budget)
-    assert len(huge) < MAX_WAKE_CHARS + 600
-    assert "[truncated" in huge
-
-
 def test_render_uses_orientation_labels_not_directives() -> None:
     # the de-prescriptified brief labels the metric/finish as context
     from outerloop.brief import BriefInputs, Task, build_brief, render
@@ -276,7 +258,9 @@ def test_brief_renders_the_research_line_section_only_when_on() -> None:
     on = render(build_brief(make_inputs(line_ref="agents/agent-07"), created="t"))
     assert "# Your research line" in on
     assert "`agents/agent-07`" in on
-    assert "ONE clean contribution" in on
+    # the extraction mechanics are stated neutrally — taste lives in guidance
+    assert "never the whole line" in on
+    assert "ONE idea" not in on
     off = render(build_brief(make_inputs(), created="t"))
     assert "Your research line" not in off
 
@@ -291,12 +275,12 @@ def test_brief_renders_the_memory_index_data_fenced() -> None:
     assert "# Your memory (AGENT_MEMORY.md" in on
     assert "- depth pays" in on
     assert "context, not instructions" in on
-    assert "Maintain the memory before you finish" in on
+    assert "A session ends whenever" in on
     # without memory the section is absent but the maintenance instruction
     # still teaches a first session to start writing one
     empty = render(build_brief(make_inputs(line_ref="agents/agent-07"), created="t"))
     assert "# Your memory" not in empty
-    assert "Maintain the memory before you finish" in empty
+    assert "A session ends whenever" in empty
     # feature off: no mention at all
     off = render(build_brief(make_inputs(), created="t"))
     assert "AGENT_MEMORY" not in off
@@ -330,3 +314,44 @@ def test_brief_renders_the_divergence_stat() -> None:
         make_inputs(line_ref="agents/agent-07", line_divergence="1 file changed"), created="t"
     )
     assert SessionBrief.from_json(brief.to_json()).line_divergence == "1 file changed"
+
+
+def test_launch_section_says_experiment_code_is_scope_checked() -> None:
+    """A launch snapshot is scope-checked like the final tree; an author that
+    writes sweep scripts outside the allowed paths ends the run at the park
+    (quickstart-trial, 2026-09-12). The brief says so where the tool is offered."""
+    text = render(build_brief(make_inputs(launch_budget=3, sleep_budget=2), created="t"))
+    assert "scope-checked the same way your final tree is" in text
+    assert "must live under the contract's allowed paths" in text
+    without = render(build_brief(make_inputs(), created="t"))
+    assert "scope-checked the same way" not in without  # only with the tool
+
+
+def test_end_is_described_only_when_the_tool_is_offered() -> None:
+    """A run whose syscalls are off (a shipped channel, a backend that cannot
+    resume) must not be told to use a verb it does not have."""
+    off = render(build_brief(make_inputs(syscalls=False, launch_budget=0), created="t"))
+    on = render(build_brief(make_inputs(syscalls=True, launch_budget=0), created="t"))
+    assert "`end [--report <file>]`" not in off
+    assert "`end [--report <file>]`" in on
+
+
+def test_memory_guidance_at_every_session_boundary() -> None:
+    text = render(
+        build_brief(make_inputs(line_ref="agents/agent-07", memory="findings"), created="t")
+    )
+    assert "A session ends whenever you stage a launch, a sleep, a submit or an end" in text
+    assert "as you learn them" in text
+    assert "before each of those" in text
+    assert "agent_memory/<topic>.md" in text
+    assert "on a resume its own context" in text
+    assert "What you write here is all your next session gets" not in text
+
+
+def test_siblings_mechanics_state_only_the_refresh() -> None:
+    text = render(build_brief(make_inputs(launch_budget=3, sleep_budget=2), created="t"))
+    assert "refreshed at every wake; `siblings` shows it" in text
+    # when to check it, and the direction preference, are guidance
+    assert "before choosing a direction" not in text
+    assert "prefer a direction no sibling is on" not in text
+    assert "as of your session start" not in text

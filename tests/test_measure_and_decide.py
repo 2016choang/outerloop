@@ -15,7 +15,6 @@ from outerloop.orchestrator import (
     EvalError,
     MeasureOK,
     RunParked,
-    _benchmark,
     measure_and_decide,
     resume_attempt,
 )
@@ -88,7 +87,7 @@ def _decide(measurer, measured_paths=("src/model.py",), seed=7, suite_seed=99, t
     contract = load_contract(text, "x/y")
     return measure_and_decide(
         contract,
-        _benchmark(contract, "main"),
+        contract.benchmark("main"),
         base_sha=BASE,
         candidate_sha=CAND,
         seed=seed,
@@ -284,7 +283,7 @@ def _resume(measurer, measured_paths=("src/model.py",), seed=7, suite_seed=99, t
     contract = load_contract(text, "x/y")
     return resume_attempt(
         contract,
-        _benchmark(contract, "main"),
+        contract.benchmark("main"),
         base_sha=BASE,
         candidate_sha=CAND,
         seed=seed,
@@ -364,7 +363,7 @@ def test_cached_baseline_measures_the_base_once_then_only_candidates(tmp_path):
     from outerloop.measure import read_baseline_cache
 
     contract = load_contract(CACHED_CONTRACT, "x/y")
-    bench = _benchmark(contract, "main")
+    bench = contract.benchmark("main")
 
     def decide(m, base=BASE, seed=7):
         return measure_and_decide(
@@ -439,3 +438,156 @@ def test_cached_baseline_is_keyed_by_image_and_command(tmp_path):
     )
     got = read_baseline_cache(d, "main", BASE, image="/a.sif", command="run main")
     assert got and got["value"] == 0.6 and not list(d.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("missing", [("gpus",), ("gpu_type",), ("gpus", "gpu_type")])
+def test_baseline_cache_missing_resource_fields_is_a_miss(tmp_path, missing):
+    import json
+
+    from outerloop.measure import read_baseline_cache, write_baseline_cache
+
+    write_baseline_cache(tmp_path, "main", BASE, value=0.5, seed=0, run_tag="old")
+    path = tmp_path / f"main@{BASE}.json"
+    data = json.loads(path.read_text())
+    for key in missing:
+        del data[key]
+    path.write_text(json.dumps(data))
+    assert read_baseline_cache(tmp_path, "main", BASE) is None
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_v021_baseline_cache_miss_retry_reuse(tmp_path, monkeypatch, interrupt):
+    import json
+    import shutil
+    from unittest.mock import Mock
+
+    from outerloop.measure import DispatchedMeasurer, read_baseline_cache
+
+    source = Path(__file__).parent / "fixtures/rc1_v021/baselines"
+    cache = tmp_path / "baselines"
+    shutil.copytree(source, cache)
+    path = cache / f"main@{BASE}.json"
+    old = path.read_bytes()
+    assert "gpu_type" not in json.loads(old)
+    assert (
+        read_baseline_cache(
+            cache, "main", BASE, image="/img.sif", command="run main", metric="score"
+        )
+        is None
+    )
+    backend = Mock(has_lanes=False)
+    backend.job_id_for_name.return_value = ""
+    backend.status.return_value = "COMPLETED"
+    m = DispatchedMeasurer(
+        backend, tmp_path / "run", tmp_path / "repo", "/img.sif", "", "", 1, baseline_cache=cache
+    )
+    measured = []
+
+    def submit(spec):
+        # Synchronous compute: the real dispatched reader owns persistent results.
+        directory = Path(spec.script).parent
+        measured.append(directory.name)
+        (directory / "exit-code").write_text("0\n")
+        (directory / "stdout").write_text(
+            json.dumps({"metric": "score", "value": 0.5 if "baseline" in directory.name else 0.6})
+        )
+        return str(len(measured))
+
+    backend.submit.side_effect = submit
+    contract = load_contract(CACHED_CONTRACT, "x/y")
+
+    def decide():
+        return measure_and_decide(
+            contract,
+            contract.benchmark("main"),
+            base_sha=BASE,
+            candidate_sha=CAND,
+            seed=7,
+            suite_seed=0,
+            measured_paths=("src/model.py",),
+            measurer=m,
+            min_relative_improvement=0.005,
+        )
+
+    if interrupt:
+        original = Path.replace
+
+        def fail(p, target):
+            if target == path:
+                raise KeyboardInterrupt
+            return original(p, target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "replace", fail)
+            with pytest.raises(KeyboardInterrupt):
+                decide()
+        assert path.read_bytes() == old
+        assert len(measured) == 2
+    first = decide()
+    assert isinstance(first, MeasureOK) and first.baseline == 0.5
+    assert len(measured) == 2  # old 0.1 never accepted; retry reads completed new slots
+    saved = path.read_bytes()
+    second = decide()
+    assert isinstance(second, MeasureOK) and second.baseline == 0.5
+    assert second.baseline_note
+    assert len(measured) == 2 and path.read_bytes() == saved
+
+
+@pytest.mark.parametrize(
+    "memory,passes,rule", [(133, True, "gain-unlocked"), (160, False, "hard-cap")]
+)
+@pytest.mark.parametrize("direction,main_candidate", [("max", 127), ("min", 73)])
+def test_conditional_memory_gate(memory, passes, rule, direction, main_candidate):
+    text = (
+        CONTRACT.replace("direction: max", "direction: min")
+        .replace("metric: r2\n    direction: min", f"metric: r2\n    direction: {direction}")
+        .replace(
+            "min_delta: 0.02",
+            """min_delta_rel: 0.05
+    regression:
+      free_rel: 0.005
+      max_rel: 0.5
+      requires_gain_rel: 0.05""",
+        )
+    )
+    out = _decide(
+        FakeMeasurer(
+            {
+                "baseline": 100,
+                "candidate": main_candidate,
+                "sib-sib-base": 100,
+                "sib-sib-cand": memory,
+            }
+        ),
+        measured_paths=("src/shared/util.py",),
+        text=text,
+    )
+    assert isinstance(out, MeasureOK) is passes
+    assert out.suite[0].rule == rule
+    assert out.suite[0].regressed is not passes
+    if not passes:
+        assert out.outcome == "suite-regression"
+
+
+@pytest.mark.parametrize(
+    "baseline,candidate,passes",
+    [(0.3, 0.314999, False), (0.3, 0.315, True), (0.3, 0.315001, True), (0, 0.03, False)],
+)
+def test_suite_unlock_uses_exact_measured_relative_gain(baseline, candidate, passes):
+    text = CONTRACT.replace(
+        "min_delta: 0.02",
+        """min_delta_rel: 0.05
+    regression:
+      free_rel: 0.005
+      max_rel: 0.5
+      requires_gain_rel: 0.05""",
+    )
+    out = _decide(
+        FakeMeasurer(
+            {"baseline": baseline, "candidate": candidate, "sib-sib-base": 100, "sib-sib-cand": 67}
+        ),
+        measured_paths=("src/shared/util.py",),
+        text=text,
+    )
+    assert isinstance(out, MeasureOK) is passes
+    assert out.suite[0].rule == ("gain-unlocked" if passes else "insufficient-gain")

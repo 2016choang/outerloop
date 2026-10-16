@@ -1,7 +1,9 @@
 # The experiment dispatcher
 
-**Status: proposal (2026-08-17).** How experiments and evals become their own
-jobs instead of running inside a role session's walltime. `architecture.md`
+**Status: built — phases 1 (evals as jobs) and 2 (the author experiment
+syscall) are live; the phase-3 scale interactions are not.** How experiments
+and evals become their own jobs instead of running inside a role session's
+walltime. `architecture.md`
 owns the wake fail-safety layers this builds on; `agent-substrate.md` set the
 constitution (experiment submission is an `act` syscall, not an agent tool);
 `orchestrator-verify.md` owns the panel, which stays in-job. This note
@@ -35,14 +37,14 @@ Dispatch is a **syscall on the existing compute seam** — `submit(JobSpec)` +
 an `afterany` wake job, the same two primitives the tick chain already uses,
 zero new kernel concepts. When the orchestrator (or, in phase 2, an author
 session through a tool) needs an experiment run, it submits the job, writes
-the run record into `waiting` with `experiment_job_id` and a deadline, and
+the run record into `parked` with `experiment_job_id` and a deadline, and
 **ends the session**. Results arrive by wake: the afterany job is the
-primary delivery, the tick's waiting-sweep is the backup (both exist; the
-sweep runs dry today). Nothing polls, and no clock runs while a job queues.
+primary delivery, the tick's waiting-sweep is the backup. Nothing polls, and
+no clock runs while a job queues.
 
 ## The three settled questions
 
-**When it kicks in.** Phase 1 ships now — the eval-timeout class is live and
+**When it kicks in.** Phase 1 is live — the eval-timeout class is live and
 recurring. The in-job evaluator remains the default: an eval that finishes
 in minutes on the job's own allocation is not worth a queue round-trip.
 The switch is a per-benchmark contract knob (schema change, phase 1): an
@@ -115,18 +117,19 @@ which cached measurement (and seed) the delta was taken against. Two width
 slots that miss the cache at once both measure and both write; last writer
 wins and both values are real.
 
-**Interop.** The orchestrator keeps a single seam: `Evaluator` grows a
-dispatched implementation that *stages* instead of blocking. `climb_once`'s
-transaction (session -> measure -> gates -> panel -> publish) becomes
-resumable at its measure points: reaching one submits the eval job, persists
-the stage in the run record, and returns; the wake re-enters the transaction
-at the recorded stage with the job's result file. The states, records,
-deadlines, lease machinery, sweep, and `MAX_WAKE_ATTEMPTS` stuck-run
-ending all exist and are tested; what is a STUB today is the production
-`WakeDispatcher` — the tick's sweep runs dry and logs WOULD-WAKE. Phase 1
-fills that stub (a wake re-invokes the parked transaction) and wires the
-climb's stages into the rest — it does not build a second event plane. The panel stays in-job: judge sessions are
-API-bound minutes, and moving them buys nothing.
+**Interop.** The orchestrator keeps a single seam: the `Measurer` has a
+dispatched implementation (`measure.DispatchedMeasurer`) that *stages*
+instead of blocking. `climb_once`'s transaction (session -> measure -> gates
+-> panel -> publish) is resumable at its measure points: reaching one submits
+the eval job, persists the stage in the run record, and returns; the wake
+re-enters the transaction at the recorded stage with the job's result file.
+The states, records, deadlines, lease machinery, sweep, `MAX_WAKE_ATTEMPTS`
+stuck-run ending, and the production `WakeDispatcher` all exist and are
+tested — dispatched wakes are on by default (off with
+`OUTERLOOP_DISPATCH_WAKE=0` or a `<root>/DISARM_WAKE` sentinel), and a wake
+re-invokes the parked transaction. There is no second event plane. The panel
+stays in-job: judge sessions are API-bound minutes, and moving them buys
+nothing.
 
 **Clock pause, and the credit boundary.** There is no pause mechanism —
 there is a state transition. The session ends at dispatch, so the session
@@ -144,7 +147,7 @@ is believed.
 
 ### The resume seam (stage B)
 
-`climb_once` today fuses three things: baseline (pre-session tree), the
+`climb_once` fuses three things: baseline (pre-session tree), the
 SESSION (edits the workspace), and candidate (dirty post-session workspace),
 then decides. The session is the one part that must NOT re-run on wake — its
 edits are done — and it is also the only non-idempotent part. So the seam is
@@ -160,7 +163,7 @@ AFTER the session:
 3. The MEASURE-AND-DECIDE phase — a pure function of `(base_sha,
    candidate_sha, contract, seed, suite_seed)` — dispatches its measures
    through the `Measurer`, and on `MeasurementPending` the run parks as
-   `waiting`. It measures LAZILY, in the same order `climb_once` did: first
+   `parked`. It measures LAZILY, in the same order `climb_once` did: first
    baseline@base_sha + candidate@candidate_sha (one wake); only if that pair
    clears the improvement threshold AND the diff touched shared code does it
    dispatch the sibling pairs (a second wake). A non-improving candidate never
@@ -198,7 +201,7 @@ Sub-parts, each its own PR through the panel:
   logic behind a re-enterable function over committed shas; pure, tested
   with a fake measurer.
 - **B.2b:** wire `live_climb` — session -> snapshot -> measure_and_decide;
-  on park write the `waiting` record (base_sha/candidate_sha/`candidate_ref`/
+  on park write the `parked` record (base_sha/candidate_sha/`candidate_ref`/
   seed/stage + `experiment_job_id` = the afterany set) and end. A terminal
   wake `drop_snapshot`s `candidate_ref` (the snapshot outlives every park/wake
   cycle, so the drop is deferred to run end, never mid-cycle). When a revision
@@ -356,8 +359,8 @@ single writer via lease):
 | field | role |
 |---|---|
 | `run_id` `target` `benchmark` `agent_id` `task_title` `issue_number` `pr_url` | identity/topology |
-| `climb_job_id` | the transaction's own job — lets the sweep tell KILLED from crashed; must be re-stamped by any path re-entering `implementing` from a new job |
-| `experiment_job_id` `wake_job_id` `followup_job_id` | Slurm handles for the dispatched work, its afterany wake, and review servicing |
+| `climb_job_id` | the transaction's own job — lets the sweep tell KILLED from crashed; must be re-stamped by any path re-entering `running` from a new job |
+| `experiment_job_id` `wake_job_id` | Slurm handles for the dispatched work and its afterany wake |
 | `resume_session_id` | the harness session a wake reconstructs — the entire "pause" state for a session's mind |
 | `state` `deadline` `terminal_seen` `wake_attempts` | wake bookkeeping; a waiting record REQUIRES a deadline |
 | `stage` (phase 1) | a small object, not a label: the parked measure point PLUS the process-local state re-entry needs — `base_sha`, `candidate_sha` and the candidate snapshot's `candidate_ref` (random, so it MUST be stored — a terminal wake hands it to `drop_snapshot` or the snapshot leaks), the drawn `seed` and `suite_seed` (both random, both stored so the wake re-measures PAIRED), the pre-eval tree fingerprints the drift check compares (today locals; a resumed process without them would fail the drift check closed on every dispatch), and the expected result-file names. The scope/suite `measured_paths` are NOT in here — they are re-derived from the `base_sha..candidate_sha` diff (step 4), not stored |
@@ -394,7 +397,7 @@ skip-clean, data, detail, reviewed_by}`), re-validated by the posting job.
 
 ## Acceptance
 
-Phase 1 lands when: a steward eval that times out in-job today completes as
+Phase 1 landed when: a steward eval that times out in-job completes as
 a dispatched job with the run resuming correctly across the wake; a killed
 eval job ends its run as `eval-error` with a report; and the waiting-sweep's
 backup wake fires when the afterany job is scancel'd. The named first workloads are yolo's:

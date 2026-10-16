@@ -26,7 +26,7 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from outerloop.appauth import resolve_bot_auth
+from outerloop.appauth import add_credential_args, resolve_bot_auth
 from outerloop.attempt import (
     AttemptOutcome,
     Terminated,
@@ -34,33 +34,41 @@ from outerloop.attempt import (
     _best_effort,
     arm_self_deadline,
     arm_sigterm_containment,
+    submission_paths,
 )
 from outerloop.contract import Contract, contract_text_in_tree, load_contract
+from outerloop.dispatch import image_file_arg
 from outerloop.github import (
     GitHubClient,
     TokenProvider,
     Workspace,
     bot_login_from_env,
+    handoff_git_dir,
     is_own_login,
 )
-from outerloop.harness import Harness, budget_exhausted, default_binary, outage, redact
+from outerloop.harness import (
+    ClaudeModelUnset,
+    Harness,
+    budget_exhausted,
+    default_binary,
+    default_claude_model,
+    outage,
+    redact,
+)
 from outerloop.intake import (
     CLAIM_MARKER,
     RELEASE_MARKER,
     IssueTask,
     infer_benchmark,
+    issue_labels,
     qualifying_issue,
 )
+from outerloop.ledger_branch import progress_link
+from outerloop.ledger_events import display_leader, measurement_pending, queue_pending
 from outerloop.markers import has_label, has_marker, marker
 from outerloop.orchestrator import draw_run_seed, steward_out_of_scope
 from outerloop.paths import CONFIG_DIR
-from outerloop.progress import (
-    PROGRESS_PATHS,
-    LeaderEntry,
-    fmt_metric,
-    load_leader,
-    write_progress,
-)
+from outerloop.progress import fmt_metric
 from outerloop.role_runner import build_harness, role_key, run_role
 from outerloop.roles import steward_spec
 from outerloop.rolespec import RoleSpec
@@ -68,8 +76,8 @@ from outerloop.runstate import (
     ABORTED,
     BUDGET_EXHAUSTED,
     ENDED,
-    IN_REVIEW,
     NEGATIVE_RESULT,
+    PARKED,
     STUCK,
     RunRecord,
     save_record,
@@ -142,9 +150,10 @@ Hard rules:
 - Edit ONLY the steward paths listed below. The solver directories are
   forbidden to you completely — do not read requirements from them, do not
   "fix" them, do not compensate for their weaknesses.
-- Do not touch BENCHMARKS.md or results/leader.json: after your change the
-  orchestrator re-measures the benchmark with the CURRENT solver and writes
-  those records itself, with its own provenance.
+- Do not edit BENCHMARKS.md or results/leader.json.
+  The records live on the research-log branch in BENCHMARKS.md and
+  results/leader.json. A merged result appears there after the PR is merged
+  and the kernel observes the merge.
 - Your change must keep every benchmark runnable: the full test suite and
   each eval command still pass after your edits. Update tests you are
   allowed to touch when the env legitimately changes them — never to make a
@@ -179,50 +188,8 @@ def validate_and_measure(
     return float(evaluator.evaluate(workspace, bench.command, bench.metric, extra_env=seed_env))
 
 
-def rebase_leader_row(
-    workspace: Path,
-    contract: Contract,
-    benchmark: str,
-    bench: Any,
-    measured: float,
-    run_id: str,
-    created: str,
-    target: str,
-    run_seed: int = 0,
-) -> float:
-    """Reset the benchmark's ledger row to the orchestrator's measurement;
-    returns the PRIOR best (captured before the overwrite)."""
-    entries = load_leader(workspace)
-    prior_entry = entries.get(benchmark)
-    prior_best = prior_entry.best if prior_entry is not None else float("nan")
-    entries[benchmark] = LeaderEntry(
-        benchmark=benchmark,
-        metric=bench.metric,
-        direction=bench.direction,
-        baseline=measured,
-        best=measured,
-        best_run=f"baseline-{run_id}",
-        updated=created[:10],
-        run_seed=run_seed,
-    )
-    write_progress(
-        workspace,
-        entries,
-        target,
-        digits={b.name: b.display_digits for b in contract.benchmarks if b.display_digits},
-    )
-    return prior_best
-
-
 # A short role reminder prefixed to steward WAKE prompts: the resumed
 # session must keep its constitution without re-sending the whole brief.
-STEWARD_WAKE_PREAMBLE = (
-    "You are the BENCHMARK STEWARD (env/eval/tests territory only; solver "
-    "directories and the record ledger remain forbidden; the orchestrator "
-    "re-validates and re-bases records after any change you make).\n\n"
-)
-
-
 class StewardEvaluator(Protocol):
     def evaluate(self, workspace: Path, command: str, metric: str) -> float: ...
 
@@ -242,13 +209,9 @@ def pick_steward_issue(
         return None
     issues = sorted(github.list_open_issues(repo), key=lambda i: i.get("number", 0))
     for issue in issues:
-        labels = {
-            str(label.get("name", "")).casefold()
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-        }
-        if not has_label(labels, "steward"):
+        if not has_label(issue_labels(issue), "steward"):
             continue
+        # author standing only: no label vouches for the privileged lane
         if not qualifying_issue(issue, bot_login):
             continue
         number = int(issue["number"])
@@ -326,11 +289,7 @@ def release_orphaned_claims(
     for issue in github.list_open_issues(repo):
         if released >= limit:
             break
-        labels = {
-            str(label.get("name", "")).casefold()
-            for label in issue.get("labels", [])
-            if isinstance(label, dict)
-        }
+        labels = issue_labels(issue)
         if not has_label(labels, "steward"):
             continue
         number = int(issue.get("number", 0))
@@ -423,10 +382,14 @@ def live_steward(
     base_branch: str = "main",
     issue_number: int = 0,
     work_order: str = "",
+    author_key_file: str = "",
+    author_model: str = "",
     spec: RoleSpec | None = None,
 ) -> AttemptOutcome:
     """Run one stewardship against the real target repo."""
     import os as _os
+
+    from outerloop.attempt import finish_run
 
     # a deployment bug is loud and immediate — same guard as attempt_once
     spec = spec or steward_spec()
@@ -442,8 +405,11 @@ def live_steward(
         target=config.target,
         task_title=f"steward: {config.benchmark}",
         benchmark=config.benchmark,
-        state="implementing",
+        state="running",
         agent_id=STEWARD_AGENT_ID,
+        author_backend="claude",
+        author_key_file=author_key_file,
+        author_model=author_model,
         deadline=now + 24 * 3600,
         issue_number=issue_number,
         run_job_id=_os.environ.get("SLURM_JOB_ID", ""),
@@ -468,26 +434,47 @@ def live_steward(
 
     tree_hashes: list[str] = []
     try:
-        ws = Workspace.clone(f"https://github.com/{config.target}.git", workspace, auth=bot_auth)
+        ws = Workspace.clone_for_channels(
+            f"https://github.com/{config.target}.git",
+            workspace,
+            config.target,
+            base_branch,
+            STEWARD_AGENT_ID,
+            auth=bot_auth,
+        )
+        # the kernel→session hand-off: one check before the steward runs
+        handoff_git_dir(workspace)
         contract_text = contract_text_in_tree(workspace)
         contract = load_contract(contract_text, config.target)
         if contract.steward is None:
             raise ValueError(
                 "the contract declares no steward scope; stewardship is not enabled on this target"
             )
-        bench = next((b for b in contract.benchmarks if b.name == config.benchmark), None)
-        if bench is None:
-            raise ValueError(f"benchmark {config.benchmark!r} not in contract")
+        bench = contract.benchmark(config.benchmark)
+        record = dc_replace(
+            record,
+            channels=contract.channels.model_dump(exclude_defaults=True),
+            verification=bench.verification,
+        )
+        if record.channels or record.verification != "gate":
+            save_record(run_root, record, now)
+        from outerloop.syscall import ensure_excluded, write_policy
+
+        if record.channels or bench.verification != "gate":
+            ensure_excluded(workspace)
+        write_policy(workspace, bench.verification, record.channels)
         if not spec.scope:
             # manifest truth: the spec run_role receives carries the steward's
             # real territory; enforcement stays steward_out_of_scope below
             spec = dc_replace(spec, scope=tuple(contract.steward.allowed))
 
         def changed_paths() -> list[str]:
+            paths = submission_paths(ws, f"refs/remotes/origin/{base_branch}")
             ws.git("add", "-A")
-            paths = ws.staged_paths()
-            tree_hashes.append(ws.git("write-tree").strip())
-            ws.git("reset")
+            try:
+                tree_hashes.append(ws.git("write-tree").strip())
+            finally:
+                ws.git("reset")
             return paths
 
         if issue_number:
@@ -534,7 +521,20 @@ def live_steward(
                     "resume_session_id": session.session_id or "",
                 }
             )
-            _best_effort("final record", lambda: save_record(run_root, final, now), secrets)
+            _best_effort(
+                "final record",
+                lambda: finish_run(
+                    run_root,
+                    final,
+                    final.ending,
+                    final.ending_note,
+                    now,
+                    auth=bot_auth,
+                    secrets=secrets,
+                    bot_login=config.bot_login,
+                ),
+                secrets,
+            )
             report_path = run_dir / "report.md"
             _best_effort("run report", lambda: report_path.write_text(report), secrets)
             if issue_number:
@@ -573,19 +573,8 @@ def live_steward(
         if len(tree_hashes) < 2 or tree_hashes[-1] != tree_hashes[-2]:
             raise WorkspaceDrift("content changed during validation (or fingerprints missing)")
 
-        # Orchestrator-authored record reset: the re-based benchmark's row
-        # carries the orchestrator's own measurement, never a pasted number.
-        prior_best = rebase_leader_row(
-            workspace,
-            contract,
-            config.benchmark,
-            bench,
-            measured,
-            run_id,
-            created,
-            config.target,
-            run_seed=run_seed,
-        )
+        prior = display_leader(github, config.target).get(config.benchmark)
+        prior_best = prior.best if prior else float("nan")
 
         branch = f"{STEWARD_BRANCH_PREFIX}/{run_id}"
         ws.branch(branch)
@@ -594,9 +583,7 @@ def live_steward(
             f"(new baseline {fmt_metric(measured, bench.display_digits)})"
             f"\n\nAgent: {STEWARD_AGENT_ID}",
             author=config.bot_login,
-            forbidden=lambda p: (
-                p not in PROGRESS_PATHS and bool(steward_out_of_scope([p], contract))
-            ),
+            forbidden=lambda p: bool(steward_out_of_scope([p], contract)),
         )
         ws.push(branch)
         body = (
@@ -616,6 +603,7 @@ def live_steward(
             f"them with their own work orders.\n\n"
             f"## Stewardship report\n\n{redact(session.final_text, secrets)[:20000]}"
         )
+        body += f"\n\n{progress_link(config.target)}\n"
         pr_url = github.create_pull(
             config.target,
             title=f"[steward] {config.benchmark}: re-based env "
@@ -626,6 +614,34 @@ def live_steward(
         )
         pr_number = pr_url.rstrip("/").rsplit("/", 1)[-1]
         if pr_number.isdigit():
+            measured_sha = ws.git("rev-parse", "HEAD").strip()
+            record = queue_pending(
+                run_root,
+                dc_replace(record, pr_url=pr_url),
+                github,
+                measurement_pending(
+                    ws,
+                    contract,
+                    bench,
+                    record,
+                    measured,
+                    measured,
+                    run_seed,
+                    measured_sha,
+                    int(pr_number),
+                    measured_sha,
+                    created,
+                    kind="RESET",
+                    provenance="measured",
+                ),
+                contract,
+                now,
+            )
+        if (
+            pr_number.isdigit()
+            and bench.verification != "self_report"
+            and getattr(contract, "merge", "manual") != "auto"
+        ):
             _best_effort(
                 "auto-merge arming",
                 lambda: github.arm_auto_merge_when_review_required(config.target, int(pr_number)),
@@ -634,7 +650,7 @@ def live_steward(
         final = RunRecord(
             **{
                 **record.__dict__,
-                "state": IN_REVIEW,
+                "state": PARKED,
                 "pr_url": pr_url,
                 "resume_session_id": session.session_id or "",
                 "ending_note": pr_url,
@@ -676,7 +692,20 @@ def live_steward(
             }
         )
         report_path = run_dir / "report.md"
-        _best_effort("ending record", lambda: save_record(run_root, final, now), secrets)
+        _best_effort(
+            "ending record",
+            lambda: finish_run(
+                run_root,
+                final,
+                final.ending,
+                final.ending_note,
+                now,
+                auth=bot_auth,
+                secrets=secrets,
+                bot_login=config.bot_login,
+            ),
+            secrets,
+        )
         wrote = _best_effort(
             "error report",
             lambda: report_path.write_text(
@@ -750,7 +779,6 @@ def live_steward(
 def main() -> int:
     import argparse
     import base64
-    import os
     import time
     from datetime import UTC, datetime
 
@@ -762,25 +790,26 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--benchmark", required=True)
     parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--image", default="", help="apptainer image for session+validation")
+    parser.add_argument(
+        "--image", default="", type=image_file_arg, help="apptainer image for session+validation"
+    )
     parser.add_argument(
         "--uncontained",
         action="store_true",
         help="run WITHOUT a container (dev only)",
     )
     parser.add_argument("--claude-bin", default=default_binary("claude"))
-    parser.add_argument("--model", default="claude-opus-5")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="steward model; default the deployment's OUTERLOOP_CLAUDE_MODEL (the steward "
+        "runs the claude backend), resolved after parsing",
+    )
     parser.add_argument("--max-turns", type=int, default=60)
     parser.add_argument("--session-minutes", type=int, default=60)
     parser.add_argument("--job-minutes", type=int, default=0)
     parser.add_argument("--deadline-margin-s", type=float, default=120.0)
-    parser.add_argument("--pat-file", default=str(CONFIG_DIR / "bot_pat"))
-    parser.add_argument(
-        "--github-app-file",
-        default=os.environ.get("OUTERLOOP_GITHUB_APP_FILE", ""),
-        help="GitHub App config (JSON: app_id, installation_id, private_key); "
-        "when set, installation tokens replace the PAT",
-    )
+    add_credential_args(parser)
     parser.add_argument(
         "--key-file",
         default=str(CONFIG_DIR / "steward_key"),
@@ -790,6 +819,11 @@ def main() -> int:
     parser.add_argument("--work-order-b64", default="")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    if not args.model:
+        try:
+            args.model = default_claude_model()
+        except ClaudeModelUnset as exc:
+            parser.error(str(exc))
     if not args.image and not args.uncontained:
         parser.error("--image is required (or pass --uncontained explicitly, dev only)")
 
@@ -831,6 +865,8 @@ def main() -> int:
             created=datetime.now(UTC).isoformat(),
             secrets=(api_key, bot_auth.token()),
             issue_number=args.issue,
+            author_key_file=str(Path(args.key_file).expanduser()),
+            author_model=args.model,
             work_order=(
                 base64.b64decode(args.work_order_b64).decode() if args.work_order_b64 else ""
             ),

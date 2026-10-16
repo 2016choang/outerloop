@@ -400,6 +400,44 @@ def test_gpu_jobs_get_nv_and_gpus(tmp_path):
     assert spec.time_minutes == 250  # a 4h GPU eval fits under the raised ceiling
 
 
+def test_gpu_eval_sizing_follows_operator_settings(tmp_path, monkeypatch, caplog):
+    """Lean GPU nodes (fewer cores or less RAM per GPU than the default) set
+    the per-GPU floor; invalid values keep the default."""
+    from outerloop.dispatch import EVAL_CPUS_PER_GPU
+
+    script = tmp_path / "job.sh"
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("OUTERLOOP_EVAL_CPUS_PER_GPU", "6")
+    monkeypatch.setenv("OUTERLOOP_EVAL_MEM_GB_PER_GPU", "40")
+    one = eval_job_spec(script, job_name="e", account="", partition="gpu", eval_minutes=30, gpus=1)
+    assert (one.cpus, one.mem) == (6, "40G")
+    two = eval_job_spec(script, job_name="e", account="", partition="gpu", eval_minutes=30, gpus=2)
+    assert (two.cpus, two.mem) == (12, "80G")
+    cpu = eval_job_spec(script, job_name="e", account="", partition="p", eval_minutes=30)
+    assert (cpu.cpus, cpu.mem) == (4, "8G")  # CPU evals are untouched
+    monkeypatch.setenv("OUTERLOOP_EVAL_CPUS_PER_GPU", "0")
+    bad = eval_job_spec(script, job_name="e", account="", partition="gpu", eval_minutes=30, gpus=1)
+    assert bad.cpus == EVAL_CPUS_PER_GPU
+    assert "must be positive" in caplog.text
+
+
+def test_gpu_sizing_settings_reach_the_tick() -> None:
+    """The deployment .env only reaches ticks and jobs through the allowlist
+    (the deploy script's list is kept equal to it by a parity test)."""
+    from outerloop.cli import TICK_ENV_KEYS
+
+    assert "OUTERLOOP_EVAL_CPUS_PER_GPU" in TICK_ENV_KEYS
+    assert "OUTERLOOP_EVAL_MEM_GB_PER_GPU" in TICK_ENV_KEYS
+
+
+def test_token_price_table_reaches_the_tick() -> None:
+    """Session cost is priced inside the attempt job, so the operator's price
+    table must survive the .env allowlist."""
+    from outerloop.cli import TICK_ENV_KEYS
+
+    assert "OUTERLOOP_TOKEN_PRICES" in TICK_ENV_KEYS
+
+
 def test_gpu_evals_are_sized_per_gpu(tmp_path):
     """A GPU eval trains: it gets cores and host RAM per GPU (compile workers
     and data loading OOM-kill at the CPU eval's 4 cores / 8 GB); CPU evals
@@ -552,3 +590,47 @@ def test_job_copies_the_seed_cache_into_its_own_before_uv_runs(tmp_path):
         run_dir, "plain", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image="/i.sif"
     )
     assert "cp -a" not in plain.read_text()
+
+
+@pytest.mark.parametrize("gpus", [0, 1])
+def test_operator_placement_and_binary_reach_evals_and_launches(tmp_path, monkeypatch, gpus):
+    import argparse
+    import shlex
+
+    from outerloop.attempt import _dispatch_settings, _make_launcher
+    from outerloop.compute import CommandResult, SlurmCompute
+    from outerloop.measure import Measure
+    from outerloop.syscall import Launch, SyscallRequest
+
+    monkeypatch.setenv("OUTERLOOP_QOS", "priority")
+    binary = "/apps/container tools/apptainer"
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", binary)
+    argv = []
+
+    def runner(command, timeout):
+        argv.append(command)
+        return CommandResult(0, "100", "")
+
+    monkeypatch.setattr("outerloop.compute.compute_from_env", lambda: SlurmCompute(runner=runner))
+    settings = _dispatch_settings(
+        argparse.Namespace(
+            image="/image.sif",
+            account="cpu",
+            partition="short",
+            gpu_account="gpu",
+            gpu_partition="h200",
+        )
+    )
+    run = tmp_path / "run"
+    run.mkdir()
+    measurer = settings.measurer(run, tmp_path, 10, "test")
+    measurer._dispatch(Measure("candidate", "a" * 40, "echo hi", "metric", gpus=gpus))
+    launcher = _make_launcher(settings, run, tmp_path, "test", gpus=gpus)
+    launcher(
+        "a" * 40, SyscallRequest(launches=(Launch(name="trial", command="echo hi", minutes=5),))
+    )
+    assert len(argv) == 2
+    for command in argv:
+        assert "--qos=priority" in command
+        assert f"--partition={'h200' if gpus else 'short'}" in command
+        assert shlex.quote(binary) + " exec --containall" in Path(command[-1]).read_text()

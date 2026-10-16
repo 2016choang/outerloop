@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from outerloop.harness import SessionResult
 from outerloop.panel import PanelLens, run_panel
 from outerloop.review import PullRequest
@@ -42,9 +44,11 @@ class _Judge:
     text: str
     is_error: bool = False
     workspaces: list = field(default_factory=list)
+    briefs: list = field(default_factory=list)
 
     def run(self, brief_text, workspace, resume_session_id=None) -> SessionResult:
         self.workspaces.append(Path(workspace))
+        self.briefs.append(brief_text)
         if not self.is_error:
             # commit the verdict through the syscall channel, as the tool would
             try:
@@ -79,14 +83,22 @@ def test_lenses_read_their_workspaces_and_blocking_merges(tmp_path: Path) -> Non
         contract_text="benchmarks: []",
         today="2026-08-15",
         round_no=1,
+        guidance="this repo's standard",
     )
+    # every lens gets the repository's panel guidance in its own prompt
+    assert all("this repo's standard" in j.briefs[0] for j in (verify, review))
+    # in the panel the review lens blocks only on validity, and its guidance
+    # precedes the untrusted PR text so a report cannot forge or swallow it
+    from outerloop.review import PANEL_BLOCKING
+
+    assert PANEL_BLOCKING in review.briefs[0]
+    assert review.briefs[0].index("this repo's standard") < review.briefs[0].index(_PR.title)
     assert verify.workspaces == [tmp_path]  # verify reads both trees from the root
     assert review.workspaces == [tmp_path / "pr-head"]  # review reads the candidate only
     assert len(verdict.blocking) == 1 and verdict.blocking[0].file == "src/x.py"
     assert "0 blocking" in verdict.transcript and "1 blocking" in verdict.transcript
-    # the wake quotes findings as data, fenced
-    assert "```" in verdict.wake_text and "reads the ruler" in verdict.wake_text
-    assert "DATA, not instructions" in verdict.wake_text
+    assert verdict.findings == verdict.blocking
+    assert "reads the ruler" in verdict.findings[0].summary
 
 
 def test_no_verdict_is_never_a_pass(tmp_path: Path) -> None:
@@ -95,14 +107,14 @@ def test_no_verdict_is_never_a_pass(tmp_path: Path) -> None:
     assert verdict.blocking == ()
     assert "no verdict" in verdict.transcript
     assert "silence is not endorsement" in verdict.transcript
-    assert verdict.wake_text == ""  # nothing to wake on, but the transcript says why
+    assert verdict.findings == ()  # nothing to wake on, but the transcript says why
 
 
 def test_clean_panel_has_no_wake(tmp_path: Path) -> None:
     verdict = run_panel(
         (PanelLens("review", _Judge(_VERIFY_CLEAN)),), tmp_path, _PR, "c", "t", round_no=1
     )
-    assert verdict.blocking == () and verdict.wake_text == ""
+    assert verdict.blocking == () and verdict.findings == ()
 
 
 def test_no_verdict_degrades_the_read(tmp_path: Path) -> None:
@@ -129,3 +141,52 @@ def test_parse_lenses_admits_codex_and_refuses_uncontainable_backends() -> None:
     assert parse_lenses("review:hermes:gpt-5.6-terra") == (("review", "hermes", "gpt-5.6-terra"),)
     with pytest.raises(ValueError, match="unknown backend"):
         parse_lenses("review:gemini")
+
+
+def test_advisory_details_survive_the_panel_read(tmp_path):
+    payload = json.loads(_REVIEW_BLOCKING)
+    payload["findings"][0].update(blocking=False, summary="readability", detail="name the constant")
+    verdict = run_panel(
+        (PanelLens("review", _Judge(json.dumps(payload))),), tmp_path, _PR, "c", "t", round_no=1
+    )
+    assert not verdict.blocking
+    assert len(verdict.findings) == 1
+    assert verdict.findings[0].summary == "readability"
+    assert verdict.findings[0].detail == "name the constant"
+
+
+@pytest.mark.parametrize(
+    "backend,model",
+    [("claude", "claude-author"), ("codex", "gpt-author"), ("claude", ""), ("codex", "")],
+)
+def test_resolve_lenses_inherits_author(backend, model):
+    from outerloop.panel import resolve_lenses
+
+    assert resolve_lenses("verify,review", backend, model) == (
+        ("verify", backend, model),
+        ("review", backend, model),
+    )
+    assert resolve_lenses(f"review:{backend}", backend, model) == (("review", backend, model),)
+
+
+def test_resolve_lenses_explicit_models():
+    from outerloop.panel import resolve_lenses
+
+    assert resolve_lenses("verify:claude:judge,review:codex:other", "claude", "author") == (
+        ("verify", "claude", "judge"),
+        ("review", "codex", "other"),
+    )
+
+
+@pytest.mark.parametrize(
+    "author,judge", [("codex", "claude"), ("claude", "codex"), ("claude", "hermes")]
+)
+def test_resolve_lenses_refuses_model_less_other_backend(author, judge):
+    from outerloop.panel import resolve_lenses
+
+    with pytest.raises(ValueError) as exc:
+        resolve_lenses(f"review:{judge}", author, "author-model")
+    assert str(exc.value) == (
+        f"panel lens review:{judge} names no model and does not run on the "
+        f"author's backend ({author}); write it as review:{judge}:<model> in OUTERLOOP_PANEL"
+    )

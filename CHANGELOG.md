@@ -6,6 +6,754 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+
+- The git safety checks now run once at each hand-off between a session and
+  kernel code (session start and return, wake start, panel read) instead
+  of on every kernel git call. Kernel git calls after a hand-off reuse its
+  filter-driver listing; launching untrusted code on the workspace drops
+  it. A workspace no hand-off covers keeps the per-call check (#512).
+
+- The advisory-review examples and install guide track the `v0` release tag
+  (`@v0` with `reviewer_ref: v0`) instead of `main` or an exact release. `v0`
+  moves only when a final release is cut (a new `RELEASING.md` step), so
+  callers follow releases without hand bumps and never run the moving branch
+  with their reviewer key (#494).
+
+- Research taste moved out of the kernel and into a configurable GUIDANCE
+  layer. Kernel agent-facing text (the author brief, the panel claim, the
+  verifier rubric) now carries only mechanics; a new top-level contract key
+  `guidance` selects the pack: `default` (the moved texts minus the
+  one-idea rule), `none`, or a repo-relative directory holding `author.md`
+  and `panel.md` (recommended location `.github/outerloop/guidance/`).
+  Guidance is read via git objects from the same ref as the contract
+  (never the working tree; a symlink blob is refused), capped at 8,000
+  characters per file, carried last in the author brief and in the panel
+  judges' prompt — outside the fence that holds the claim as untrusted
+  data — and labelled advisory; it may never point into `.outerloop/`.
+  The panel now blocks only on validity — harness
+  exploitation, ruler/seed fishing, data leakage, a confirmed claim-vs-evidence
+  contradiction, and scope and measurement facts; aggregation and landscape
+  live only in the pack (so `none` leaves validity criteria only), and the
+  taste halves of the overfitting/unsupported-claim/measurement-gap rubric
+  are advisory-only. Upgrading: the one-idea rule is no longer enforced
+  anywhere — a repository that wants it writes it into its guidance files
+  (the panel will not block on it); the default hypothesis, done criteria,
+  PR body and brief wording changed accordingly, and stored briefs from
+  earlier versions still load unchanged.
+- A second pass moved the remaining research advice out of the kernel brief
+  into the default guidance pack (when to check the sibling view, budgeting
+  experiments against the final eval, running the repo's checks before a
+  submit) and deleted the divergence-debt aside from the research-line
+  section; under `guidance: none` the brief now states mechanics only.
+### Added
+
+- Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
+  note to a run's inbox, delivered at the run's next wake — no PR needed.
+  Reuses the existing `note`/`kernel` message shape, so older kernels read it
+  without a compatibility change.
+
+### Documentation
+
+- Document `OUTERLOOP_CODEX_WEB_SEARCH` and the steward and panel judge key
+  files (`OUTERLOOP_STEWARD_KEY_FILE`, `OUTERLOOP_PANEL_KEY_FILE`,
+  `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
+  install guide, and mark the verification-loop and dispatcher design notes
+  as built (#337).
+
+### Changed
+
+- Refreshed locked dependencies to current releases admitted by the existing
+  bounds: cryptography 50.0.1→50.0.2, pydantic 2.13.5→2.14.0 (pydantic-core
+  2.46.5→2.50.0), mypy 2.3.1→2.4.0, ruff 0.16.6→0.17.0, and transitives;
+  workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
+- The review and verify posting CLIs now share one gate for the untrusted
+  emitted envelope, so a security fix to the decode/identity/kind checks lands
+  in both (#337).
+- The `.git` guard's object read no longer derives filter-driver overrides
+  (`cat-file -e` never converts working-tree files), dropping one
+  `git config --get-regexp` subprocess from every guarded kernel git call
+  with no change to what is refused or neutralized (#512).
+- A review round refused because the pinned harness is too old for the model,
+  or because the runner's harness install is missing or stale, now says which
+  and how to fix it instead of calling it an API outage (#475).
+
+### Fixed
+
+- Reserve infrastructure retries before submission so a crash before recording
+  the job id cannot exceed the two-retry cap; undo the reservation only on a
+  capacity rejection before submission. Upgrading: a measure that was between
+  infrastructure retries when the kernel was upgraded may get one extra retry,
+  once, because older journals counted failures rather than reserved retries.
+- A dispatched baseline or cleanly completed eval that ends with no result is
+  now an infrastructure failure: two uncharged retries, then a park naming the
+  `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
+  missing journal or `stage.wait_note` reads as zero retries / no note.
+- A codex run that slept and resumed was priced once per leg: `exec resume`
+  reports the thread's cumulative token usage as each leg's usage, so
+  `outerloop status` overstated a resumed session's cost by roughly the
+  number of legs (#479). Session totals now price a codex thread once, at
+  its newest leg. Claude Code sessions keep summing each leg's reported
+  cost: cumulative resume totals arrived only in Claude Code 2.1.277, and
+  the CLI version that ran a session is not recorded — an author override
+  can pin an older CLI whose legs are per invocation — so summing, which
+  can overstate a resumed session on a current CLI, never undercounts one
+  on an older CLI.
+  Upgrading: index entries written before this change carry no session id
+  and keep contributing their recorded cost, so resumed codex sessions
+  captured before the upgrade still overstate; totals are accurate for
+  sessions captured after upgrading.
+- A label-triggered review round no longer restarts the round counter at 1
+  after a summarizer (panel) round: both paths post as the same underlying
+  reviewer, so the count continues (#373).
+- A manual climb now refuses a relative codex/hermes panel key path, like the
+  service preflight always did (#498).
+- A session that ends in error while an out-of-memory kill happens in the job
+  ended its run with only the session's symptom; the ending now notes when an
+  out-of-memory kill was observed in the job during the session (#483).
+- A model-API rate limit (HTTP 429) is now recognized as an outage in every
+  backend's wording, and always takes the latch's short 5-minute cooldown,
+  so throttled runs park briefly instead of ending aborted (#481).
+- An author session that stops without staging anything (an empty reply after
+  long reasoning, or a line of narration with no command) no longer ends its
+  run as "ended without a submit". The kernel resumes the session with a note
+  that nothing ran and the run is still open, up to three times per leg. A stop
+  after a kernel note, a gate verdict, or with a PR open is still taken as the
+  agent's answer, and `end` still ends the run.
+- A Codex session that recovers from a transient error no longer ends its run
+  as aborted. Codex reports a dropped or timed-out model stream as an `error`
+  event ("Reconnecting... 1/5") and carries on; the kernel now counts an error
+  as fatal only when no completed turn follows it, the turn fails, or Codex
+  exits non-zero (#491).
+- Codex installed from npm (the review workflow's install) runs through a
+  script launcher whose vendored binary carries its own code-mode host; the
+  session no longer refuses it for lacking a host beside the launcher. A
+  contained session refuses a launcher up front (the image has no Node.js).
+- `examples/review.yml` referenced a nonexistent `@v1` tag; it now pins the
+  current release (`v0.3.0`, with a matching `reviewer_ref`) (#475).
+- Native Codex sessions failed on the first turn because Codex 0.160's code-mode
+  host was not installed. The installer now installs and verifies it, and a
+  session refuses to start without it.
+  Upgrading: run `outerloop harness upgrade codex`; deploys that run harness
+  upgrades do this automatically. Existing single-binary installs are detected
+  as drift and replaced with a verified pair.
+
+### Changed
+
+- A run whose benchmark is no longer in its contract (renamed or removed)
+  stops with one clear message naming the benchmarks the contract has,
+  instead of continuing on default settings (no GPU budget, default eval
+  walltime, research lines off). A contract that fails to load still leaves
+  parked runs parked until it is fixed.
+
+### Removed
+
+- Upgrading: labels and comment markers are recognized only under the
+  `outerloop:` prefix. Rename any `autoresearch:*` labels on target repos
+  (`gh label edit autoresearch:review --name outerloop:review`), update
+  workflow `if:` conditions that match the old label, and change an open
+  research-log issue's `<!-- autoresearch:research-log -->` marker to
+  `<!-- outerloop:research-log -->`, or the kernel opens a new one.
+- Upgrading: the contract budget key `climb_job_minutes` is no longer read; a
+  contract that still uses it fails validation. Rename it to
+  `attempt_job_minutes` before upgrading.
+
+### Added
+
+- Add optional per-benchmark `regression` allowances with a free tolerance,
+  exclusive hard cap, and optional measured climbed-gain requirement, in
+  relative or absolute units. Suite rows and reports identify the applied rule.
+  Upgrading: no action for existing contracts; their gate behavior and measurement
+  signatures are unchanged. Legacy suite rows without `rule` default to
+  `legacy-floor`; the new row field is additive. Contracts using the new block
+  require this kernel version and must remove it before rolling back.
+
+### Changed
+
+- Codex sessions never get Codex's built-in sub-agent tools; multi-agent work
+  goes through the kernel's channels. `OUTERLOOP_CODEX_WEB_SEARCH` controls
+  Codex's built-in web search: `auto` (default) leaves it to Codex on native
+  provider sessions and turns it off on endpoint sessions, where it cannot run;
+  `off` turns it off everywhere. This fixes Codex sessions on chat-only
+  endpoints, which failed with "unsupported bridge request" after the 0.160 pin.
+  Upgrading: no action.
+- `OUTERLOOP_TOKEN_PRICES` in the deployment `.env` now reaches ticks and the
+  jobs they submit, so session cost is priced from the operator table instead of
+  staying unknown. Upgrading: no action.
+- GPU job sizing is an operator setting: `OUTERLOOP_EVAL_CPUS_PER_GPU` and
+  `OUTERLOOP_EVAL_MEM_GB_PER_GPU` (defaults 8 and 64) set the per-GPU core and
+  memory floor for GPU evals and author launches, for nodes with fewer cores or
+  less memory per GPU. Upgrading: no action; unset keeps the defaults.
+- Apply the current contract's channel settings before wake message delivery or
+  workspace fetches; a run keeps the verification mode it started with, so a
+  contract change applies to runs that start after it. Allow measured results to
+  replace an earlier self-reported leader without inheriting its claimed baseline.
+
+- Bump the pinned Codex CLI from 0.130.0 to 0.160.0 and update its Linux
+  archive digest. All contained Codex roles bind a kernel-owned, read-only
+  managed-hooks-only policy; uncontained sessions disable lifecycle hooks and
+  plugins (including built-in cleanup hooks) because this CLI has no per-session
+  requirements-file override. Rebuild user config before every launch/resume to
+  discard persisted hook trust, while
+  retaining session history. Reject the hook-trust bypass flag.
+  Upgrading: no manual action or run-record migration is needed; existing
+  session homes are sanitized automatically on their next launch. The policy
+  ships with the kernel and needs no image rebuild or system configuration.
+- Record the Codex 0.160.0 project-config finding in `SECURITY.md`: writable
+  sessions auto-trust project config, so repository model settings can apply;
+  project provider settings are filtered. The external containment boundary
+  remains necessary and is unchanged.
+- Retain private per-invocation session evidence: delivered prompt, bounded native
+  log, timestamps, identifiers, usage, and SHA-256 hashes beside existing captures.
+  Record missing logs and truncation without failing the author. Capture Codex and
+  Hermes tokens and price them with `OUTERLOOP_TOKEN_PRICES`; unpriced cost is
+  unknown, while explicit zero prices remain zero. Status exposes known spend
+  and unpriced session counts. Bound native discovery by depth, entries, and
+  elapsed time; withhold unresolved secret prefixes at truncation boundaries.
+  Incomplete Codex turn usage remains unpriced, and final-message reads refuse
+  symlinks at every path component and apply a byte cap. Redact provisioned
+  credential file contents before retention, leave failed Codex invocations
+  unpriced, and hash Hermes's delivered resume prompt. Cost totals persist in a
+  kernel-written, atomically replaced index outside the workspace and session
+  HOME. Separate readers and restarted kernels retain totals; any uncontained
+  invocation marks them unverified, also shown in status.
+  Upgrading: legacy sidecars are not imported into cost totals; pre-index history
+  has unknown coverage.
+  Upgrading: new session sidecars and stage usage fields are additive; older
+  records without them remain readable, with unknown evidence coverage and no
+  fabricated token backfill. Numeric legacy costs retain their meaning. New
+  unknown costs use JSON null; older kernels that coerce parked costs with
+  `float()` cannot resume those records without an update. Drain parked runs
+  before rolling back to such a kernel.
+- Add benchmark `verification: self_report` for explicitly labelled author claims,
+  with required candidate and baseline values at submit, scope enforcement and
+  improvement floors, without evaluation or panel work. Self-reported PRs never
+  arm automatic merging. Add contract channel switches for sibling views,
+  inter-agent messages, shared reports and other agents' line branches. Defaults
+  retain gated verification and all sharing. Document the existing explicit
+  backend/model panel setting for fixed judges.
+- Upgrading: run records, briefs, board rows and submission/leader ledger rows
+  gain optional policy or provenance fields. Missing fields retain gate mode,
+  enabled channels and measured provenance. Default records and rendered text
+  retain their previous bytes; measured ledger rows omit provenance and remain
+  readable by older strict readers. Default startup adds no fetch. No backfill
+  is needed; legacy and HEAD-output fixtures cover compatibility.
+  Start fresh runs for channel isolation because earlier context and Git objects
+  cannot be removed reliably. Keep the updated kernel while self-reported claims
+  exist: older strict ledger readers cannot read explicit self-reported
+  provenance, and older kernels cannot enforce the new contract settings.
+
+
+## [0.3.0] - 2026-10-05
+
+### Upgrading
+
+Operator actions (everything else needs no action; details in each entry):
+
+- Claude Code is pinned at 2.1.285: run `outerloop harness upgrade claude`
+  (deploys that run harness upgrades do this on their own).
+- Before selecting a chat-only Codex endpoint profile, install the bridge:
+  `outerloop harness upgrade --used`.
+- Existing Hermes source-only installs: run `bash scripts/install_hermes.sh
+  "$REVIEW_HERMES_REPO"` (or full `outerloop init`) before Hermes sessions launch.
+- Harness version overrides now need matching SHA-256 settings.
+- Evals and baselines recorded by the previous kernel are measured again once
+  under the new cache key, with no extra charge.
+- Parked authors keep the instructions they started with; judges use the new
+  rubric at once.
+- Runs parked by the previous kernel resume after the upgrade.
+- Before rolling back: consume pending rebind requests, finish capacity-parked
+  runs, runs with extended session limits, overridden and endpoint-routed runs,
+  and chat-only Codex sessions, and stop additional instances.
+
+- A PR tests one idea. It may include the few changes that idea needs, and the
+  report states the effect of each change. Authors test several values in one
+  array launch and report the results around the chosen value; the panel may
+  block a single-value tuning change without them (new `landscape` finding
+  category). Upgrading: no action. Judges use the new rubric at once. An author
+  parked across the upgrade keeps the instructions it started with. Older readers
+  treat `landscape` as `other`. (This was listed under 0.2.1 by mistake; it
+  shipped after that tag.)
+
+- Include GPU count and resolved GPU type in dispatched eval and baseline cache identity, including budget discounts. Legacy eval slots and baseline entries are cache misses. Upgrading: no action. An eval or baseline recorded by the previous kernel, in flight or finished, is measured again once under the new cache key, with no extra budget charge; pausing or draining before the upgrade does not avoid it.
+
+- Park launch capacity refusals in capacity wait when an immediate resume is
+  unavailable or already refused, instead of ending the run. The next wake
+  delivers the refusal and a retry note, resuming the same session when supported
+  or starting a fresh session with the run context otherwise. Meters are
+  preserved and capacity waits do not exhaust stuck retries.
+  Upgrading: no action; existing records need no migration. A run parked by the
+  previous kernel in author-sleep with no session and no pending job starts a
+  fresh author leg on its next wake instead of ending as a session error.
+  Finish capacity-parked runs before rolling back; older kernels cannot resume
+  them.
+
+- Add operator `outerloop rebind <run-id> [--root <root>] [--note <text>]` to
+  explicitly move an existing run to its slot's current author at the next leg,
+  including runs waiting on retired endpoints. Reports and board details show
+  ordered authors; evaluation and launch provenance retain the producing author.
+  Pending requests can be cancelled; three failed applications stop retries,
+  with the count and last error visible in status. A new request replaces a failed one.
+- Upgrading: optional run fields `author_history`, `author_rebind_id` and
+  `stage.candidate_author` / `stage.candidate_authors`, plus `rebind.json` requests
+  and evaluation provenance, require no migration. Legacy author history is populated lazily. Consume
+  pending requests before rolling back to a kernel without rebind support.
+
+- Add `outerloop end <run-id> [--root <root>] [--note <text>]` to request an
+  operator ending at the next tick, including runs waiting for an unavailable
+  endpoint. The tick uses the existing ending cleanup and refuses later publish.
+- Upgrading: existing run records need no backfill; an absent `end-request.json`
+  means no request. Older kernels ignore requests and do not recognize the new
+  `operator` ending when writing records; keep the updated kernel for these runs.
+
+- Author overrides accept operator-only `session_minutes` (10–240) and
+  `session_max_turns` (10–300). Limits bind with the author selection and survive
+  settings changes across wakes and review replies. Contracts can still lower
+  budgets; job walltime follows session duration and the operator job cap.
+  Judge budgets are unchanged.
+- Upgrading: the new override fields are optional; existing settings and legacy
+  run records need no migration. Finish runs using extended limits before
+  rolling back to a version without bound author limits.
+
+- Bad author overrides hold only affected fresh claims during ticks, with one log
+  per entry per tick; malformed settings hold named targets, or all fresh claims
+  when unreadable. Other tick services and bound runs continue; `outerloop start`
+  and `outerloop init` remain strict. No persisted state changes.
+
+- Add read-only `outerloop status` (text/`--json`) for local runs and endpoint
+  outages. Endpoint waits stay out of the published board/status strip and never
+  trigger research-log commits; log one shared outage start and recovery with
+  duration and run IDs.
+  Validate optional served model and expiry in bounded endpoint address records.
+- Upgrading: no action needed; the first endpoint deferral adds
+  `stage.endpoint_wait` and an `endpoint-waits/<profile>.json` log latch. Missing
+  keys/journals are tolerated; ended runs and in-flight PRs are unchanged.
+  Rollback to the preceding kernel safely ignores the additive state.
+
+- Startup validation of `OUTERLOOP_AUTHOR_OVERRIDES` (`outerloop start`) uses the
+  image sessions actually run with, the default image when `OUTERLOOP_IMAGE` is unset. Before, a
+  codex override on a deployment without `OUTERLOOP_IMAGE` failed validation and stopped the tick.
+
+- `OUTERLOOP_AUTHOR_OVERRIDES` accepts a list of entries per target, so different
+  slots of one target can use different authors (each listed entry names its slots;
+  a slot may appear only once). The single-object form is unchanged.
+
+- Reject Codex authors and judges on chat-only endpoints during preflight when
+  the bridge runtime is missing or stale, with `outerloop harness upgrade --used`
+  as the fix, before spending the author budget.
+
+- Codex authors and judges can use chat-only endpoint profiles through a
+  per-session LiteLLM bridge and streaming shim, including tool calls and
+  reasoning replay on resume. The bridge runtime is isolated, transitively
+  locked, installed by `outerloop harness upgrade`, and mounted read-only.
+  Direct Responses profiles keep their existing route and interruption behavior;
+  the Codex pin is unchanged. Bridge runtime defaults use `OUTERLOOP_CACHE_ROOT`,
+  else `$OUTERLOOP_ROOT/cache` (local fallback: `~/.outerloop/cache`). Harness
+  upgrades skip bridge detection for misconfigured roles with a diagnostic and
+  continue upgrading the other configured harnesses.
+- Upgrading: install the bridge with `outerloop harness upgrade --used` before
+  selecting chat-only Codex profiles. Existing run records, session homes, and
+  harness retry records retain their formats; no backfill is needed. In-flight
+  direct-endpoint runs are unchanged. Before rollback, finish chat-only Codex
+  sessions or select a Responses-capable profile; older kernels reject that route.
+
+- Research-line salvage and terminal snapshots now recheck scope admission
+  against the trusted contract before sealing. Out-of-scope changes are
+  dropped from the seal (tracked paths retain their parent content), while
+  admitted work and line memory survive normal endings and crashes after
+  scope refusals. Filtering leaves working files and the real index untouched
+  and logs a bounded list of dropped paths. Upgrading: no action; existing line
+  branches are left as they are, and the next snapshot drops out-of-scope paths.
+  Rollback is safe.
+
+- Support separate instances on one cluster account: process-only absolute
+  `OUTERLOOP_ENV_FILE`, with the existing ownership/write-permission checks,
+  and stable settings-path suffixes for resident and per-cadence scheduler jobs.
+  Init, launch, deploy, harness status, and successor recovery use the selected
+  settings and instance identity.
+- Upgrading: no action needed for the default fleet; its settings path and job
+  names remain unchanged. Existing run records, leases, and heartbeats need no
+  migration. Stop additional instances before rolling back to a version without
+  instance isolation.
+
+- Launch, submit, and stale-submit checkpoint scope violations now refuse every
+  request and resume the author with the offending paths and bounded allowed
+  scope in the kernel inbox. Later refusals say “Refused again:”. Refusals
+  repeat and never end the run; session walltime and contract sleep, launch,
+  and GPU-hour budgets bound the loop. Refusal seals nothing, runs no jobs or
+  measurements, and spends no request budget. The authoritative measurement
+  scope check remains terminal. Abandoning a refused tree ends normally
+  without measurement, a line snapshot, or a push; outage and budget endings
+  also preserve the rejection. Scope admission precedes malformed request
+  and budget refusals.
+- Upgrading: no action or backfill needed. Scope refusals use the existing
+  kernel note payload and refusal keys; old inboxes, ended runs, and in-flight
+  runs remain readable without rewriting delivered messages. The next request
+  uses the new admission behavior. The rejection flag is in-memory only;
+  no run-record fields change; rollback is
+  safe and restores terminal scope admission checks.
+
+- Deployment author overrides select a backend/model per target or agent slot,
+  bind it to each run, and leave panel and CI reviewer inheritance on the fleet
+  author. Per-run board details identify the effective author and overrides.
+- Endpoint profiles accept an absolute `URL_FILE` instead of `URL`, reading bare
+  URLs or JSON addresses on every session. Missing files, failed bounded health
+  checks, and interrupted checks defer sessions without spending wake retries.
+  Init provisions fleet and override backends before validating prerequisites.
+- Upgrading: no action or backfill needed; records without `author_overridden`
+  retain their existing author and panel behavior, including ended runs. New
+  overridden records reuse the saved author route and add this optional flag.
+  Rollback reads the records but loses fleet-only panel inheritance for overrides;
+  finish overridden runs and fresh endpoint capacity parks before rolling back.
+  Fresh endpoint deferrals reuse author-sleep capacity parks without a session ID;
+  older kernels cannot resume those parks.
+
+- Launch ledger submissions require dispatched launch job IDs, preventing stale
+  checkpoints from attributing discarded launches to a commit. Gate capacity
+  waits still record any dispatched sibling launches. Existing ledger rows and
+  run records remain readable and unchanged; no schema change or backfill.
+
+- PR measurement tables identify the base and candidate commits and the shared
+  eval command from the base tree; experiment tables identify launch commits.
+  Verify and review briefs caution against comparing numbers across commits
+  without checking history.
+- Upgrading: no action or backfill needed; the first tick tolerates launch ledger
+  rows without `commit` (shown as unknown), including ended runs and in-flight
+  PRs. New launch records include the sealed commit; existing records and PR
+  bodies are not rewritten. Rollback is safe: older readers ignore the added
+  field.
+
+- Hermes author resumes that exceed the replay budget stay parked with a
+  configuration-blocked status, retaining their session and snapshot without
+  consuming wake retries. Author/judge separation checks effective key paths
+  and credential values before constructing sessions; init rejects incomplete
+  Hermes configuration only for Hermes authors. Endpoint author credentials are
+  shared by attempt and tick preflight, including native panel key comparisons.
+- Upgrading: no action or backfill needed; legacy records without
+  `stage.hermes_resume_required_chars` are unblocked. The first oversized wake
+  records the required budget; raising `OUTERLOOP_HERMES_RESUME_MAX_CHARS` lets
+  the next tick or wake resume. Successful resumes and endings clear the marker,
+  so later normal sleeps are not configuration wakes. Before rollback, resolve
+  blocked runs: older kernels ignore this optional field and may consume retries
+  or abort them.
+
+- Hermes is an author peer: init, native provider/endpoint validation, contained
+  fresh and resumed sessions, absolute syscall commands, and separate author keys.
+  Resume replay preserves the original brief and latest results within
+  `OUTERLOOP_HERMES_RESUME_MAX_CHARS` (default 120000), with explicit omission counts.
+- Upgrading: no backfill; existing records and full saved transcripts remain
+  readable. The first Hermes wake applies the replay bound. Finish Hermes author
+  runs before rollback: older kernels reject unsupported Hermes author wakes
+  (the endpoint-profile predecessor accepts endpoint routes only). Ended records
+  remain readable. See [Hermes setup and compatibility](docs/install.md).
+
+- Endpoint profiles declare compatible APIs and use `model[endpoint=profile]`
+  selectors, preserving native vendor model IDs. Judge credentials enforce file
+  separation; verdicts redact the session key before posting or aggregation.
+- Upgrading: legacy records missing model/route fields retain native routing;
+  missing native model configuration fails closed instead of adopting fleet endpoints.
+
+
+- Named, file-authenticated endpoint profiles work for authors, panel lenses,
+  and standalone reviewers on Claude Code, Codex, and Hermes. Sessions use each
+  backend's native API configuration; keys reach contained sessions through env,
+  never argv. See [endpoint settings and validation](docs/endpoints.md).
+- Hermes is pinned to v2026.9.24 (`f97608f178d1ffeca59860195ab7da295f7c8e5f`).
+  Remove Fire quoting for its new argparse entrypoint, enable
+  `model.reasoning_echo` for endpoint profiles, and sanitize its instruction-file
+  aliases in judge checkouts.
+- Upgrading: existing runs need no backfill; the first tick validates endpoint
+  selections without changing legacy routes. New endpoint authors save
+  `model[endpoint=profile]` selectors; keep those profiles until runs finish, and finish
+  endpoint runs before rolling back. Hermes source/runtime must be upgraded
+  with the harness. See [compatibility and rollback](docs/endpoints.md#upgrade-and-rollback).
+
+### Fixed
+
+- Manual harness upgrades honor `--root`, environment, and `.env` state roots. Retry records are replaced atomically; unreadable or invalid records are logged and ignored. Deploy loads the configured cache root before selecting the uv cache.
+- Harness installers reinstall changed binaries rather than refusing repair; Codex checks its installed binary digest separately from the archive pin, and Hermes runtime reuse checks the interpreter digest.
+
+- Harness upgrades enforce a per-harness deadline, kill timed-out installer process groups, restrict installer environments, and back off failed pins while deleting failed candidates. Overrides require explicit integrity hashes; installed binaries are hash-checked before reuse. Workflow pin resolution fails explicitly on older reviewer refs without a pins reader.
+
+- Tick entrypoints export a state-root uv cache before running Python. Fleet job environments preserve explicit cache paths and default per-user caches below `OUTERLOOP_CACHE_ROOT` (or the state root).
+
+- Run-owned launch, evaluation, and wake job names stay within 128 characters, retaining a stable run key when shortened. Normal names stay unchanged; GPU usage, queue attribution, evaluation deduplication, and flight retention recognize the bounded names.
+- Intake admission counts queued attempts using the existing pending markers, including jobs queued beyond the marker TTL.
+
+- GPU accounting accepts Slurm 25.05 wrapped numeric fields and legacy integers, recognizes typed GPU requests and per-node counts, and limits pending array remainders to available throttle slots.
+- CI Hermes provisioning uses the shared runtime installer with anonymous clone retries and matching workflow pins. A source-specific lock protects checkout and runtime mutations; Python discovery excludes active virtualenvs.
+- Panel preflight checks Hermes runtime readiness and explains installation; full init preserves review model and provider settings with environment precedence.
+
+- Contained Hermes sessions can start with read-only source; sessions no longer reinstall dependencies or attempt an editable project build.
+
+### Added
+
+- Optional per-target GPU lanes route evals and author launches to deployment-specific partitions, accounts, GPU types, and sbatch flags.
+
+- Packaged `harnesses.toml` owns Claude, Codex, and Hermes pins. `outerloop harness status` reports installed versions, paths, drift, and operator overrides; `harness upgrade [name...]` verifies versioned installations before atomically recording their paths. Successful kernel deploys upgrade only configured backends; failures retain the previous installation.
+
+- Live, tighten-only `<root>/limits.toml` GPU and active-attempt ceilings, with global defaults and per-target sections. Scheduler-reported GPU usage covers pending and running experiments, sweeps, evaluations, and GPU-bearing sessions. Authors receive uncharged launch refusals; evaluations wait for capacity. Lowering a ceiling does not cancel jobs.
+- Read-only `outerloop limits` reports operator ceilings and fleet-owned running/pending GPU usage.
+
+### Changed
+
+- Claude Code pin 2.1.272 -> 2.1.285, the current stable release;
+  `claude-opus-5-5` refuses Claude Code older than 2.1.280.
+- Upgrading: legacy Codex archive-only markers and Hermes runtimes without interpreter digests are reinstalled on upgrade; legacy Hermes runtimes remain launchable. Existing retry records remain readable, and corrupt records are treated as empty. Run state and in-flight PRs are unchanged; rollback leaves the additional digest files unused.
+
+- Upgrading: version overrides now require matching SHA-256 settings; legacy Codex installs without hash markers are reprovisioned. New retry state and hash markers are ignored by older kernels; the first successfully synced tick verifies configured harnesses and records new paths only when needed. Legacy `.env` paths and Hermes runtimes remain readable; old artifacts are retained. See `docs/install.md` for rollback across kernel pins.
+
+- Hermes installs a standalone Python and venv once per pinned commit in a sibling runtime, then launches Python directly. Full `init` provisions configured Hermes judges and records their source path; `--no-install-harness` opts out.
+
+### Upgrading notes for the entries above
+
+- No action needed; OUTERLOOP_GPU_LANES is optional.
+
+- Upgrading: full run-ID names and legacy 60-character queue names remain readable; shortened names use a derived run key without changing run records. Intake adds `@intake-<issue>` files in the existing pending directory; legacy unsuffixed and agent-slot markers remain readable. Drain queued intake jobs from older submitters (which wrote no marker) before relying on attempt ceilings. Upgrade all kernels together; older kernels do not recognize shortened names or intake markers, so drain those jobs before rollback.
+
+- Upgrading: the optional `stage.capacity_wait` flag tolerates missing fields; existing state records need only their target for scheduler attribution. No contract schema change or admission journal. Drain older jobs whose names omit the full run ID (and older local jobs without scheduler metadata), and upgrade all submitters before relying on ceilings. Concurrent admissions may overshoot by one batch for two simultaneous checks; no cross-node admission lock.
+- Upgrading: existing Hermes source-only installs require `bash scripts/install_hermes.sh "$REVIEW_HERMES_REPO"` (or full `outerloop init --force` with Hermes configured) to create the persisted runtime. Run records and resume transcripts are unchanged; rollback leaves the sibling runtime unused.
+
+## [0.2.1] - 2026-09-25
+
+### Upgrading
+
+- No action needed; an author's report-only answer to the panel now updates the PR, and a PR whose panel clears is marked ready for review.
+- No action needed; a PR held only by a base-moved blessing heals on the next tick.
+- No contract change; existing contract files need no edits.
+- The `research-log` ledger branch is created from the default branch on first publish if it is missing.
+- An existing `research-log` branch may carry a stale copy of main's ledger, so check `BENCHMARKS.md` there. If it is missing, run `outerloop migrate-ledger --target OWNER/REPO --main-sha <current main sha> --dry-run`, then repeat without `--dry-run`. If it is stale, add `--force` to both runs; it replaces the whole table and erases confirmed rows, so look at the existing table first.
+- Let open agent PRs finish before upgrading: PRs published by 0.2.0 carry a ledger commit and have no pending record, so their merge is not recorded on `research-log`.
+- No action is needed for authors parked under the old base-moved wording; they receive the corrected fold message once when the kernel next detects that their branch lacks the current base tip.
+- No action is needed for saved gate results without a base commit; they are ignored and the candidate must be measured again.
+- Parked runs keep their recorded author backend and model; resumed panels now inherit from that author. Set an explicit model for any panel lens using another backend.
+- Set `OUTERLOOP_CLAUDE_MODEL=<model>` in `.env` if any Claude role lacks an explicit or inherited model, including the steward when its key is configured.
+- Restart local loops after installing; they do not auto-update or reload `.env`.
+- No action is needed for inbox messages already delivered: kernel messages written before this version stay readable, and any output they quote stays fenced as data.
+- No action is needed for `end` requests already staged: old requests stay valid, and a saved withdrawal is finished by the next tick.
+
+### Fixed
+
+- Report-only submissions update the PR report and panel verdict without pushing a commit.
+- Draft PRs are marked ready for review when the latest panel read clears. Blocking draft banners tell the author to address the findings.
+- Research line improvements can be blessed when their measured base contains the current base tip.
+- Messages the kernel writes itself now render as its instructions; output the kernel quotes from elsewhere stays fenced as data.
+- Authors are now told they may fold a moved base with one merge commit, including resolving conflicts within that merge.
+- A submit made after the base moves is saved before any gate measurement or staged experiments run. The author is told to fold the base and submit again, or to submit again after the measurement base is refreshed.
+- After folding the base, an author is told to submit directly and repeat its experiment only if the new base changes its hypothesis. PR updates and saved snapshots retain the measured base in their history, and a saved gate result is reused only for the same base and code.
+- Updates brought in from the base no longer count as the author's changes when checking a resumed PR's allowed files. Authors receive a reason when an attempt ends but its open PR leaves the run parked for further work.
+- Authors are woken and automatic merging is held when their PR branch does not contain the current base tip, including when conflicts block merging.
+- Resident tick jobs replace vanished or finished successors and check the successor before handing over. If recovery fails, the current job keeps ticking through the reserved handover time until its time limit.
+
+### Added
+
+- Authors can withdraw a superseded open PR with `end --withdraw "<reason>"`; the kernel closes it with the reason and ends the run.
+- `outerloop migrate-ledger --target OWNER/REPO --main-sha SHA [--dry-run] [--force]` imports the ledger from the specified current main commit into `research-log`.
+- Full `outerloop init` requires and writes a Claude model even for a deployment without Claude roles, using `--claude-model`, then the shell's `OUTERLOOP_CLAUDE_MODEL`, then a required interactive prompt. A focused `init --github-app` run preserves existing `.env` settings it does not manage.
+
+### Changed
+
+- An idea with a clear mechanism that does not yet beat the best is reported as a success and kept on the author's research line.
+- The sweep rechecks ancestry for PRs held only by a base-moved blessing.
+- Merges performed by the sweep are observed and confirmed in the same tick.
+- Scope checks compare the full candidate tree with its merge-base against the fetched base tip; changes that landed on the base branch never count as the author's, and author edits to the ledger files are refused like any other out-of-scope path.
+- Publish is refused when the candidate shares no history with the base; fetch the base and fold it before submitting again.
+- The leaderboard moves from PR branches and main to the `research-log` branch.
+- Results are pending when published and confirmed when the kernel observes their PR merge, provided the final PR head and merged files match the measurement.
+- The leaderboard shows the main commit at which each result was confirmed; imported rows say their provenance is unknown.
+- PRs carry only the measured files; publication no longer adds a ledger commit.
+- **Breaking:** The built-in Claude model default is gone; set `OUTERLOOP_CLAUDE_MODEL=<model>` in `.env` when a Claude role lacks an explicit or inherited model, including the steward when its key is configured. `outerloop start` refuses a missing Claude setting only in that case, so a deployment with no Claude roles can leave it unset.
+- **Breaking:** Panel lenses without a backend now use the author's backend, and lenses without a model inherit the author's model on that backend. Lenses using another backend require an explicit model, even if `OUTERLOOP_CLAUDE_MODEL` is set.
+- **Breaking:** The review and verify Actions use their model input or fall back to the `OUTERLOOP_CLAUDE_MODEL` Actions variable for Claude. With neither configured, the verifier logs a warning and skips verification with a successful exit.
+- Start, tick checks and running panels now resolve panel models using the same rules. Resumed panels use the parked run's recorded author backend and model.
+
+## [0.2.0] - 2026-09-18
+
+**Upgrade note.** After upgrading run `outerloop permissions --open`: the App needs `checks: read` and `actions: read` for check results to reach authors as messages. This release redesigns the run lifecycle. It adds three run states, one inbox, `end`, review top-ups, and wakes that run by default. It also removes the old `AUTORESEARCH_*` names.
+
+Authors now use `message` for public posts, reminders to self and messages to
+live agents on the same target. Sibling messages keep a sent copy, and inbox
+headers name both parties with local message numbers. `--reply-to` links a
+response; `message --show` reads its chain. The kernel bounds delivery and
+reports refused messages. The old reply and note verbs are removed.
+
+Messages carry a global id, a context, a recipient and an optional reply reference;
+old inbox files read as before; the wake's headers name the sender.
+
+Local mode now shares workstation GPUs across jobs first come first served and runs
+launch arrays in parallel. The board shows running GPU jobs. `OUTERLOOP_LOCAL_GPUS`
+overrides GPU detection; `0` disables allocation. Submissions still wait for all
+tasks to finish.
+
+### Added
+
+- `OUTERLOOP_CLAUDE_MODEL` configures the shared default for all Claude roles, including deployments whose Vertex project has access to a different model. `OUTERLOOP_AUTHOR_MODEL` still overrides the author default. Vertex auxiliary fast calls default to the session model, avoiding dependencies on models the project has not enabled; `OUTERLOOP_VERTEX_SMALL_MODEL` overrides that default.
+
+- `outerloop init` installs a missing author CLI and records its path; `--no-install-harness` opts out. Claude has a pinned, SHA256-verified installer.
+
+- `OUTERLOOP_TICK_HOST=login` (or `--tick-host login`) runs a niced foreground tick loop against Slurm, with one tick lease per state root.
+- `OUTERLOOP_QOS` sets the QOS for every submitted Slurm job.
+- `OUTERLOOP_APPTAINER_BIN` selects the container executable on compute nodes.
+- `<root>/HOLD_LAUNCHES` holds fresh kernel launches while existing runs, wake delivery, and the tick chain continue; remove the file to resume.
+
+### Removed
+
+- The pre-rename names are gone. The `AUTORESEARCH_*` environment names are no longer read by the package, the `.env` reader, the chain or the deploy step. `~/.config/autoresearch/`, `.autoresearch.yaml`, the `.autoresearch` channel directory, the `~/.autoresearch` local root default and `~/autoresearch-images` are no longer looked for. The `autoresearch-resident` and `autoresearch-tick` job names are no longer recognized. The `harness_key` file, the `*_HARNESS_KEY_FILE` setting and the `climb_job_id` record field are gone. Before upgrading, rename the `.env` keys, the config directory and the image directory. Cancel a resident or chain still queued under an old job name (`scancel --name autoresearch-resident`, or `scancel --name autoresearch-tick`) before running `outerloop start`: the guard against two loops on one root knows only the current name. Old `autoresearch:` comment markers are still recognized.
+
+### Fixed
+
+- The measurer waits up to 90 seconds for the files of a finished evaluation job. A filesystem delay no longer ends a measured improvement as a negative result.
+- `outerloop start` refuses to run when the configured author's CLI is missing: it checks the recorded path, else PATH, else `~/.local/bin`, and names the install command and `outerloop init --force`.
+
+- Ending line snapshots push once, with the kernel's GitHub auth. Without auth nothing is pushed and the log says so. A refused push is retried only when the remote line moved.
+- PRs under `merge: auto` say why self-merge is waiting, and the publish records and logs the bless decision.
+
+- A timed-out local job could leave its GPUs reserved until the next submit; they are now released once its process group is gone.
+
+- The tick log says why a blessed PR is not merged yet (a message waits for the author, the run sleeps on jobs, the base moved, and so on), one line per sweep.
+- Runs retain their hypothesis through review. The status strip and sibling view carry it with the PR link, and the brief asks authors to check the view, refreshed at every wake, before choosing a direction and before submitting.
+
+- The board's squeue card scrolls sideways inside its box on a narrow screen instead of overflowing the page; the job name column is narrowed first.
+- Board rows now keep each run's whole hypothesis paragraph; the site's ledger showed sentences cut at 160 characters. Text over 1,000 characters ends at a word with an ellipsis. The next publish repairs rows cut by the earlier limit.
+
+- `outerloop permissions` checks App access and opens the next page to edit or accept missing permissions with `--open`; upgrades, starts and sweep warnings provide guidance for existing installations.
+
+- In auto mode the sweep merges only a clean PR at the head the kernel measured and approved. Publish never arms GitHub auto-merge; the sweep withdraws old arms and reports head moves to the author.
+
+- A reply returning after PR merge or close preserves the run’s ending. GitHub outages no longer skip job and deadline handling, failed reply posts suppress duplicate final text, and terminal snapshot cleanup survives notebook failures. Inbox delivery retries refused messages and refuses symlinked destinations.
+
+- A review panel skipped at preflight or in the follow-up now sends the author a kernel note and records the reason in the submit’s PR addendum. These publishes never arm auto-merge.
+
+- A submitted review measurement could go unreported when its push failed. The number is now posted once, as soon as it is known. Review submits push a bot commit with the report’s first line and measured number as its message.
+- On local compute an author-sleep wake could lose an improvement: the gate answers inline there, and the wake only knew how to end a run, so the result became an aborted ending with no PR (cluster0, three runs). Fresh and resumed climbs now share one terminal: the report, the line notebook, a PR or an ending record, and the issue note. A wake that opened its PR but died before recording it reconciles to that PR instead of opening a second, and a park's snapshot is released only once the run has left waiting.
+- A research line lost its snapshot when the author's session reset its branch to main: the seal parented on main, the push was refused, and the run left no notebook entry (#368). The kernel now records the line head itself and the line only moves forward from that record. Memory files a reset dropped from the tree come back at the seal; files the session deleted on the line stay deleted.
+- Intake dropped an issue from a private org member without a word: the App's token sees such an author as CONTRIBUTOR, and only OWNER/MEMBER/COLLABORATOR qualified. Every skipped issue is now logged with its reason, a maintainer's `outerloop:task` label vouches for an issue regardless of association, and new Apps request members read so private members read as MEMBER.
+
+### Changed
+
+- Completed CI checks reach the author as messages with bounded log tails. Failed checks wake idle runs; successful, neutral and skipped checks wait as context.
+
+- Messages carry an origin and a qualified repository thread. Staged replies keep their destination through retries and later PR changes.
+
+- Memory guidance now covers every session boundary and asks authors to record durable findings as they learn them. Sleep, submit and end help say the session ends there.
+
+- The board's live strip says what a parked run waits on beside its state: jobs, gate, review or wake. Read off the record; the three states are unchanged.
+- Runs have three states: running, parked and ended; the board and the logs show those names, and an open PR is a link on the run. The sweep delivers comments, base moves and job results through one wake path; the separate follow-up job is gone. Old state names are mapped on read; inbox cursors migrate once under the run lease, and every tick logs the number of legacy follow-up records until it is zero. An older kernel cannot read the new state names; that is the only incompatible field, and fleets are updated by commit. The contract's `followup_job_minutes` now sizes the wake job of a run with an open PR.
+
+
+- Authors can stage `end [--report <file>]` and end their turn: without a PR it ends as a negative result with the last failed verdict's note, or “ended without a submit”; with an open PR it posts the supplied report and parks until a message arrives. End costs nothing and cannot accompany launch, sleep or submit.
+- Opening a run's first PR grants a review top-up once: 2 launches, 4 sleeps and 0.5 GPU-hours by default, configurable through `budgets.review_topup`. The increased ceilings and prior spend appear in the tool, brief and every wake.
+
+- Submit works in review and fast-forwards the PR after a confirmed auto-merge disarm; the measured number is posted first, even if publication is refused. Each review leg measures against its freshly fetched base. Verdicts, findings and publish refusals reach the author as messages. A reply staged during a review leg suppresses its final-text comment. A failed submitted park ends as negative-result only when no author session can resume to receive its verdict; its report and notebook are saved and its issue claim released. Sessions without the tool (no launcher or no resume support) are still measured at finish and may end on the verdict by design. Submit needs no prior launch or report. A session offered submit that stops without it ends unmeasured, or returns to review if it has a PR. Legacy follow-up re-measures retire on their next wake and release their snapshots.
+
+- Authors can post replies through `message` and launch experiments or sleep while a PR is in review, using the run’s remaining budget. Comments and base moves received while parked reach the author at its next wake. Replies are kept in an outbox for retries, review launches check committed edits, and closing a run holds its wake lease. Review edits are measured and published only on submit, using the same remaining GPU budget as other author work.
+
+- Wake messages now use one inbox and one renderer. Launch results, gate verdicts, panel findings, review comments and base moves reach the session in the same fenced format, from files kept beside the run's record. Advisory panel findings now reach the author alongside blocking ones. The sibling view is refreshed at every wake of a parked author session. The kernel's wake text states facts; the research advice it used to carry is gone.
+
+- Dispatched wakes are on by default. The old on-switch (`OUTERLOOP_DISPATCH_WAKE=1` or a `DISPATCH_WAKE` sentinel) is gone; the operator turns wakes off with `OUTERLOOP_DISPATCH_WAKE=0` or a `<root>/DISARM_WAKE` sentinel, and a dry sweep says so in the log. An unarmed loop stranded every parked run silently, which local compute, able to park since 0.1.2, hit at once.
+- The brief's launch section says that a launch runs a sealed snapshot of the working tree and is scope-checked like the final tree, so experiment scripts must live under the contract's allowed paths.
+
+- Whether jobs need a lane is now the compute backend's word (`has_lanes`): the measurer, the launcher, and the tick's GPU preflight ask it instead of testing for local mode. The dispatch settings always exist (a backend always does), so local compute arms the author's `launch`/`sleep` syscalls for benchmarks with `depth_k`, and a local wake no longer needs a container image. A `--image` path that is not a file is refused at the command line instead of silently degrading the run to inline evaluation.
+- Author sessions start with no GPU visible on any backend (`CUDA_VISIBLE_DEVICES` is empty), so experiments that need one go through `launch`, where they are recorded in the ledger and metered against the GPU budget. This is the bare session's default; a contained session has no GPU device at all, which is the enforcement.
+
+## [0.1.2] - 2026-09-11
+
+### Fixed
+
+- A GPU benchmark on local compute aborted at its first gate measure with "no GPU lane is configured". The measure placement now follows the launch placement's rule: local compute has no lanes, the job runs on the machine's own GPUs.
+
+## [0.1.1] - 2026-09-11
+
+### Fixed
+
+- Wakes never recorded a launch as ended. A nested `import time` in the wake function shadowed the module import, so the ledger step failed on every wake, and the failure was only logged to a stderr the scheduler discards. The PR's experiments table stayed empty and `history` showed every launch as not back. The nested imports are gone, the best-effort wrapper now logs the redacted traceback, and a wake writes its kernel log to `runs/<run>/kernel.log`.
+
+### Changed
+
+- The PyPI project page and the Python-version badge now read correctly: the package metadata lists the supported Python version (3.12) and the project's audience and topic. The README's Python badge is a static `3.12+` so it renders regardless of the release's metadata.
+
+### Deprecated
+
+- The `AUTORESEARCH_*` environment names and `.autoresearch` paths are still accepted. The 0.1.0 notes said they would go in 0.1.1; a bug-fix release should not also break a deployment's environment, so their removal moves to 0.2.0.
+
+## [0.1.0] - 2026-09-10
+
+The first release of Outerloop — autoresearch agents that improve your benchmark
+on your own code, your keys, and your compute. Built and used daily by the
+Agentic Learning AI Lab at NYU.
+
+### Highlights
+
+- **The loop.** An agent proposes a change, runs the experiment on your cluster,
+  measures it against the base tree at the same seed, and opens a pull request
+  only when the benchmark actually improves. Every attempt gets a short report,
+  negative results included.
+- **Verification first.** Outerloop re-measures every claim against the
+  repository's contract — it never trusts a number the agent reports — and a
+  reviewer panel reads the change and the claim before a pull request stands.
+- **Your guardrails apply.** Agents cannot touch the benchmark, the budgets, or
+  your CI; your branch protection and required checks apply to them as to any
+  contributor. A pull request waits for a human by default; a repo can also let
+  clean ones merge themselves.
+- **Runs where you do.** Slurm or a single GPU machine, behind one compute seam.
+  Sessions run in a scrubbed sandbox, and your model key and bot credentials
+  never leave the job.
+- **Onboarding in a few commands.** `outerloop init` writes the config and sets
+  up auth (a per-adopter GitHub App, or a token), `outerloop start` runs the
+  loop, and `outerloop upgrade` moves a local install to the newest release. The
+  container image is pulled, not built.
+- **Contracts and the board.** A repo declares its benchmark, scope, and budgets
+  in `.outerloop.yaml`; the climb board publishes every attempt and its outcome,
+  and the ledger keeps the honest record — refusals and negatives included.
+- **Research lines and depth.** Each agent works its own line and reintegrates
+  the moving base; a run hibernates through long experiments and wakes to read
+  its results.
+- **Advisory review and a weekly digest.** The reviewer posts structured,
+  advisory findings on every pull request, and a weekly maintainer scan files a
+  codebase-health digest.
+
+The `AUTORESEARCH_*` environment names and `.autoresearch` paths from before the
+rename are still accepted in 0.1; 0.1.1 kept them (see its notes) and 0.2.0
+removes them. The full history since the first pre-release follows.
+
+### Changed
+
+- Install guide: a lab member who is not an org owner now has documented steps
+  for GitHub App auth — make the personal App public, request the install, an
+  org owner approves, then optionally transfer the App to the org — matching
+  what `init --github-app` prints on the personal-App fallback.
+- Docs: corrected stale `autoresearch` command and module paths left by the
+  rename (onboarding, author-syscalls, architecture, role-cli), refreshed the
+  architecture component map (`budget` → `limits`, `report` →
+  `progress`/`climbboard`), and documented the tick scheduling knobs
+  `OUTERLOOP_CADENCE_MIN`, `OUTERLOOP_MAX_JOB_MINUTES`, and
+  `OUTERLOOP_MIN_TICK_MINUTES` in the install guide.
+
+- The maintainer digest issue now carries the scan date in its title
+  (`Maintainer digest — YYYY-MM-DD`), so its freshness shows in the issue list.
+  The scan's long verdict and rejected-findings text now folds into a
+  collapsible block, keeping the top of the issue a short summary (title,
+  advisory line, counts).
+
+### Fixed
+
+- `outerloop init --github-app` no longer dead-ends a non-owner of an
+  organization. Creating an org-owned App needs org-owner rights, so GitHub
+  makes a personal App that will not install on the org repo by default. init
+  now detects that the App landed under a different account and prints the path
+  that works — make it public, request the install, have an org owner approve
+  it, then rerun `init --force --github-app` (and optionally transfer the App to
+  the org). The install-failure help names the same steps.
+
+### Fixed
+
+- The follow-up finalizer no longer gets stuck withholding a measured re-sync
+  when auto-merge is already off. Before pushing a re-measured head it confirms
+  the PR will not auto-merge by the PR's actual auto-merge state, rather than by
+  matching one error string — whose text varies with the repo's "Allow
+  auto-merge" setting and the token type — so a merge:manual repo under a GitHub
+  App token no longer re-withholds its successful re-measurements.
+
 ### Added
 
 - `docs/design/compute-cloud.md`: a design sketch (post-0.1, not a launch item)

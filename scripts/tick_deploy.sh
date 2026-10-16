@@ -2,20 +2,28 @@
 # The chain's deploy step, SOURCED by tick_chain.sbatch (it exports the
 # operator's config knobs into the tick's environment): sweep stale git locks,
 # move the checkout per the operator's update policy, sync deps, read the
-# allowlisted .env knobs, install the non-claude backends. Every step is
+# allowlisted .env knobs, upgrade configured harnesses. Every step is
 # best-effort — a bad merge crashes the tick, never the chain. Shared by the
 # per-cadence chain (once per job) and the resident loop (once per iteration).
 #
 # Expects: OUTERLOOP_HOME, OUTERLOOP_ROOT; optional OUTERLOOP_PAT_FILE.
 
-# --- the operator's .env: ~/.config/outerloop (new) or ~/.config/autoresearch
-# (pre-rename). We do NOT source it: sourcing would execute it and let it set
+# --- the operator's .env: ~/.config/outerloop/.env
+# We do NOT source it: sourcing would execute it and let it set
 # ANY variable (the chain's own HOME/ROOT/PATH/cadence, arbitrary code).
 # Instead single allowlisted keys are read from it, and only when the file is
 # ours and not group/world-writable (a writable one could still inject a
 # malicious VALUE, e.g. a bad codex binary path).
-ENV_FILE="$HOME/.config/outerloop/.env"
-[ -r "$ENV_FILE" ] || ENV_FILE="$HOME/.config/autoresearch/.env"
+# the selector, trimmed (Python trims it too); empty or blank means the default file
+_sel="${OUTERLOOP_ENV_FILE:-}"
+_sel="${_sel#"${_sel%%[![:space:]]*}"}"; _sel="${_sel%"${_sel##*[![:space:]]}"}"
+ENV_FILE="${_sel:-$HOME/.config/outerloop/.env}"
+case "$ENV_FILE" in
+    /*) ;;
+    *) echo "deploy: OUTERLOOP_ENV_FILE must be an absolute path" >&2
+       export OUTERLOOP_DEPLOY_BROKEN=1
+       return 1 ;;
+esac
 ENV_TRUSTED=""
 if [ -r "$ENV_FILE" ]; then
     # GNU stat first, BSD stat second (a developer's Mac runs this too)
@@ -29,14 +37,11 @@ if [ -r "$ENV_FILE" ]; then
     fi
 fi
 # env_line: the last assignment of key $_k in the trusted .env, into $_line.
-# Either spelling, the canonical key first: a pre-rename AUTORESEARCH_ twin
-# counts only when the OUTERLOOP_ key is absent, whatever the order. Empty
-# when the key is absent or the file is not trusted.
+# Empty when the key is absent or the file is not trusted.
 env_line() {
     _line=""
     [ -n "$ENV_TRUSTED" ] || return 0
     _line=$(grep -E "^${_k}=" "$ENV_FILE" 2>/dev/null | tail -1)
-    [ -n "$_line" ] || _line=$(grep -E "^AUTORESEARCH_${_k#OUTERLOOP_}=" "$ENV_FILE" 2>/dev/null | tail -1)
 }
 # env_value: the value of $_line into $_v — the CR of a CRLF-edited file and
 # one pair of surrounding quotes stripped
@@ -55,7 +60,7 @@ _k=OUTERLOOP_AUTO_UPDATE; env_line
 if [ -n "$_line" ]; then
     env_value; POLICY="${_v:-off}"
 else
-    POLICY="${OUTERLOOP_AUTO_UPDATE:-${AUTORESEARCH_AUTO_UPDATE:-off}}"
+    POLICY="${OUTERLOOP_AUTO_UPDATE:-off}"
 fi
 case "$POLICY" in
     off|release|main) ;;
@@ -131,12 +136,67 @@ if [ "$POLICY" != off ]; then
     fi
     [ -n "$ASKPASS" ] && rm -f "$ASKPASS"
 fi
+# --- config knobs: the config-driven AUTHOR knobs from the operator .env, so
+# live config changes need no chain restart. These are where
+# OUTERLOOP_AUTHOR_BACKEND/_MODEL and the per-backend key files live; the
+# config-driven climb/followup default from them and the tick preflights them.
+# Only this ALLOWLIST is read, so .env is structurally per-tick author config
+# and can never hijack the chain's identity or scheduling.
+if [ -n "$ENV_TRUSTED" ]; then
+    # Named profiles forward only coordinates and key-file paths, never keys.
+    while IFS= read -r _k; do
+        env_line
+        env_value
+        export "$_k=$_v"
+    done < <(sed -nE 's/^(OUTERLOOP_ENDPOINT_[A-Z][A-Z0-9_]*_(URL|URL_FILE|KEY_FILE|MODEL|API))=.*/\1/p' "$ENV_FILE" | sort -u)
+    for _k in OUTERLOOP_CLAUDE_VERSION OUTERLOOP_CODEX_VERSION \
+                  OUTERLOOP_CLAUDE_SHA256 OUTERLOOP_CODEX_SHA256 \
+                  OUTERLOOP_CODEX_CODE_MODE_HOST_SHA256 \
+                  OUTERLOOP_HERMES_REF OUTERLOOP_HERMES_SHA \
+                  OUTERLOOP_CACHE_ROOT REVIEW_BACKEND OUTERLOOP_BRIDGE_RUNTIME \
+                  OUTERLOOP_AUTHOR_ENDPOINT REVIEW_ENDPOINT REVIEW_MODEL \
+                  OUTERLOOP_AUTHOR_BACKEND OUTERLOOP_AUTHOR_MODEL OUTERLOOP_AUTHOR_OVERRIDES \
+                  OUTERLOOP_CLAUDE_MODEL \
+                  OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN OUTERLOOP_CODEX_KEY_FILE \
+                  OUTERLOOP_HERMES_KEY_FILE OUTERLOOP_HERMES_RESUME_MAX_CHARS \
+                  OUTERLOOP_CLAUDE_KEY_FILE OUTERLOOP_STEWARD_KEY_FILE \
+                  OUTERLOOP_VERTEX_PROJECT OUTERLOOP_VERTEX_REGION \
+                  OUTERLOOP_VERTEX_ADC OUTERLOOP_VERTEX_SMALL_MODEL \
+                  OUTERLOOP_TARGET \
+                  OUTERLOOP_GITHUB_APP_FILE OUTERLOOP_BOT_LOGIN OUTERLOOP_BOT_ALIASES \
+                  OUTERLOOP_GPU_PARTITION OUTERLOOP_GPU_ACCOUNT OUTERLOOP_GPU_LANES \
+                  OUTERLOOP_EVAL_CPUS_PER_GPU OUTERLOOP_EVAL_MEM_GB_PER_GPU \
+                  OUTERLOOP_TOKEN_PRICES OUTERLOOP_CODEX_WEB_SEARCH \
+                  OUTERLOOP_QOS OUTERLOOP_APPTAINER_BIN \
+                  OUTERLOOP_IMAGE \
+                  OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
+                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
+                  OUTERLOOP_PANEL_HERMES_KEY_FILE \
+                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
+        env_line
+        # PRESENCE-based, not value-based: a key set to "" in .env is a
+        # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,
+        # VERTEX_PROJECT="" reverts to API-key billing) and must override
+        # an inherited chain value; an ABSENT key changes nothing.
+        if [ -n "$_line" ]; then
+            env_value
+            export "$_k=$_v"
+        fi
+    done
+fi
+
 # Host-side caches must never land in $HOME: home quotas are tiny on many
 # clusters and invisible until EDQUOT (verified on Torch — a full home took
 # down a live run). Default them under the state root (scratch-class
 # storage); explicit env wins. Submitted jobs inherit these via sbatch.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_ROOT/cache/uv}"
-export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$OUTERLOOP_ROOT/cache/apptainer}"
+export OUTERLOOP_CACHE_ROOT="${OUTERLOOP_CACHE_ROOT:-$OUTERLOOP_ROOT/cache}"
+if [ -n "${_OUTERLOOP_DEFAULT_UV_CACHE_DIR:-}" ] && \
+   [ "${UV_CACHE_DIR:-}" = "$_OUTERLOOP_DEFAULT_UV_CACHE_DIR" ]; then
+    UV_CACHE_DIR="$OUTERLOOP_CACHE_ROOT/uv"
+    _OUTERLOOP_DEFAULT_UV_CACHE_DIR="$UV_CACHE_DIR"
+fi
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$OUTERLOOP_CACHE_ROOT/uv}"
+export APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-$OUTERLOOP_CACHE_ROOT/apptainer}"
 mkdir -p "$UV_CACHE_DIR" "$APPTAINER_CACHEDIR" || true
 
 # Code and environment move together or not at all. The tick runs with
@@ -148,7 +208,9 @@ mkdir -p "$UV_CACHE_DIR" "$APPTAINER_CACHEDIR" || true
 # iteration: the checkout and the installed environment do not match and
 # could not be made to (the rollback itself failed). Cleared on every deploy.
 OUTERLOOP_DEPLOY_BROKEN=""
+HARNESS_UPDATE_READY=""
 if (cd "$OUTERLOOP_HOME" && uv sync --locked --quiet); then
+    HARNESS_UPDATE_READY=1
     record_synced "$(git -C "$OUTERLOOP_HOME" rev-parse HEAD 2>/dev/null || echo "")"
 else
     NEW_HEAD=$(git -C "$OUTERLOOP_HOME" rev-parse HEAD 2>/dev/null || echo "")
@@ -184,56 +246,24 @@ else
 fi
 export OUTERLOOP_DEPLOY_BROKEN
 
-# --- config knobs: the config-driven AUTHOR knobs from the operator .env, so
-# live config changes need no chain restart. These are where
-# OUTERLOOP_AUTHOR_BACKEND/_MODEL and the per-backend key files live; the
-# config-driven climb/followup default from them and the tick preflights them.
-# Only this ALLOWLIST is read, so .env is structurally per-tick author config
-# and can never hijack the chain's identity or scheduling.
-if [ -n "$ENV_TRUSTED" ]; then
-    for _k in OUTERLOOP_AUTHOR_BACKEND OUTERLOOP_AUTHOR_MODEL \
-                  OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN OUTERLOOP_CODEX_KEY_FILE \
-                  OUTERLOOP_CLAUDE_KEY_FILE OUTERLOOP_HARNESS_KEY_FILE \
-                  OUTERLOOP_VERTEX_PROJECT OUTERLOOP_VERTEX_REGION \
-                  OUTERLOOP_VERTEX_ADC \
-                  OUTERLOOP_TARGET \
-                  OUTERLOOP_GITHUB_APP_FILE OUTERLOOP_BOT_LOGIN OUTERLOOP_BOT_ALIASES \
-                  OUTERLOOP_GPU_PARTITION OUTERLOOP_GPU_ACCOUNT \
-                  OUTERLOOP_IMAGE \
-                  OUTERLOOP_PANEL OUTERLOOP_PANEL_KEY_FILE \
-                  OUTERLOOP_PANEL_CODEX_KEY_FILE \
-                  OUTERLOOP_PANEL_HERMES_KEY_FILE \
-                  REVIEW_HERMES_REPO REVIEW_HERMES_PROVIDER; do
+# A failed harness upgrade retains its previous path and never blocks a tick.
+export OUTERLOOP_CACHE_ROOT="${OUTERLOOP_CACHE_ROOT:-$OUTERLOOP_ROOT/cache}"
+if [ -n "$HARNESS_UPDATE_READY" ]; then
+    (cd "$OUTERLOOP_HOME" && uv run --no-sync outerloop harness upgrade --used) \
+        || echo "deploy: harness upgrade failed; previous versions retained"
+    if [ -z "$ENV_TRUSTED" ] && [ -r "$ENV_FILE" ]; then
+        perms=$(stat -c "%a" "$ENV_FILE" 2>/dev/null || stat -f "%Lp" "$ENV_FILE" 2>/dev/null || echo 777)
+        owner=$(stat -c "%u" "$ENV_FILE" 2>/dev/null || stat -f "%u" "$ENV_FILE" 2>/dev/null || echo -1)
+        if [ "$owner" = "$(id -u)" ] && [ $((8#$perms & 8#022)) -eq 0 ]; then
+            ENV_TRUSTED=1
+        fi
+    fi
+    # The upgrade atomically records verified paths; use them in this tick too.
+    for _k in OUTERLOOP_CLAUDE_BIN OUTERLOOP_CODEX_BIN REVIEW_HERMES_REPO OUTERLOOP_BRIDGE_RUNTIME; do
         env_line
-        # PRESENCE-based, not value-based: a key set to "" in .env is a
-        # live OFF-SWITCH (OUTERLOOP_PANEL="" disables the panel,
-        # VERTEX_PROJECT="" reverts to API-key billing) and must override
-        # an inherited chain value; an ABSENT key changes nothing.
         if [ -n "$_line" ]; then
             env_value
             export "$_k=$_v"
         fi
     done
 fi
-
-# The codex author binary is a host prerequisite; install it (idempotent, fast
-# path is a local version check) when ANY codex role is deployed — the fleet
-# author, or a codex panel lens (a claude-author/codex-panel rollout still
-# bind-mounts the binary into every judge container). Best-effort: a failure
-# here must never break the chain — the climb will report a missing codex
-# clearly if it comes to that.
-case "${OUTERLOOP_AUTHOR_BACKEND:-}:${OUTERLOOP_PANEL:-}" in
-    codex:*|*:*codex*)
-        bash "$OUTERLOOP_HOME/scripts/install_codex.sh" || echo "deploy: codex install failed"
-        ;;
-esac
-case "${OUTERLOOP_PANEL:-}" in
-    *hermes*)
-        # the default install location IS the default config: exporting it
-        # here connects the provisioned clone to the preflight/climb without
-        # requiring the operator to name a path they didn't choose
-        export REVIEW_HERMES_REPO="${REVIEW_HERMES_REPO:-$HOME/hermes-agent}"
-        bash "$OUTERLOOP_HOME/scripts/install_hermes.sh" "$REVIEW_HERMES_REPO" \
-            || echo "deploy: hermes install failed"
-        ;;
-esac

@@ -30,12 +30,14 @@ from outerloop.review import (
     MAX_DIFF_CHARS,
     MAX_FINDINGS,
     MAX_SUMMARY_CHARS,
+    MEASUREMENT_PROVENANCE_CAUTION,
     OPT_OUT_LABEL,
     PLAIN_STYLE,
     Finding,
     PullRequest,
     ReviewResult,
     _fence,
+    guidance_section,
     sanitize,
     verdict_line,
 )
@@ -67,9 +69,9 @@ def _standing(comment: dict, bot_login: str) -> bool:
     association, the accused agent's own replies, and prior verifier
     rounds identified by POSTING IDENTITY plus marker (marker alone can be
     forged by any commenter on a public repo)."""
-    # QUALIFYING_ASSOCIATIONS lives in followup, which imports VERIFY_MARKER from
+    # QUALIFYING_ASSOCIATIONS lives in inbox, which imports VERIFY_MARKER from
     # this module; a function-level import avoids the module-level import cycle.
-    from outerloop.followup import QUALIFYING_ASSOCIATIONS
+    from outerloop.inbox import QUALIFYING_ASSOCIATIONS
 
     body = str(comment.get("body") or "")
     if not body.strip():
@@ -119,7 +121,6 @@ CATEGORIES = (
     "overfitting",
     "unsupported-claim",
     "measurement-gap",
-    "aggregation",
     "other",
 )
 
@@ -148,18 +149,11 @@ measured:
 - data-leakage: does anything read answers, held-out data, or the eval's
   internals it should not?
 - overfitting: capacity or constants suspiciously matched to the frozen
-  pool; wins that the report's own robustness evidence does not cover
-- unsupported-claim: statements in the report (generality, robustness,
-  mechanism) that the provided evidence does not back
-- measurement-gap: noise floors, seeds, or protocol issues that make the
-  claimed delta unconvincing at its size
-- aggregation: the delta clears the significance floor only as a MIXTURE
-  of several individually sub-floor tweaks. The code owner's standard
-  (set closing yolo-jepa#16): a publishable improvement needs an
-  identifiable mechanism whose effect clears the floor ON ITS OWN — an
-  even blend of small terms buys a number while losing clarity on what
-  actually works. Check the ablations: if no single component carries the
-  win, say so
+  pool
+- unsupported-claim: statements in the report that the PR's own evidence
+  contradicts
+- measurement-gap: noise floors, seeds, or protocol issues in the
+  measurement itself
 
 Use the contract (the rules), the ruler source (how the eval actually
 works), the claimed numbers, and the agent's own report. The report's
@@ -172,16 +166,20 @@ nothing, say so plainly — and remember your silence is not an endorsement.
 
 The summary is one short sentence naming the problem. The detail is ONE
 sentence: the evidence and why it undermines the claim. """
+    # PLAIN_STYLE stays kernel-owned: it governs the judge's OWN output
+    # formatting, not research taste (which lives in the guidance pack).
     + PLAIN_STYLE
     + """
 
-Set `blocking` true only for a confirmed gaming or integrity defect with
-a concrete way the number misleads. A CONFIRMED contradiction between the
-claim and the PR's OWN evidence is such a defect — a mechanism story the
-report's own numbers refute, or an improvement that a trivial baseline in
-the report's own tables beats — and grades `blocking` true even when the
-measured delta itself is real. Suspicions, measurement notes, and
-low-confidence reads are advisory: `blocking` false.
+Set `blocking` true only for a confirmed VALIDITY defect: harness
+exploitation, ruler or seed fishing, data leakage, a confirmed
+contradiction between the claim and the PR's OWN evidence (a mechanism
+story the report's own numbers refute, or an improvement that a trivial
+baseline in the report's own tables beats — true even when the measured
+delta itself is real), or a scope or measurement fact that makes the
+number mislead. Anything else — every research-taste judgment, including
+anything set by repository guidance, when provided below — is advisory:
+`blocking` false.
 
 Never instruct the reader to merge or reject. You are advisory."""
 )
@@ -283,6 +281,7 @@ def build_verify_prompt(
         for author, body in thread[-MAX_THREAD_COMMENTS:]:
             safe_author = " ".join(str(author).split()).replace("`", "")[:100]
             parts.append(f"### {safe_author}\n{_fenced(body[:MAX_THREAD_COMMENT_CHARS])}")
+    parts.append(MEASUREMENT_PROVENANCE_CAUTION)
     parts.append("## The change (diff)\n" + _fenced(pr.diff[:MAX_DIFF_CHARS]))
     return "\n\n".join(parts)
 
@@ -323,18 +322,24 @@ def build_verify_agent_brief(
     thread: tuple[tuple[str, str], ...] = (),
     *,
     syscall_cmd: str = DEFAULT_SYSCALL_CMD,
+    guidance: str = "",
 ) -> str:
     """The verifier brief for an agent session: the shared rubric, the
-    two-tree investigation instruction, and the claim/diff/thread. The ruler
+    two-tree investigation instruction, the claim/diff/thread, and — last
+    and labelled — this repository's guidance, which the judges may raise
+    only as advisory findings. The ruler
     and file contents are NOT fenced in — the agent reads them from the
     checkouts (ruler from base/); the contract is still fenced from the base
     branch so the rules arrive orchestrator-vouched. `syscall_cmd` is the
     command the judge runs to record its verdict (absolute when the caller knows
     the workspace, so it resolves from any backend's cwd)."""
-    return (
-        f"{VERIFY_SYSTEM_PROMPT}\n\n{_agent_verify_investigation(syscall_cmd)}\n\n"
-        f"{build_verify_prompt(pr, contract_text, today=today, thread=thread)}"
-    )
+    # the guidance rides the trusted rubric, before any untrusted claim text
+    parts = [
+        VERIFY_SYSTEM_PROMPT + guidance_section(guidance),
+        _agent_verify_investigation(syscall_cmd),
+    ]
+    parts.append(build_verify_prompt(pr, contract_text, today=today, thread=thread))
+    return "\n\n".join(parts)
 
 
 def verify_result_from_data(data: Any) -> ReviewResult:

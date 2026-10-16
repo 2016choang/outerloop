@@ -252,9 +252,9 @@ cron (weekly) or by hand. It fans out one read-only lens session per digest
 section (`maintain.MAINTENANCE_LENSES`, plus `general` for the whole
 checklist) over a checkout of the calling repository's default branch, merges
 the opinions with the same summarizer the wide review round uses, and posts
-ONE rolling issue ("Maintainer digest") whose body each scan replaces;
-earlier digests stay in the edit history, and a short comment per scan
-notifies watchers. The role is `roles.maintainer_spec`: the reviewer's tools
+ONE rolling issue (titled "Maintainer digest — <date>", the date of the digest
+it currently shows) whose body each scan replaces; earlier digests stay in the
+edit history, and a short comment per scan notifies watchers. The role is `roles.maintainer_spec`: the reviewer's tools
 and verdict shape (findings through the syscall tool, no scope), a larger
 budget because a tree is more to read than a diff. Items carry a section
 (`--category`), an effort and risk estimate, and a kind: `change` is
@@ -403,5 +403,7 @@ one more wording nit:
 The habit exists because later rounds have repeatedly found real defects in
 earlier rounds' own fixes. Bot-authored improvement PRs sit outside this gate:
 the reviewer skips them by design, and their gate is the target repo's
-required human review (the publish step arms auto-merge only when the target's
-branch protection requires one).
+required human review, or its required checks where the owner opted in with
+`merge: auto` (the sweep merges a clean PR only at the blessed head; it never
+arms GitHub auto-merge in this mode). In manual mode, publish arms auto-merge
+only when branch protection requires a human review.

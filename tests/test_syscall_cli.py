@@ -89,7 +89,7 @@ def test_quoted_command_args_survive_to_the_abi(tmp_path: Path, capsys) -> None:
 
 def test_note_and_status_and_cancel(tmp_path: Path, capsys) -> None:
     run(tmp_path, "launch", "--name", "probe", "--", "echo", "hi")
-    run(tmp_path, "note", "check the tails first")
+    run(tmp_path, "message", "--to", "self", "check the tails first")
     capsys.readouterr()
     assert run(tmp_path, "status") == 0
     out = capsys.readouterr().out
@@ -108,7 +108,7 @@ def test_validation_fails_fast_in_session(tmp_path: Path, capsys) -> None:
         (["launch", "--name", "ok"], "needs a command"),
         (["launch", "--name", "ok", "--artifact", "../pw", "--", "x"], "repo-relative"),
         (["launch", "--name", "ok", "--minutes", "0", "--", "x"], "positive"),
-        (["note", "x" * 2001], "exceeds"),
+        (["message", "--to", "self", "x" * 20001], "exceeds"),
     ]
     for argv, needle in cases:
         assert run(tmp_path, *argv) == 2
@@ -151,10 +151,9 @@ def test_submit_stages_and_rides_the_sleep(tmp_path: Path, capsys) -> None:
 
 
 def test_submit_requires_a_readable_nonempty_report(tmp_path: Path, capsys) -> None:
-    import pytest
 
-    with pytest.raises(SystemExit):  # --report is required by the parser
-        run(tmp_path, "submit")
+    assert run(tmp_path, "submit") == 0
+    assert run(tmp_path, "sleep") == 0
     capsys.readouterr()
     assert run(tmp_path, "submit", "--report", "missing.md") == 2
     assert "could not be read" in capsys.readouterr().err
@@ -187,7 +186,7 @@ def test_status_shows_the_kernel_written_budget(tmp_path: Path, capsys) -> None:
 
 
 def test_installed_tool_is_standalone(tmp_path: Path) -> None:
-    """The kernel copies the tool into a sandbox WITHOUT autoresearch
+    """The kernel copies the tool into a sandbox WITHOUT outerloop
     installed — prove the copy runs under a bare interpreter (isolated mode:
     no site-packages, no cwd on sys.path)."""
     from outerloop.syscall import install_tool
@@ -210,6 +209,28 @@ def test_installed_tool_is_standalone(tmp_path: Path) -> None:
     abi = json.loads((tmp_path / ".outerloop" / "syscall.json").read_text())
     assert abi["type"] == "sleep"
     assert abi["launches"][0]["name"] == "solo"
+
+
+def test_installed_reply_survives_sleep(tmp_path: Path) -> None:
+    from outerloop.syscall import install_tool, read_request
+
+    install_tool(tmp_path)
+    tool = tmp_path / ".outerloop/syscall"
+    for args in (("message", "first"), ("message", "second"), ("sleep",)):
+        result = subprocess.run(
+            [sys.executable, "-I", str(tool), *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        if len(args) == 2:
+            abi = json.loads((tmp_path / ".outerloop/syscall.json").read_text())
+            assert abi["type"] == "message"
+            assert abi["messages"][-1]["text"] == args[1]
+    request = read_request(tmp_path)
+    assert request is not None and request.sleep
+    assert tuple(m["text"] for m in request.messages) == ("first", "second")
 
 
 # --- judge verbs: finding / conclude ---------------------------------------
@@ -630,3 +651,162 @@ def test_queue_shows_a_sweeps_pace(tmp_path: Path, capsys) -> None:
     with _Kernel(tmp_path, "queue", {**_QUEUE, "jobs": [row]}):
         assert main(["queue", "--wait", "5"], root=tmp_path) == 0
     assert "launch lr (sweep, 4 at a time) — PENDING" in capsys.readouterr().out
+
+
+def test_replies_stage_in_order_with_file_and_sleep(tmp_path: Path, capsys) -> None:
+    assert run(tmp_path, "message", "first") == 0
+    (tmp_path / "reply.txt").write_text("second")
+    assert run(tmp_path, "message", "--file", "reply.txt") == 0
+    assert run(tmp_path, "status") == 0
+    assert "message staged to thread: first" in capsys.readouterr().out
+    request = read_request(tmp_path)
+    assert request is not None and tuple(m["text"] for m in request.messages) == ("first", "second")
+    assert not request.sleep
+    assert read_request(tmp_path) is None
+    assert run(tmp_path, "message", "before sleep") == 0
+    assert run(tmp_path, "sleep") == 0
+    assert run(tmp_path, "message", "after sleep") == 0
+    request = read_request(tmp_path)
+    assert request is not None and request.sleep
+    assert tuple(m["text"] for m in request.messages) == ("before sleep", "after sleep")
+
+
+def test_reply_refuses_an_oversized_batch_without_losing_staged_reply(tmp_path: Path) -> None:
+    assert run(tmp_path, "message", "first") == 0
+    assert run(tmp_path, "message", "x" * 65_536) == 2
+    request = read_request(tmp_path)
+    assert request is not None and tuple(m["text"] for m in request.messages) == ("first",)
+    assert run(tmp_path, "message", "--file", "missing.txt") == 2
+
+
+def test_installed_end_parity_and_status(tmp_path):
+    from outerloop.syscall import budget_error, install_tool
+
+    install_tool(tmp_path)
+    tool = tmp_path / ".outerloop" / "syscall"
+    report = tmp_path / "report.md"
+    report.write_text("The experiment did not improve the score.")
+    for argv in (["message", "Here are the details."], ["end", "--report", str(report)]):
+        result = subprocess.run([sys.executable, str(tool), *argv], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+    result = subprocess.run([sys.executable, str(tool), "status"], capture_output=True, text=True)
+    assert "end staged" in result.stdout
+    request = read_request(tmp_path)
+    assert request is not None and request.end and not request.sleep
+    assert request.report == report.read_text()
+    assert tuple(m["text"] for m in request.messages) == ("Here are the details.",)
+    assert (
+        budget_error(
+            request,
+            launches_used=20,
+            launch_budget=0,
+            sleeps_used=40,
+            sleep_budget=0,
+            gpu_hours_used=5,
+            gpu_hour_budget=0,
+            gpus=1,
+        )
+        == ""
+    )
+
+
+def test_end_conflicts_in_both_orders_leave_the_session_usable(tmp_path, capsys):
+    commands = (["launch", "--name", "probe", "--", "true"], ["sleep"], ["submit"])
+    for command in commands:
+        for end_first in (False, True):
+            assert main(["cancel"], root=tmp_path) == 0
+            first, second = (["end"], command) if end_first else (command, ["end"])
+            assert main(first, root=tmp_path) == 0
+            assert main(second, root=tmp_path) == 2
+            note = capsys.readouterr().err
+            assert (
+                "submit first, end after the verdict"
+                if command == ["submit"]
+                else "end is final for the leg; it cannot accompany launch or sleep"
+            ) in note
+            # A refusal does not end the session or prevent another tool call.
+            assert main(["message", "Still here."], root=tmp_path) == 0
+            assert read_request(tmp_path) is not None
+            assert main(["cancel"], root=tmp_path) == 0
+            assert main(["end"], root=tmp_path) == 0
+            request = read_request(tmp_path)
+            assert request is not None and request.end
+
+
+def test_session_end_help(tmp_path, capsys):
+    import pytest
+
+    for verb in ("sleep", "submit", "end"):
+        with pytest.raises(SystemExit) as exc:
+            run(tmp_path, verb, "--help")
+        assert exc.value.code == 0
+        assert "The session ends here." in " ".join(capsys.readouterr().out.split())
+
+
+def test_siblings_shows_hypothesis_and_pr_link(tmp_path) -> None:
+    """The view names what each sibling pursues and where its PR is, and
+    says it is from this wake (the kernel refreshes it at every wake)."""
+    import json
+
+    from outerloop.syscall_cli import DIR, cmd_siblings
+
+    (tmp_path / DIR).mkdir()
+    (tmp_path / DIR / "siblings.json").write_text(
+        json.dumps(
+            [
+                {
+                    "agent": "agent-02",
+                    "state": "parked",
+                    "phase": "",
+                    "direction": "EMA weights.",
+                    "hypothesis": "EMA weights reduce late-update noise.",
+                    "pr_url": "https://github.com/org/repo/pull/16",
+                },
+                {"agent": "agent-03", "state": "running", "phase": "author-sleep"},
+            ]
+        )
+    )
+    out = cmd_siblings(tmp_path, None)
+    assert out.startswith("as of this wake:")
+    assert "agent-02 (parked): EMA weights reduce late-update noise." in out
+    assert "in review: https://github.com/org/repo/pull/16" in out
+    assert "agent-03 (running/author-sleep)" in out
+
+
+def test_withdraw_requires_open_pr(tmp_path, capsys):
+    from outerloop.syscall import install_tool, write_budget
+
+    install_tool(tmp_path)
+    for metadata in (None, {}, {"open_pr": False}, {"open_pr": "true"}):
+        if metadata is not None:
+            (tmp_path / ".outerloop/budget.json").write_text(json.dumps(metadata))
+        assert run(tmp_path, "end", "--withdraw", "Superseded.") == 2
+        assert "Withdrawal requires an open PR." in capsys.readouterr().err
+        assert read_request(tmp_path) is None
+    write_budget(tmp_path, launches_remaining=0, sleeps_remaining=0, open_pr=True)
+    assert run(tmp_path, "end", "--withdraw", "Superseded.") == 0
+    assert "The PR closes on the kernel's next pass." in capsys.readouterr().out
+    request = read_request(tmp_path)
+    assert request and request.end and not request.sleep
+    assert request.withdraw == "Superseded."
+    assert read_request(tmp_path) is None
+
+
+def test_installed_withdraw_bounds(tmp_path):
+    from outerloop.syscall import MAX_REPLY_CHARS, install_tool, write_budget
+
+    install_tool(tmp_path)
+    write_budget(tmp_path, launches_remaining=0, sleeps_remaining=0, open_pr=True)
+    tool = tmp_path / ".outerloop/syscall"
+    for reason, code in (
+        ("", 2),
+        (" ", 2),
+        ("x" * (MAX_REPLY_CHARS + 1), 2),
+        ("x" * MAX_REPLY_CHARS, 0),
+    ):
+        result = subprocess.run(
+            [sys.executable, str(tool), "end", "--withdraw", reason], capture_output=True, text=True
+        )
+        assert result.returncode == code, result.stderr
+    request = read_request(tmp_path)
+    assert request and len(request.withdraw) == MAX_REPLY_CHARS

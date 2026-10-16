@@ -12,14 +12,16 @@ import pytest
 from outerloop import image as img
 
 
-def test_find_image_prefers_the_new_location(tmp_path: Path) -> None:
-    assert img.find_image(tmp_path) == ""
+def test_find_image(tmp_path: Path) -> None:
     old = tmp_path / "autoresearch-images" / "agent-py312.sif"
     old.parent.mkdir()
-    old.write_text("")
-    assert img.find_image(tmp_path) == str(old)
+    old.write_text("")  # an old image dir is not looked for
+    assert img.find_image(tmp_path) == ""
     new = tmp_path / "outerloop-images" / "agent-py312.sif"
     new.parent.mkdir()
+    new.mkdir()
+    assert img.find_image(tmp_path) == ""
+    new.rmdir()
     new.write_text("")
     assert img.find_image(tmp_path) == str(new)
 
@@ -292,3 +294,21 @@ def test_progress_draws_a_bar_on_a_terminal(monkeypatch: Any, capsys: Any) -> No
     bar.finish(4 << 20)
     out = capsys.readouterr().out
     assert "[" in out and "50%" in out and "100%" in out and "ETA" in out
+
+
+def test_configured_apptainer_probe(monkeypatch):
+    monkeypatch.setattr(img.sys, "platform", "linux")
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", "/apps/apptainer")
+    monkeypatch.setattr(
+        img.shutil, "which", lambda name: name if name == "/apps/apptainer" else None
+    )
+    seen = []
+
+    def runner(argv, **kw):
+        seen.append(argv)
+        return _Proc(0)
+
+    assert img.containment_check(runner=runner) == ""
+    assert seen[0][0] == "/apps/apptainer"
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", "")
+    assert img.apptainer_from_env() == "apptainer"

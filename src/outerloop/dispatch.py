@@ -23,10 +23,12 @@ its own code-side ceiling; under the in-job threshold nothing here runs.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import logging
 import math
+import os
 import re
 import shlex
 import shutil
@@ -41,8 +43,10 @@ from outerloop.github import (
     GitError,
     Workspace,
     ensure_regular_git_dir,
+    forget_filter_overrides,
     git_identity,
 )
+from outerloop.image import apptainer_from_env
 from outerloop.orchestrator import EvalError, managed_eval_env, metric_from_output
 
 log = logging.getLogger(__name__)
@@ -70,11 +74,46 @@ EVAL_CPUS_PER_GPU = 8
 EVAL_MEM_GB_PER_GPU = 64
 
 
+def _per_gpu_setting(name: str, default: int) -> int:
+    """An operator override for GPU job sizing, for nodes leaner than the
+    default (e.g. a cloud GPU VM with fewer cores per GPU). Unset or invalid
+    keeps the default."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an integer; using %d", name, raw, default)
+        return default
+    if value < 1:
+        log.warning("%s=%r must be positive; using %d", name, raw, default)
+        return default
+    return value
+
+
+def eval_cpus_per_gpu() -> int:
+    return _per_gpu_setting("OUTERLOOP_EVAL_CPUS_PER_GPU", EVAL_CPUS_PER_GPU)
+
+
+def eval_mem_gb_per_gpu() -> int:
+    return _per_gpu_setting("OUTERLOOP_EVAL_MEM_GB_PER_GPU", EVAL_MEM_GB_PER_GPU)
+
+
 def effective_eval_minutes(eval_minutes: int | None) -> int:
     """The contract hint clamped into [1, ceiling]; None means in-job."""
     if eval_minutes is None:
         return 0
     return max(1, min(int(eval_minutes), EVAL_JOB_MINUTES_CEILING))
+
+
+def image_file_arg(value: str) -> str:
+    """argparse type for --image on every entry point: a container image is a
+    file on this machine, so a wrong path fails at the parser instead of
+    silently degrading the run to inline evaluation. "" (no image) passes."""
+    if value and not Path(value).is_file():
+        raise argparse.ArgumentTypeError(f"--image {value!r} is not a file")
+    return value
 
 
 def should_dispatch(eval_minutes: int | None) -> bool:
@@ -105,6 +144,7 @@ def snapshot_tree(
     exclude: tuple[str, ...] = (),
     force: tuple[str, ...] = (),
     author: str = "",
+    restore_from_base: tuple[str, ...] = (),
 ) -> Snapshot:
     """Snapshot the workspace's current CONTENT as a commit parented on
     `base_sha`, without touching the working index, and retain it under a
@@ -116,7 +156,9 @@ def snapshot_tree(
     when the target's ignore rules match them — the notebook seal uses it so
     a .gitignore entry cannot silently discard session memory; callers pass
     only paths that exist. `author` is the bot login the seal commit is
-    made as (empty: OUTERLOOP_BOT_LOGIN).
+    made as (empty: OUTERLOOP_BOT_LOGIN). `restore_from_base` resets exact
+    paths to their parent content (or removes them when absent there), in
+    the private index only; working files and the real index stay untouched.
     """
     # the snapshot writes an index, a tree, a commit, and a ref into this
     # repository: a session-reshaped .git is refused first, like every other
@@ -165,6 +207,10 @@ def snapshot_tree(
             run([*git, "add", "-f", "--", *force], 60)
         if exclude:
             run([*git, "rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", *exclude], 60)
+        if restore_from_base:
+            # Literal pathspecs: agent-written filenames may contain glob syntax.
+            paths = [f":(literal){path}" for path in restore_from_base]
+            run([*git, "reset", "-q", base_sha, "--", *paths], 60)
         # .gitattributes are KEPT: the job materializes the tree by CHECKOUT
         # (git worktree), which reproduces content faithfully — including
         # .gitattributes — and does NOT apply export-ignore/export-subst
@@ -277,6 +323,13 @@ def _git_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _provenance_commit(path: Path) -> str:
+    try:
+        return str(json.loads(path.read_text()).get("commit", ""))
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def write_eval_job(
     run_dir: Path,
     name: str,
@@ -285,7 +338,7 @@ def write_eval_job(
     snapshot_sha: str,
     command: str,
     image: str,
-    apptainer_binary: str = "apptainer",
+    apptainer_binary: str = "",
     extra_env: dict[str, str] | None = None,
     artifacts: tuple[str, ...] = (),
     artifact_max_bytes: int = 0,
@@ -332,6 +385,24 @@ def write_eval_job(
     """
     ev = run_dir / f"eval-{name}"
     ev.mkdir(parents=True, exist_ok=True)
+    # the job's script runs git in this repo (worktree add/prune) on its own
+    # node: whatever the last hand-off remembered for it is not ours to reuse
+    forget_filter_overrides(repo_root)
+    from outerloop.provenance import producing_author
+
+    provenance = ev / "provenance.json"
+    # A reused eval directory measures a new commit: rewrite its provenance.
+    if not provenance.exists() or _provenance_commit(provenance) != snapshot_sha:
+        temporary = ev / ".provenance.tmp"
+        temporary.write_text(
+            json.dumps(
+                {
+                    "commit": snapshot_sha,
+                    "author": producing_author(run_dir, snapshot_sha),
+                }
+            )
+        )
+        os.replace(temporary, provenance)
     task_dirs = [run_dir / f"eval-{name}.{k}" for k in range(array)] if array > 1 else [ev]
     for task_dir in task_dirs:
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -428,7 +499,7 @@ def write_eval_job(
             # the jail: identical flags to SubprocessEvaluator._run; stdout is
             # redirected OUTSIDE apptainer, so the result lands in the run dir
             # without the jailed process ever seeing it
-            f"{shlex.quote(apptainer_binary)} exec --containall --cleanenv "
+            f"{shlex.quote(apptainer_binary or apptainer_from_env())} exec --containall --cleanenv "
             + ("--nv " if gpus > 0 else "")
             + '--bind "$TREE:$TREE" --home "$SCRATCH/home:$SCRATCH/home" '
             '--bind "$SCRATCH/cache:$SCRATCH/cache" --pwd "$TREE" '
@@ -515,31 +586,36 @@ def eval_job_spec(
     account: str,
     partition: str,
     eval_minutes: int,
+    qos: str = "",
     cpus: int = 4,
     mem: str = "8G",
     gpus: int = 0,
     nice: int = 0,
     array: str = "",
+    gpu_type: str = "",
+    extra: tuple[str, ...] = (),
 ) -> JobSpec:
     """The JobSpec for one dispatched eval: the hint CLAMPED to our ceiling
     plus setup slack — a contract value above EVAL_JOB_MINUTES_CEILING must
     not create a longer Slurm job than the ceiling allows. `gpus` is the
     benchmark's contract field; the caller has already placed the job on
     the GPU lane (DispatchSettings.placement) when it is nonzero, and the
-    job is sized for it: a GPU eval gets at least EVAL_CPUS_PER_GPU cores
-    and EVAL_MEM_GB_PER_GPU GB per GPU (a training eval's data loading and
+    job is sized for it: a GPU eval gets at least eval_cpus_per_gpu() cores
+    and eval_mem_gb_per_gpu() GB per GPU (a training eval's data loading and
     torch.compile workers do not fit the CPU eval's 4 cores / 8 GB). `nice`
     lowers the job's priority below the kernel's evals (the launcher sets it)."""
     if gpus > 0:
-        cpus = max(cpus, EVAL_CPUS_PER_GPU * gpus)
+        cpus = max(cpus, eval_cpus_per_gpu() * gpus)
         given = _mem_gb(mem)
+        mem_per_gpu = eval_mem_gb_per_gpu()
         # an explicit request is never SHRUNK: only a parseable value below
         # the per-GPU floor is raised; anything unparseable passes through
-        if given is not None and given < EVAL_MEM_GB_PER_GPU * gpus:
-            mem = f"{EVAL_MEM_GB_PER_GPU * gpus}G"
+        if given is not None and given < mem_per_gpu * gpus:
+            mem = f"{mem_per_gpu * gpus}G"
     return JobSpec(
-        job_name=job_name[:60],
+        job_name=job_name,
         account=account,
+        qos=qos,
         partition=partition,
         time_minutes=effective_eval_minutes(eval_minutes) + EVAL_JOB_SETUP_MINUTES,
         script=str(script),
@@ -548,6 +624,8 @@ def eval_job_spec(
         gpus=gpus,
         nice=nice,
         array=array,
+        gpu_type=gpu_type,
+        extra=extra,
     )
 
 

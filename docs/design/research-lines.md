@@ -79,14 +79,15 @@ v1).
   Transparency, not a freshest-main requirement, is the anti-gaming defense.
   A line needs no new baseline infrastructure either way: the metric is
   absolute and each claim names its baseline pair.
-- **A PR to main is ONE clean, ablated contribution**: the agent extracts
+- **A PR to main is a clean, attributed contribution**: the agent extracts
   the winning change from its branch, re-applies it onto main, measures THAT
   candidate, and submits the minimal diff. Never a wholesale branch merge of
   unablated accumulated tweaks. Branch = notebook; main = ledger.
-- Enforcement: the brief teaches the extraction workflow; the panel's
-  mandate extends to rejecting grab-bag candidates; a diff-stat advisory in
-  the gate is a tripwire, not a blocker. The suite no-regression gate prices
-  a stale line reverting others' wins.
+- Enforcement: the brief teaches the extraction workflow as mechanics; how
+  ideas should be scoped and bundled is guidance (the contract's `guidance`
+  key) — advisory to the panel, never a blocking mandate; a diff-stat
+  advisory in the gate is a tripwire, not a blocker. The suite
+  no-regression gate prices a stale line reverting others' wins.
 
 ## Clarifications from design review
 
@@ -99,7 +100,12 @@ v1).
 - **Branch resets**: an agent may deliberately reset its line to main; the
   kernel performs it as `--force-with-lease` on the agent's OWN branch only
   (the only non-fast-forward ever allowed), recorded in the run report.
-  Nothing may force-push any other ref.
+  Nothing may force-push any other ref. A session's own `git reset` in its
+  workspace is not that: the kernel keeps its own record of the line head
+  (`refs/outerloop/line`), the seal parents on it, and memory files the
+  reset dropped from the tree come back (a file the session deleted while
+  its branch still sat on the line stays deleted). The line's content
+  follows the session; its history only moves forward.
 - **Instruction-file isolation**: an agent branch is an AUTHOR-WRITTEN tree.
   Checking one out inherits the same sanitization as any untrusted tree
   (the CLAUDE.md/hooks instruction-smuggling class): harness-instruction
@@ -141,7 +147,7 @@ v1).
 2. **Selfness memory**: render the AGENT_MEMORY.md index into the brief
    (data-fenced) + author instruction to maintain index and agent_memory/
    topic files. 1 PR.
-3. **Hygiene**: brief extraction workflow + panel mandate + diff-stat
+3. **Hygiene**: brief extraction workflow + guidance for scoping + diff-stat
    advisory. 1 PR.
 4. **Board**: strip shows the line each agent continues; later a lines view.
 

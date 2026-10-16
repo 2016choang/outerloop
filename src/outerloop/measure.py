@@ -20,7 +20,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,8 @@ from outerloop.dispatch import (
     read_eval_result,
     write_eval_job,
 )
+from outerloop.gpu_lanes import GpuLane
+from outerloop.job_names import run_job_name
 from outerloop.orchestrator import EvalError
 
 log = logging.getLogger(__name__)
@@ -38,9 +41,11 @@ log = logging.getLogger(__name__)
 class MeasurementPending(Exception):
     """Raised when one or more measures have not completed. Carries the wake
     dependency (the colon-joined job ids: `afterany:<a>:<b>` in one wake job)
-    so the caller can park the run as `waiting` on exactly this set."""
+    so the caller can park the run as `parked` on exactly this set."""
 
-    def __init__(self, job_ids: tuple[str, ...]):
+    def __init__(self, job_ids: tuple[str, ...], *, capacity_wait: bool = False, note: str = ""):
+        self.note = note
+        self.capacity_wait = capacity_wait
         self.job_ids = job_ids
         super().__init__(f"{len(job_ids)} measure(s) pending: {':'.join(job_ids)}")
 
@@ -148,6 +153,12 @@ def _baseline_cache_path(cache_dir: Path, benchmark: str, base_sha: str) -> Path
     return cache_dir / f"{benchmark}@{base_sha}.json"
 
 
+# how long a finished job's files may lag the scheduler's terminal state on a
+# shared filesystem before the measurer calls it "no result"
+RESULT_SETTLE_S = 90.0
+RESULT_POLL_S = 3.0
+
+
 def _no_result_note(job_id: str, state: str) -> str:
     """The note for a job that ended with no result. A TIMEOUT is the walltime
     the submit declared (or the contract's default), and the author must
@@ -172,12 +183,13 @@ def read_baseline_cache(
     metric: str = "",
     seed_env: str = "",
     gpus: int = 0,
+    gpu_type: str = "",
 ) -> dict[str, Any] | None:
     """The cached base-tree measurement for (benchmark, base sha), or None.
     The entry must have been measured under the SAME determinants the
     candidate will be — eval image, contract command, metric key, seed
-    variable, GPU count: everything the measurer's own eval identity
-    carries except the tree sha (the key) and the seed VALUE (fresh per
+    variable, GPU count and resolved GPU type: everything the measurer's
+    own eval identity carries except the tree sha (the key) and the seed VALUE (fresh per
     attempt by design) — or it is stale (terra #178): a comparison across
     determinants is not a comparison. A cache
     entry is only ever written from an orchestrator-measured value (below),
@@ -197,7 +209,8 @@ def read_baseline_cache(
         or data.get("command", "") != command
         or data.get("metric", "") != metric
         or data.get("seed_env", "") != seed_env
-        or int(data.get("gpus", 0) or 0) != gpus
+        or data.get("gpus") != gpus
+        or data.get("gpu_type") != gpu_type
     ):
         return None
     return data
@@ -216,6 +229,7 @@ def write_baseline_cache(
     metric: str = "",
     seed_env: str = "",
     gpus: int = 0,
+    gpu_type: str = "",
 ) -> None:
     """Record an orchestrator-measured baseline for every later attempt on
     this base, with the determinants it was measured under. Atomic (a
@@ -240,6 +254,7 @@ def write_baseline_cache(
                 "metric": metric,
                 "seed_env": seed_env,
                 "gpus": gpus,
+                "gpu_type": gpu_type,
             },
             fh,
         )
@@ -273,9 +288,13 @@ class DispatchedMeasurer:
     baseline_cache: Path | None = None
     # the target's kernel-warmed seed cache, copied into each job (evalcache)
     seed_cache: Path | None = None
+    qos: str = ""
+
+    gpu_type: str = ""
+    gpu_extra: tuple[str, ...] = ()
 
     def _placement(self, m: Measure) -> tuple[str, str]:
-        if m.gpus <= 0:
+        if m.gpus <= 0 or not self.compute.has_lanes:
             return self.account, self.partition
         if not self.gpu_partition:
             raise ValueError(
@@ -288,7 +307,8 @@ class DispatchedMeasurer:
         # Everything a measure's RESULT depends on and that can vary across a
         # PARK/RESUME (when a fresh measurer reads this run_dir): the container
         # image, the measure's logical role, the code (tree_sha), and the
-        # contract facts it is evaluated under (command, metric, seeded env).
+        # contract facts it is evaluated under (command, metric, seeded env),
+        # GPU count, and the resolved GPU type from the lane.
         # A cache key missing any of these would return a value computed under
         # DIFFERENT inputs — e.g. a resume that re-fetched the contract after
         # its command changed, or ran under a rebuilt image, reading the stale
@@ -296,7 +316,10 @@ class DispatchedMeasurer:
         # only whether it completes.) NUL separators keep the parts unambiguous
         # (`a`+`bc` != `ab`+`c`).
         env = "".join(f"\0{k}={v}" for k, v in sorted(m.env().items()))
-        return f"{self.image}\0{m.name}\0{m.tree_sha}\0{m.command}\0{m.metric}{env}"
+        return (
+            f"{self.image}\0{m.name}\0{m.tree_sha}\0{m.command}\0{m.metric}"
+            f"\0{m.gpus}\0{self.gpu_type}{env}"
+        )
 
     def _slot(self, m: Measure) -> str:
         # Storage identity = the full determinant, with NOTHING truncated: the
@@ -326,20 +349,99 @@ class DispatchedMeasurer:
         # jobs across runs sharing one Slurm account); the readable prefixes
         # are for a human reading squeue.
         h = hashlib.sha1(f"{self.run_tag}\0{self._det(m)}".encode()).hexdigest()[:16]
-        return f"eval-{self.run_tag[:10]}-{m.name[:12]}-{h}"
+        run_id = self.run_dir.name if self.run_dir.parent.name == "runs" else self.run_tag
+        return run_job_name(run_id, prefix="eval-", suffix=f"-{m.name[:12]}-{h}")
 
-    def _done(self, m: Measure) -> bool:
-        return (self._ev(m) / "exit-code").exists()
+    def _readable(self, m: Measure) -> bool:
+        """The result can be read: a nonzero exit-code is final on its own (the
+        job writer records a failed checkout as exit 97 with no stdout); a
+        clean exit also needs its stdout, which can arrive later on a lagging
+        filesystem."""
+        ev = self._ev(m)
+        code, out = ev / "exit-code", ev / "stdout"
+        if not code.exists():
+            return False
+        if code.read_text().strip() != "0":
+            return True
+        return out.exists() and out.stat().st_size > 0
 
-    def _ended_without_result(self, m: Measure) -> str:
-        """Why a dispatched job produced no result; a TIMEOUT means the eval
-        needs more walltime."""
+    def _settled(self, m: Measure) -> bool:
+        """Wait a little for a finished job's files. A shared filesystem can
+        show the scheduler's terminal state before the job's exit-code and
+        stdout reach the node reading them (Empire AI Alpha, 2026-09-15: a
+        measured improvement was read as "no result"). True once the result
+        is readable; False after RESULT_SETTLE_S."""
+        deadline = time.monotonic() + RESULT_SETTLE_S
+        while not self._readable(m):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(RESULT_POLL_S)
+        return True
+
+    def _end_state(self, m: Measure) -> str:
         job_id = self._marker(m)
         try:
-            state = self.compute.status(job_id) if job_id.isdigit() else ""
+            return self.compute.status(job_id) if job_id else ""
         except Exception:
-            state = ""
-        return _no_result_note(job_id, state)
+            return ""
+
+    def _infra_retry_path(self, m: Measure) -> Path:
+        return self._ev(m) / "infra-retries.json"
+
+    def _retry_journal(self, m: Measure) -> dict[str, Any]:
+        """The measure's persisted no-result count, {} when absent or unreadable."""
+        try:
+            data = json.loads(self._infra_retry_path(m).read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _retry_no_result(self, m: Measure, state: str) -> tuple[str, bool]:
+        """A dispatched eval that ended without a result. A baseline (its tree
+        is the fixed comparison base) or a cleanly completed job points at the
+        infrastructure, not the code: journal the failure. The count includes
+        the original attempt and retries reserved before submission;
+        re-dispatch up to the original attempt plus two retries, then park
+        until an operator fixes the cause and deletes the journal. Anything
+        else is the measure's own failure.
+        A crash between reserving and submitting spends that retry, erring
+        toward fewer retries, never more."""
+        prior = self._retry_journal(m)
+        job_id = self._marker(m) or prior.get("job_id", "")
+        baseline = m.name == "baseline" or (m.name.startswith("sib-") and m.name.endswith("-base"))
+        code_file = self._ev(m) / "exit-code"
+        clean = state.startswith("COMPLETED") or (
+            code_file.exists() and code_file.read_text().strip() == "0"
+        )
+        # a journal naming THIS job means this delivery was already classified
+        # as infra before a crash — an unavailable status must not fail it
+        if not (baseline or clean or prior.get("job_id") == job_id):
+            raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
+        failures = prior.get("retries", 0) or 1
+        note = (
+            f"measure {m.name}: job {job_id} ended {state or 'UNKNOWN'}; "
+            "results could not be written (infrastructure failure)"
+        )
+        exhausted = failures >= 3
+        if exhausted:
+            note += (
+                f"; 2 retries exhausted; parked until an operator fixes the cause "
+                f"and deletes {self._infra_retry_path(m)}"
+            )
+        from outerloop.harness_cli import write_atomic
+
+        try:
+            write_atomic(
+                self._infra_retry_path(m),
+                json.dumps({"retries": failures, "job_id": job_id, "note": note}),
+            )
+        except OSError:
+            # without the journal the retry count cannot survive a restart:
+            # park the run now rather than re-dispatch without a bound
+            exhausted = True
+            note += "; retry state could not be saved; parked uncharged"
+        log.warning("%s", note)
+        return note, exhausted
 
     def _marker(self, m: Measure) -> str:
         f = self._ev(m) / "submitted"
@@ -362,11 +464,39 @@ class DispatchedMeasurer:
             script,
             job_name=self._job_name(m),
             account=account,
+            qos=self.qos,
             partition=partition,
             eval_minutes=self.eval_minutes,
             gpus=m.gpus,
+            gpu_type=self.gpu_type if m.gpus and self.compute.has_lanes else "",
+            extra=self.gpu_extra if m.gpus and self.compute.has_lanes else (),
         )
-        job_id = self.compute.submit(spec)
+        from outerloop.harness_cli import write_atomic
+        from outerloop.operator_limits import CapacityError, run_target, state_root, submit_batch
+
+        prior = self._retry_journal(m)
+        if prior:
+            # Reserve the retry before submission, even if its marker is lost.
+            try:
+                write_atomic(
+                    self._infra_retry_path(m),
+                    json.dumps({**prior, "retries": prior["retries"] + 1}),
+                )
+            except OSError:
+                raise MeasurementPending(
+                    (), capacity_wait=True, note="retry state could not be saved; parked uncharged"
+                ) from None
+        try:
+            job_id = submit_batch(
+                state_root(self.run_dir),
+                run_target(self.run_dir),
+                self.compute,
+                [spec],
+            )[0]
+        except CapacityError:
+            if prior:
+                write_atomic(self._infra_retry_path(m), json.dumps(prior))
+            raise
         (self._ev(m) / "submitted").write_text(job_id)
         log.info("dispatched measure %s (sha %s) as job %s", m.name, m.tree_sha[:12], job_id)
         return job_id
@@ -377,17 +507,27 @@ class DispatchedMeasurer:
         never just the local marker — so a submitter that died before writing
         its id cannot cause a duplicate submit. Per not-yet-done measure:
           * a live job with this name -> park on its id (authoritative);
-          * a marker but NO live job -> the job ran and vanished without a
-            result (SIGKILL / node death / GONE) -> EvalError, never resubmit;
-          * no live job and no marker -> never dispatched -> dispatch;
+          * a marker or retry journal but NO live job -> vanished without a
+            result: baseline or clean completion -> infrastructure retry;
+            unknown / signal death of a candidate -> EvalError, never resubmit;
+          * no live job, marker, or retry journal -> dispatch;
           * squeue unavailable -> park (marker id if any) rather than risk a
             duplicate; the wake set may be empty -> the sweep deadline retries.
         """
         pending: list[str] = []
         blind = False
+        capacity_wait = False
+        infra_notes: dict[str, str] = {}
         for m in measures:
-            if self._done(m):
+            if self._readable(m):
                 continue
+            prior = self._retry_journal(m)
+            if prior:
+                # a measure on infra retries parks uncharged, carrying the
+                # journal's note; with the original attempt and both retries
+                # lost, it parks for an operator instead of dispatching again
+                capacity_wait = True
+                infra_notes[m.name] = str(prior.get("note", ""))
             try:
                 live = self.compute.job_id_for_name(self._job_name(m))
             except Exception:
@@ -402,19 +542,27 @@ class DispatchedMeasurer:
             if live:
                 pending.append(live)  # queued or running — the real job id
                 continue
-            if self._marker(m):
-                # was dispatched, not live, no result -> died before result
-                raise EvalError(f"measure {m.name}: {self._ended_without_result(m)}")
-            # No marker, not live, no result -> never dispatched -> dispatch.
-            # RESIDUAL (bounded, accepted): if a prior process died in the
-            # microsecond gap between sbatch returning and _dispatch writing
-            # the marker, AND that orphaned job then ran and died without a
-            # result, its name is gone from squeue and this redispatches once
-            # (never loops — the redispatch writes a marker). Cost is one
-            # wasted eval in a triple-failure conjunction; fully closing it
-            # needs sacct-by-name over job history, not worth that surface.
-            job_id = self._dispatch(m)
-            if self._done(m):
+            if self._marker(m) or prior:
+                # was dispatched, not live, no result -> died before result,
+                # unless the files are merely late on the shared filesystem
+                if self._settled(m):
+                    continue
+                infra_notes[m.name], exhausted = self._retry_no_result(m, self._end_state(m))
+                capacity_wait = True
+                if exhausted:
+                    blind = True
+                    continue
+            # A first submission has no retry journal to preserve a lost marker.
+            from outerloop.operator_limits import CapacityError
+
+            try:
+                job_id = self._dispatch(m)
+            except CapacityError as exc:
+                capacity_wait = True
+                log.warning("measure %s waiting for capacity: %s", m.name, exc)
+                blind = True
+                continue
+            if self._readable(m):
                 continue  # a synchronous compute finished the job inside submit
             try:
                 state = self.compute.status(job_id)
@@ -423,13 +571,22 @@ class DispatchedMeasurer:
             if state and is_terminal(state):
                 # the job already ENDED without writing a result (a local
                 # timeout, an instant cluster failure): parking would wait on
-                # a job that will never deliver — fail like a vanished job
-                raise EvalError(f"measure {m.name}: {_no_result_note(job_id, state)}")
+                # a job that will never deliver — fail like a vanished job,
+                # once the filesystem has had its moment
+                if self._settled(m):
+                    continue
+                infra_notes[m.name], exhausted = self._retry_no_result(m, state)
+                capacity_wait = True
+                blind = True
+                continue
             pending.append(job_id)
         if pending or blind:
-            raise MeasurementPending(tuple(pending))
+            raise MeasurementPending(
+                tuple(pending), capacity_wait=capacity_wait, note="; ".join(infra_notes.values())
+            )
         out: dict[str, float] = {}
         for m in measures:
+            self._settled(m)  # exit-code seen, stdout possibly still on its way
             try:
                 out[m.name] = read_eval_result(self.run_dir, self._slot(m), m.metric)
             except EvalError as exc:
@@ -486,15 +643,30 @@ class DispatchSettings:
     gpu_account: str = ""
     # the target's seed cache (evalcache.seed_dir), copied into every job
     seed_cache: Path | None = None
+    qos: str = ""
+
+    gpu_lanes: dict[str, GpuLane] = field(default_factory=dict)
+    target: str = ""
+
+    def lane(self, gpus: int) -> GpuLane:
+        if gpus <= 0 or not self.compute.has_lanes:
+            return GpuLane(self.partition, self.account)
+        lane = self.gpu_lanes.get(self.target)
+        if lane is not None:
+            return GpuLane(lane.partition, lane.account or self.account, lane.gpu_type, lane.extra)
+        account, partition = self._fleet_placement(gpus)
+        return GpuLane(partition, account)
 
     def placement(self, gpus: int) -> tuple[str, str]:
+        lane = self.lane(gpus)
+        return lane.account, lane.partition
+
+    def _fleet_placement(self, gpus: int) -> tuple[str, str]:
         """(account, partition) for a job needing `gpus` GPUs. Raises when a
         GPU job has no lane — a queue that can never run is worse than a
-        loud refusal. Local compute has no lanes: jobs are subprocesses on
-        whatever GPUs the machine has, so placement is empty by design."""
-        from outerloop.compute import local_mode
-
-        if gpus <= 0 or local_mode():
+        loud refusal. A backend without lanes (local compute) runs every job,
+        GPUs included, on the default placement."""
+        if gpus <= 0 or not self.compute.has_lanes:
             return self.account, self.partition
         if not self.gpu_partition:
             raise ValueError(
@@ -511,17 +683,25 @@ class DispatchSettings:
         out; `eval_minutes` is the benchmark's contract hint (clamped in the
         job spec). GPUs are per MEASURE (Measure.gpus): the measurer carries
         the lane and places each measure when it dispatches it."""
+        lane = (
+            self.lane(1)
+            if self.target in self.gpu_lanes
+            else GpuLane(self.gpu_partition, self.gpu_account)
+        )
         return DispatchedMeasurer(
             compute=self.compute,
             run_dir=run_dir,
             repo_root=repo_root,
             image=self.image,
             account=self.account,
+            qos=self.qos,
             partition=self.partition,
             eval_minutes=eval_minutes,
             run_tag=run_tag,
-            gpu_partition=self.gpu_partition,
-            gpu_account=self.gpu_account,
+            gpu_partition=lane.partition,
+            gpu_account=lane.account,
+            gpu_type=lane.gpu_type,
+            gpu_extra=lane.extra,
             # target-wide, beside the run dirs: every attempt on one base
             # shares its cached baseline measurement (Benchmark.baseline)
             baseline_cache=run_dir.parent / "baselines",

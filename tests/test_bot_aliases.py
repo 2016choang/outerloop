@@ -34,7 +34,7 @@ def test_the_kernels_old_research_log_issue_is_never_an_order(monkeypatch) -> No
     issue = {
         "number": 1,
         "title": "Research log",
-        "body": "<!-- autoresearch:research-log -->\none comment per finished run",
+        "body": "<!-- outerloop:research-log -->\none comment per finished run",
         "user": {"login": "agentic-learning-bot"},
         "author_association": "MEMBER",
     }
@@ -48,7 +48,7 @@ def test_the_kernels_old_research_log_issue_is_never_an_order(monkeypatch) -> No
 
 
 def test_old_claims_alarms_and_comments_are_still_ours(monkeypatch) -> None:
-    from outerloop.followup import qualifying_comments
+    from outerloop.inbox import qualifying_comments
     from outerloop.tick import CONTRACT_ALARM_MARKER, _find_alarm_issue
 
     monkeypatch.setenv("OUTERLOOP_BOT_ALIASES", "agentic-learning-bot")

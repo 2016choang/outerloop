@@ -15,33 +15,37 @@ strand the run.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from typing import TextIO, cast
 
 log = logging.getLogger(__name__)
 
-# Live states.
-IMPLEMENTING = "implementing"  # a session is (or will be) working
-WAITING = "waiting"  # experiment submitted; hibernating until results
-IN_REVIEW = "in-review"  # PR open; wakes on qualifying comments
-CONCLUDING = "concluding"  # results in hand; final session(s)
+# Lifecycle states.
+RUNNING = "running"
+PARKED = "parked"
 ENDED = "ended"
+LEDGER_RETRY = "ledger_retry"
 
-STATES = (IMPLEMENTING, WAITING, IN_REVIEW, CONCLUDING, ENDED)
+STATES = (RUNNING, PARKED, ENDED)
 
-# The six endings ("The life of a run" — every one produces a report).
+# The endings ("The life of a run" — every one produces a report).
 MERGED = "merged"
 REJECTED = "rejected"
 NEGATIVE_RESULT = "negative-result"
 BUDGET_EXHAUSTED = "budget-exhausted"
 ABORTED = "aborted"
 STUCK = "stuck"
+OPERATOR = "operator"
 
-ENDINGS = (MERGED, REJECTED, NEGATIVE_RESULT, BUDGET_EXHAUSTED, ABORTED, STUCK)
+ENDINGS = (MERGED, REJECTED, NEGATIVE_RESULT, BUDGET_EXHAUSTED, ABORTED, STUCK, OPERATOR)
 
+END_REQUEST_NAME = "end-request.json"
 RECORD_NAME = "state.json"
 LEASE_NAME = "lease.json"
 
@@ -53,7 +57,22 @@ LEASE_NAME = "lease.json"
 # the orchestrator for most of an hour (review finding).
 OUTAGE_COOLDOWN_S = 45 * 60
 THROTTLE_COOLDOWN_S = 5 * 60
-_THROTTLE_HINTS = ("rate_limit", "overloaded")
+# How each backend words throttling (refusal over rate, never credit/auth);
+# shared by harness.outage and the short cooldown below.
+THROTTLE_PATTERNS = (
+    "rate_limit",
+    "rate limit",
+    "overloaded",
+    "too many requests",
+)
+
+
+def is_throttle(detail: str) -> bool:
+    """True when backend error text `detail` says we were refused over rate."""
+    text = detail.casefold()
+    return any(pattern in text for pattern in THROTTLE_PATTERNS)
+
+
 # Stamps are written on compute nodes and read on other hosts: a stamp a
 # few seconds "in the future" is NTP skew and must count as active, while
 # a far-future timestamp is corruption and must not pause forever.
@@ -80,11 +99,7 @@ def stamp_outage(root: Path, detail: str, now: float, role: str = "solver") -> N
     # which is exactly the failure the latch exists to prevent
     path = _outage_path(root, role)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    cooldown = (
-        THROTTLE_COOLDOWN_S
-        if any(hint in detail.casefold() for hint in _THROTTLE_HINTS)
-        else OUTAGE_COOLDOWN_S
-    )
+    cooldown = THROTTLE_COOLDOWN_S if is_throttle(detail) else OUTAGE_COOLDOWN_S
     tmp.write_text(json.dumps({"detail": detail[:300], "time": now, "cooldown_s": cooldown}))
     os.replace(tmp, path)
 
@@ -118,66 +133,56 @@ class RunRecord:
     task_title: str
     state: str
     agent_id: str = "agent-01"
+    verification: str = "gate"
+    # Empty on legacy records; absent channel keys mean enabled.
+    channels: dict[str, bool] = field(default_factory=dict)
+    claimed_value: float | None = None
+    claimed_baseline: float | None = None
     experiment_job_id: str = ""
     run_job_id: str = ""  # slurm job running the attempt itself; lets the
     # sweep end records whose job was KILLED (walltime/preemption/node
     # death) rather than crashed — signals leave no exception to contain.
-    # INVARIANT: any future path that re-enters `implementing` from a NEW
+    # INVARIANT: any future path that re-enters `running` from a NEW
     # job must re-stamp this field, or the sweep will judge the run by a
     # stale terminal job. (No such path exists today.)
     resume_session_id: str = ""  # harness session to resume on wake
     pr_url: str = ""  # the run's open PR, once one exists
     benchmark: str = ""  # contract benchmark this run works on
-    # The author this run was STARTED with ("" backend = legacy/claude). A wake or
+    # The currently bound author, changed only by operator rebind.
+    # "" backend = legacy/claude. A wake or
     # follow-up reproduces the run's OWN author from these, not the current fleet
     # default, so a fleet backend flip never resumes a run on the wrong backend,
-    # model, or key. backend and model are a PAIR — a claude backend needs a
-    # claude model and vice versa — so both are persisted together.
+    # model, or key. Endpoint-backed models retain their [endpoint=profile] selector;
+    # the harness strips it only when constructing the backend session.
     author_backend: str = ""
     author_model: str = ""
+    author_history: list[dict[str, object]] = field(default_factory=list)
+    author_rebind_id: str = ""  # crash-safe request consumption
+    author_limits: dict[str, int] | None = None  # bound operator session budgets
+    author_overridden: bool = False  # judges inherit the fleet author for this run
     # The resolved author key FILE PATH (not the key) this run used, so a wake or
     # follow-up reproduces the exact key — an explicit --key-file survives, and an
     # in-flight run is immune to a later env change. "" = resolve per backend
     # (legacy records, and the common config-driven case).
     author_key_file: str = ""
-    # Per-source comment cursors: issue comments, top-level reviews, and
-    # inline review comments are three REST collections with independent id
-    # sequences — one cursor across them drops comments forever.
-    last_comment_id: int = 0
-    last_review_id: int = 0
-    last_review_comment_id: int = 0
-    # head sha the last conflict wake was issued for: a dirty PR wakes the
-    # author ONCE per head — a new push (or new conflict) re-arms it
-    dirty_wake_head: str = ""
+    inbox_seq: int = 0  # last message delivered by a completed session leg
     # The exact PR head the auto-arm may merge: set at publish to the pushed
     # head when the PR was published UNDER merge:auto with a CLEAN panel
     # (#171's arming condition), carried forward by signature-clean syncs
     # (same measured bytes), cleared by any code-changing push. Binding the
     # blessing to a sha — not a flag — means a crashed responder, a live
     # one, or any unrecorded push simply fails the equality: the tick arms
-    # only when GitHub's head IS this sha. Empty = never arm (legacy too).
+    # only when GitHub's head IS this sha. An ancestry refusal may be rechecked.
     auto_blessed_head: str = ""
-    # A BLOCKING follow-up re-read wakes the author (docs/design/orchestrator-
-    # verify.md): the panel's findings, data-fenced, and the pushed head they
-    # were read on. The wake fires only while GitHub's head IS that sha, is
-    # cleared when a follow-up services it, and is set again by the next read
-    # if findings remain — bounded by `panel_wake_rounds`.
-    panel_wake_head: str = ""
-    panel_wake_text: str = ""
-    panel_wake_rounds: int = 0
-    # A follow-up's DISPATCHED re-measure in flight (docs/design/
-    # orchestrator-verify.md, "Measuring a follow-up's change"): the sealed
-    # candidate (sha + retaining ref), the eval job ids the tick polls, the
-    # seed, and the reply/cursor context the resume needs to finish — push,
-    # ledger, comment, re-read. Empty = no re-measure pending. While set, no
-    # comment is serviced and nothing is armed: the sealed change lands first.
-    followup_stage: dict[str, object] = field(default_factory=dict)
-    followup_job_id: str = ""  # slurm job servicing this run's review comments
+    auto_bless_reason: str = ""
+    auto_bless_reason_kind: str = ""
+    auto_bless_base: str = ""  # measured base at the blessing decision
+    auto_publish_head: str = ""
     issue_number: int = 0  # the requesting issue, when the requested lane started this run
     wake_attempts: int = 0
     deadline: float = 0.0  # unix; submit+walltime+slack, re-based on start
     terminal_seen: float = 0.0  # when the sweep first saw the experiment terminal
-    # A WAITING climb's re-entry point: the committed shas, drawn seeds, and the
+    # A PARKED climb's re-entry point: the committed shas, drawn seeds, and the
     # candidate snapshot ref a fresh process reconstructs the measure-and-decide
     # phase from. `phase` says WHICH park (baseline, before the session; or
     # candidate, after it). A JSON dict — small, forward-compatible — not the
@@ -206,23 +211,148 @@ def run_dir(root: Path, run_id: str) -> Path:
     return root / "runs" / run_id
 
 
+def request_end(root: Path, run_id: str, note: str, now: float) -> bool:
+    """Atomically retain the first operator request without changing the run."""
+    if not run_id or run_id in (".", "..") or Path(run_id).name != run_id:
+        raise ValueError(f"unknown run id: {run_id}")
+    directory = run_dir(root, run_id)
+    if not (directory / RECORD_NAME).is_file():
+        raise ValueError(f"unknown run id: {run_id}")
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = load_record(root, run_id)
+        if record.ended():
+            raise ValueError(f"run {run_id} already ended ({record.ending})")
+        path = directory / END_REQUEST_NAME
+        if path.exists():
+            return False
+        tmp = directory / f".{END_REQUEST_NAME}.{os.getpid()}.tmp"
+        try:
+            tmp.write_text(json.dumps({"requested_at": now, "note": note}) + "\n")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return True
+
+
 def save_record(root: Path, record: RunRecord, now: float) -> None:
+    """Serialize record writers; a persisted ending cannot be replaced."""
+    directory = run_dir(root, record.run_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            latest = load_record(root, record.run_id)
+        except FileNotFoundError:
+            latest = None
+        if latest is not None and latest.state == ENDED:
+            return
+        if latest is not None and latest.author_history and not record.author_history:
+            record = replace(record, author_history=latest.author_history)
+        _save_record(root, record, now)
+
+
+def acknowledge_ledger_pending(root: Path, run_id: str, path: str, now: float) -> RunRecord:
+    """Remove a persisted ledger intent, including terminal-run cleanup."""
+    directory = run_dir(root, run_id)
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = load_record(root, run_id)
+        stage = dict(record.stage)
+        queue = dict(cast(dict[str, object], stage.get(LEDGER_RETRY) or {}))
+        queue.pop(path, None)
+        if queue:
+            stage[LEDGER_RETRY] = queue
+        else:
+            stage.pop(LEDGER_RETRY, None)
+        record = replace(record, stage=stage)
+        _save_record(root, record, now)
+        return record
+
+
+def mark_launches_cancelled(root: Path, run_id: str, now: float) -> None:
+    """Stamp terminal cleanup without allowing stale wake writes."""
+    directory = run_dir(root, run_id)
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = load_record(root, run_id)
+        if record.state == ENDED and not record.stage.get("launches_cancelled"):
+            _save_record(
+                root, replace(record, stage={**record.stage, "launches_cancelled": True}), now
+            )
+
+
+def mark_workspace_shed(root: Path, run_id: str, now: float) -> None:
+    """Stamp workspace cleanup on the latest terminal record."""
+    directory = run_dir(root, run_id)
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        record = load_record(root, run_id)
+        if record.state == ENDED and not record.workspace_shed:
+            _save_record(root, replace(record, workspace_shed=now), now)
+
+
+def _save_record(root: Path, record: RunRecord, now: float) -> None:
     """Atomic write: a crash mid-save leaves the previous record intact."""
     if record.state not in STATES:
         raise ValueError(f"unknown state {record.state!r}")
     if record.state == ENDED and record.ending not in ENDINGS:
         raise ValueError(f"ended run needs a valid ending, got {record.ending!r}")
-    if record.state == WAITING and record.experiment_job_id and record.deadline <= 0:
+    if record.state == PARKED and record.experiment_job_id and record.deadline <= 0:
         # A waiting run without a deadline is invisible to the deadline floor
         # — the exact "silently immortal run" the fail-safe design forbids.
         raise ValueError("waiting run with an experiment needs a deadline")
     directory = run_dir(root, record.run_id)
     directory.mkdir(parents=True, exist_ok=True)
-    stamped = replace(record, updated=now, created=record.created or now)
+    if record.state == ENDED:
+        stage = dict(record.stage)
+        stage.pop("hermes_resume_required_chars", None)
+        record = replace(record, stage=stage)
+    history = record.author_history or (
+        []
+        if record.created
+        else [
+            {
+                "backend": record.author_backend or "claude",
+                "model": record.author_model,
+                "since": record.created or now,
+                "note": "",
+            }
+        ]
+    )
+    stamped = replace(record, updated=now, created=record.created or now, author_history=history)
     # unique tmp name: two concurrent writers must not interleave into the
     # same tmp file before the atomic replace
     tmp = directory / f".{RECORD_NAME}.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(asdict(stamped), indent=2, sort_keys=True))
+    payload = asdict(stamped)
+    payload["channels"] = {k: v for k, v in stamped.channels.items() if not v}
+    if not payload["channels"]:
+        payload.pop("channels")
+    if stamped.verification == "gate":
+        payload.pop("verification")
+    for key in ("claimed_value", "claimed_baseline"):
+        if payload[key] is None:
+            payload.pop(key)
+    if not stamped.author_history:
+        payload.pop("author_history")
+    if not stamped.author_rebind_id:
+        payload.pop("author_rebind_id")
+    if stamped.author_limits is None:
+        payload.pop("author_limits")
+    if not stamped.author_overridden:
+        payload.pop("author_overridden")  # No-setting records retain their exact wire shape.
+    path = directory / RECORD_NAME
+    if path.exists():
+        old = json.loads(path.read_text())
+        for key in (
+            "last_comment_id",
+            "last_review_id",
+            "last_review_comment_id",
+            "panel_wake_text",
+        ):
+            if key in old:
+                payload[key] = old[key]
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
     os.replace(tmp, directory / RECORD_NAME)
 
 
@@ -230,18 +360,82 @@ def load_record(root: Path, run_id: str) -> RunRecord:
     raw = json.loads((run_dir(root, run_id) / RECORD_NAME).read_text())
     if not isinstance(raw, dict):
         raise ValueError(f"record is not a JSON object: {type(raw).__name__}")
-    # Back-compat: a record written by pre-rename code carries `climb_job_id`
-    # for what is now `run_job_id`. Map it on load so an in-flight run started
-    # before the rename still wakes/ends correctly (the deploy is atomic, but
-    # its already-parked records are not). Only when the new key is absent, so
-    # a genuine new record always wins.
-    if "climb_job_id" in raw and "run_job_id" not in raw:
-        raw["run_job_id"] = raw["climb_job_id"]
-    # Ignore unknown keys: after a bad-merge revert, older code must still be
-    # able to read records written by newer code — a "corrupt" verdict here
-    # would blind the sweep to the whole run.
+    old_state = str(raw.get("state", ""))
+    if old_state == "concluding":
+        log.warning("run %s: migrating concluding to parked", run_id)
+    raw["state"] = {
+        "implementing": RUNNING,
+        "waiting": PARKED,
+        "in-review": PARKED,
+        "concluding": PARKED,
+    }.get(old_state, old_state)
+    # Unknown fields must not blind an older kernel to a live run.
     known = {k: v for k, v in raw.items() if k in RunRecord.__dataclass_fields__}
-    return RunRecord(**known)
+    record = RunRecord(**known)
+    return record
+
+
+def migrate_inbox(root: Path, run_id: str, now: float) -> None:
+    """Move legacy inbox data once, while the caller holds the wake lease."""
+    from outerloop.inbox import Message, advance_github_positions, append, thread_for
+
+    if read_lease(root, run_id) is None:
+        raise RuntimeError("inbox migration requires the run lease")
+    directory = run_dir(root, run_id)
+    with (directory / ".record-lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = directory / RECORD_NAME
+        raw = json.loads(path.read_text())
+        if raw.get("state") == ENDED:
+            return
+        keys = ("last_comment_id", "last_review_id", "last_review_comment_id")
+        # the follow-up job and its dispatched re-measure no longer exist:
+        # an old record still naming them would count as legacy forever
+        jobs = ("followup_job_id", "followup_stage")
+        if not any(key in raw for key in (*keys, "panel_wake_text", *jobs)):
+            return
+        if (
+            any(key in raw for key in keys)
+            and not (directory / "inbox" / "positions.json").exists()
+        ):
+            advance_github_positions(
+                directory,
+                dict(
+                    zip(
+                        ("comment", "review", "review_comment"),
+                        (int(raw.get(key, 0)) for key in keys),
+                        strict=True,
+                    )
+                ),
+            )
+        record = load_record(root, run_id)
+        if raw.get("panel_wake_text"):
+            append(
+                run_dir(root, run_id),
+                Message(
+                    0,
+                    "panel-verdict",
+                    "panel",
+                    thread_for(record),
+                    float(raw.get("updated", 0)),
+                    "panel:legacy",
+                    {
+                        "findings": [
+                            {
+                                "blocking": True,
+                                "summary": "Pending panel findings",
+                                "detail": raw["panel_wake_text"],
+                            }
+                        ]
+                    },
+                ),
+            )
+        for key in (*keys, "panel_wake_text", *jobs):
+            if raw.pop(key, None):
+                log.info("run %s: legacy %s dropped by the migration", run_id, key)
+        tmp = directory / f".migration.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(raw, indent=2, sort_keys=True))
+        os.replace(tmp, path)
 
 
 def list_runs(root: Path) -> list[RunRecord]:
@@ -266,6 +460,125 @@ def list_runs(root: Path) -> list[RunRecord]:
 
 
 # --- leases ---
+
+
+def _tick_lease_state(lease: TextIO) -> tuple[str, float, float]:
+    """(holder, heartbeat, ttl) written in TICK; ("", 0, 0) when it was released."""
+    lease.seek(0)
+    raw = lease.read()
+    if not raw:
+        return "", 0.0, 0.0
+    try:
+        record = json.loads(raw)
+        return (
+            str(record.get("holder", "unknown")),
+            float(record.get("heartbeat", 0)),
+            float(record.get("ttl", 0)),
+        )
+    except (ValueError, TypeError, AttributeError):
+        return "unreadable", os.fstat(lease.fileno()).st_mtime, 0.0
+
+
+def _tick_lease_free(previous: str, heartbeat: float, host: str, now: float, ttl_s: float) -> bool:
+    """A free lock left by a process on our own host is proof it died; from
+    another host the last heartbeat must be older than the TTL, since file
+    locks may not reach across nodes."""
+    if not previous:
+        return True
+    return previous.rsplit(":", 1)[0] == host or now - heartbeat > ttl_s
+
+
+def tick_lease_holder(root: Path, now: float, ttl_s: float, host: str) -> str:
+    """Who holds the root's tick lease, or "" when nobody does (read-only)."""
+    path = root / "TICK"
+    if not path.exists():
+        return ""
+    with path.open("a+") as lease:
+        try:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return _tick_lease_state(lease)[0] or "unknown"
+        previous, heartbeat, held_ttl = _tick_lease_state(lease)
+        # the holder's own cadence decides staleness, never the reader's
+        free = _tick_lease_free(previous, heartbeat, host, now, max(ttl_s, held_ttl))
+        return "" if free else previous
+
+
+# after a fresh acquisition the record is read back once this many seconds
+# later: where the lock does not span nodes, two starts can both write, and
+# the one whose record did not stand yields before its first tick
+TICK_LEASE_SETTLE_S = 1.0
+
+
+def acquire_tick_lease(
+    root: Path,
+    holder: str,
+    now: float,
+    ttl_s: float,
+    lease: TextIO | None = None,
+    *,
+    settle_s: float | None = None,
+) -> TextIO:
+    """Take or heartbeat TICK; keep its file lock until the loop exits.
+
+    `holder` is host:pid. The lock fences a live holder however old its
+    heartbeat; a dead one is taken over at once on the same host and after
+    its own TTL from another. A fresh acquisition reads its record back
+    after `settle_s` and yields when another holder's stands; a heartbeat
+    that finds another holder's record raises instead of overwriting it.
+    Never unlink TICK: every contender must lock the same inode.
+    """
+    heartbeat_only = lease is not None
+    if settle_s is None:
+        settle_s = TICK_LEASE_SETTLE_S
+    if lease is None:
+        root.mkdir(parents=True, exist_ok=True)
+        lease = (root / "TICK").open("a+")
+        try:
+            locked = True
+            try:
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                locked = False
+            previous, heartbeat, held_ttl = _tick_lease_state(lease)
+            host = holder.rsplit(":", 1)[0]
+            free = _tick_lease_free(previous, heartbeat, host, now, max(ttl_s, held_ttl))
+            if not locked or not free:
+                raise RuntimeError(f"tick lease held by {previous or 'unknown'}")
+            if previous:
+                log.warning("taking over the tick lease left by %s", previous)
+        except BaseException:
+            lease.close()
+            raise
+    try:
+        if heartbeat_only:
+            current = _tick_lease_state(lease)[0]
+            if current not in ("", holder):
+                raise RuntimeError(f"tick lease taken by {current}")
+        lease.seek(0)
+        lease.truncate()
+        lease.write(json.dumps({"holder": holder, "heartbeat": now, "ttl": ttl_s}))
+        lease.flush()
+        if not heartbeat_only and settle_s > 0:
+            time.sleep(settle_s)
+            current = _tick_lease_state(lease)[0]
+            if current != holder:
+                raise RuntimeError(f"tick lease taken by {current or 'unknown'}")
+        return lease
+    except BaseException:
+        lease.close()
+        raise
+
+
+def release_tick_lease(lease: TextIO, holder: str = "") -> None:
+    """Release the root lock; clear the record only while it is still ours."""
+    try:
+        if not lease.closed and (not holder or _tick_lease_state(lease)[0] in ("", holder)):
+            lease.seek(0)
+            lease.truncate()
+            lease.flush()
+    finally:
+        lease.close()
 
 
 def acquire_lease(root: Path, run_id: str, holder: str, holder_job_id: str, now: float) -> bool:

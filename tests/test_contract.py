@@ -9,7 +9,7 @@ from outerloop.contract import (
     load_contract,
 )
 
-# Mirror of autoresearch-pilot/.autoresearch.yaml (abridged) — the first real contract.
+# An abridged benchmark contract.
 PILOT_CONTRACT = """
 benchmarks:
   - name: tsp
@@ -73,14 +73,13 @@ def test_forbidden_paths_include_roadmap() -> None:
     assert set(forbidden_paths(contract)) == {
         ".github",
         ".outerloop.yaml",
-        ".autoresearch.yaml",
         "README.md",
     }
 
 
 @pytest.mark.parametrize(
     "allowed",
-    [".github/workflows/", ".autoresearch.yaml", "README.md", ".", "./"],
+    [".github/workflows/", ".outerloop.yaml", "README.md", ".", "./"],
 )
 def test_scope_overlap_refused(allowed: str) -> None:
     text = PILOT_CONTRACT.replace("allowed: [src/pilot/solvers/]", f"allowed: ['{allowed}']")
@@ -281,29 +280,18 @@ def test_benchmark_name_must_be_a_slug() -> None:
         load_contract(bad, "org/pilot")
 
 
-def test_climb_job_minutes_is_a_transitional_alias_for_attempt_job_minutes() -> None:
+def test_climb_job_minutes_is_rejected_as_an_unknown_field() -> None:
     from outerloop.contract import load_contract
 
-    base = """
+    contract = """
 benchmarks:
   - {name: reach, command: c, metric: m, direction: max}
-budgets: {gpu_hours_per_run: 1, runs_per_week: 3, %s: 180}
+budgets: {gpu_hours_per_run: 1, runs_per_week: 3, climb_job_minutes: 180}
 scope: {allowed: [src/]}
 roadmap: docs/roadmap.md
 """
-    # the new name and the legacy alias both populate the same field
-    assert load_contract(base % "attempt_job_minutes", "o/r").budgets.attempt_job_minutes == 180
-    assert load_contract(base % "climb_job_minutes", "o/r").budgets.attempt_job_minutes == 180
-    # a mid-migration contract with BOTH keys does not fail — the new name
-    # wins (terra #158 r1: the old alias must not read as an extra field)
-    both = """
-benchmarks:
-  - {name: reach, command: c, metric: m, direction: max}
-budgets: {gpu_hours_per_run: 1, runs_per_week: 3, attempt_job_minutes: 120, climb_job_minutes: 180}
-scope: {allowed: [src/]}
-roadmap: docs/roadmap.md
-"""
-    assert load_contract(both, "o/r").budgets.attempt_job_minutes == 120
+    with pytest.raises(ValueError, match="climb_job_minutes"):
+        load_contract(contract, "o/r")
 
 
 def test_merge_mode_defaults_manual_and_validates() -> None:
@@ -349,3 +337,148 @@ roadmap: docs/roadmap.md
         load_contract(base % ", gpus: 1", "org/x")
     with pytest.raises(ValueError, match="dispatch"):
         load_contract(base % ", gpus: 1, eval_minutes: 3", "org/x")
+
+
+def test_review_topup_defaults_and_custom_ceilings():
+    from outerloop.contract import ReviewTopup
+
+    contract = load_contract(PILOT_CONTRACT, "org/pilot")
+    assert contract.budgets.review_topup == ReviewTopup(launches=2, sleeps=4, gpu_hours=0.5)
+    bench = contract.benchmarks[0]
+    contract.budgets.review_topup = ReviewTopup(launches=3, sleeps=5, gpu_hours=0.75)
+    assert contract.budgets.ceilings(bench, False) == (bench.depth_k, bench.sleep_k, 0)
+    assert contract.budgets.ceilings(bench, True) == (bench.depth_k + 3, bench.sleep_k + 5, 0.75)
+
+
+@pytest.mark.parametrize(
+    "knobs",
+    [
+        {"launches": -1},
+        {"launches": 17},
+        {"sleeps": 0},
+        {"sleeps": 33},
+        {"gpu_hours": -0.1},
+        {"unknown": 1},
+    ],
+)
+def test_review_topup_rejects_out_of_bounds(knobs):
+    from outerloop.contract import ReviewTopup
+
+    with pytest.raises(ValidationError):
+        ReviewTopup.model_validate(knobs)
+
+
+def test_benchmark_found_and_missing() -> None:
+    from outerloop.contract import BenchmarkNotFoundError
+
+    contract = load_contract(PILOT_CONTRACT, "owner/repo")
+    assert contract.benchmark("tsp") is contract.benchmarks[0]
+    with pytest.raises(BenchmarkNotFoundError) as error:
+        contract.benchmark("renamed")
+    assert isinstance(error.value, ValueError)
+    assert str(error.value) == "benchmark 'renamed' not in contract (['tsp', 'sokoban'])"
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {},
+        {"free_rel": 0.005, "max_rel": 0.5, "requires_gain_rel": 0.05},
+        {"free": 1, "max": 10, "requires_gain": 2},
+        {"max_rel": 0.5},
+        {"free_rel": 0.5, "max_rel": 0.5},
+        {"free_rel": 0, "max_rel": 2},
+    ],
+)
+def test_regression_schema_accepts(policy):
+    from outerloop.contract import Benchmark
+
+    b = Benchmark(
+        name="mem",
+        command="eval",
+        metric="bytes",
+        direction="min",
+        min_delta_rel=0.05,
+        regression=policy,
+    )
+    assert b.regression is not None
+    if not policy or policy == {"max_rel": 0.5}:
+        assert b.regression.free_rel == 0.05
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"typo": 0.1},
+        {"free_rel": -0.1},
+        {"max": -1},
+        {"requires_gain_rel": -1, "max_rel": 1},
+        {"free_rel": 0.6, "max_rel": 0.5},
+        {"free": 2, "max": 1},
+        {"requires_gain": 1},
+        {"requires_gain_rel": 0.05},
+        {"free": 1, "max_rel": 0.5},
+        {"free_rel": float("nan")},
+        {"max_rel": float("inf")},
+        {"max_rel": 0.01},  # inherited free_rel is 0.05
+    ],
+)
+def test_regression_schema_rejects(policy):
+    from outerloop.contract import Benchmark
+
+    with pytest.raises(ValidationError):
+        Benchmark(
+            name="mem",
+            command="eval",
+            metric="bytes",
+            direction="min",
+            min_delta_rel=0.05,
+            regression=policy,
+        )
+
+
+def test_regression_preserves_legacy_measurement_signature():
+    from outerloop.contract import Benchmark
+
+    b = Benchmark(name="mem", command="eval", metric="bytes", direction="min")
+    # Signature before this field existed, including omission of default verification.
+    legacy = b.model_dump(exclude={"regression", "verification"})
+    expected = tuple(sorted((k, repr(v)) for k, v in legacy.items() if k not in b._WORKFLOW_DIALS))
+    assert b.measurement_signature() == expected
+    changed = Benchmark.model_validate(b.model_dump() | {"regression": {"free_rel": 0.005}})
+    assert changed.measurement_signature() != expected
+
+
+def test_guidance_reader_guards_the_channel_dir_and_caps_size():
+    """One reader, three modes: `none` is empty, `default` is the in-kernel
+    pack, a directory reads author.md/panel.md with a missing file meaning
+    empty guidance. A path into `.outerloop/` (the workspace syscall channel)
+    is refused — by the reader and at load — and each file is capped."""
+    from outerloop.contract import MAX_GUIDANCE_CHARS, read_guidance
+
+    assert read_guidance(lambda name: None, "none") == ("", "")
+    author, panel = read_guidance(lambda name: None, "default")
+    assert author and panel  # the in-kernel pack
+    files = {"guidance/author.md": "sweep first", "guidance/panel.md": "advisory only"}
+    read = lambda name: files.get(name)
+    assert read_guidance(read, "guidance") == ("sweep first", "advisory only")
+    # a missing file is empty guidance, never a contract error
+    assert read_guidance(read, "docs/guidance") == ("", "")
+    # the workspace syscall channel is never a guidance source
+    for mode in (".outerloop/guidance", ".outerloop", ".OUTERLOOP", "agent_memory/guidance"):
+        with pytest.raises(ScopeError):
+            read_guidance(read, mode)
+        with pytest.raises(ValidationError):
+            load_contract(PILOT_CONTRACT + f"\nguidance: {mode}\n", "org/repo")
+    # a guidance directory is trusted text: agents can never write it, and a
+    # scope that would let them is refused at load
+    from outerloop.contract import path_is_forbidden
+
+    guided = load_contract(PILOT_CONTRACT + "\nguidance: lab/guidance\n", "org/repo")
+    assert path_is_forbidden("lab/guidance/panel.md", guided)
+    assert not path_is_forbidden("lab/other.md", guided)
+    # oversized guidance is capped, visibly
+    big = {"guidance/author.md": "x" * (MAX_GUIDANCE_CHARS + 500)}
+    capped = read_guidance(lambda name: big.get(name), "guidance")[0]
+    assert len(capped) <= MAX_GUIDANCE_CHARS
+    assert "[truncated" in capped

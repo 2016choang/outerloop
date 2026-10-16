@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,8 +30,12 @@ CANNED = {
     "stop_reason": "end_turn",
     "session_id": "sess-1",
     "total_cost_usd": 0.42,
+    "usage": {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 20},
     "result": "Report: hypothesis held.",
 }
+
+
+pytestmark = pytest.mark.usefixtures("codex_host")
 
 
 def fake_claude(tmp_path: Path, payload: str, exit_code: int = 0, sleep: int = 0) -> str:
@@ -56,6 +61,7 @@ def test_successful_session_parses_everything(tmp_path: Path) -> None:
     result = ClaudeCodeHarness(api_key="sk-test-123", binary=binary).run("do the task", ws)
     assert not result.is_error
     assert result.cost_usd == 0.42
+    assert result.tokens == {"input_tokens": 150, "cached_input_tokens": 50, "output_tokens": 20}
     assert result.num_turns == 3
     assert result.session_id == "sess-1"
     assert result.final_text == "Report: hypothesis held."
@@ -75,6 +81,7 @@ def test_session_env_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
     assert "aws_SECRET" not in seen
     assert "ANTHROPIC_API_KEY=sk-test-123" in seen
     assert "PATH=" in seen
+    assert "CUDA_VISIBLE_DEVICES=" in seen  # the session sees no GPU
 
 
 def test_home_is_redirected_per_session(tmp_path: Path) -> None:
@@ -98,8 +105,20 @@ def test_home_is_redirected_per_session(tmp_path: Path) -> None:
 
 def test_session_env_allowlist_is_exhaustive(tmp_path: Path) -> None:
     env = session_env("key", "ANTHROPIC_API_KEY", home=tmp_path)
-    assert set(env) <= set(SESSION_ENV_ALLOWLIST) | {"ANTHROPIC_API_KEY", "HOME"}
+    assert set(env) <= set(SESSION_ENV_ALLOWLIST) | {
+        "ANTHROPIC_API_KEY",
+        "HOME",
+        "CUDA_VISIBLE_DEVICES",
+    }
     assert env["HOME"] == str(tmp_path)
+
+
+def test_sessions_see_no_gpu(tmp_path: Path, monkeypatch) -> None:
+    """The session reasons; GPU work goes through `launch`, where it is recorded
+    and metered. A host that exposes GPUs to the loop must not expose them to
+    the session, on any backend."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    assert session_env("key", "ANTHROPIC_API_KEY", home=tmp_path)["CUDA_VISIBLE_DEVICES"] == ""
 
 
 def test_argv_carries_the_controls(tmp_path: Path) -> None:
@@ -144,7 +163,7 @@ def test_malformed_fields_are_salvaged_not_discarded(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
-    assert result.cost_usd == 0.0
+    assert result.cost_usd is None
     assert result.session_id == "sess-1"
     assert result.num_turns == 3
     assert not result.is_error
@@ -553,18 +572,21 @@ def test_transcripts_accumulate_per_session_not_clobber(tmp_path: Path) -> None:
     assert Path(second.transcript_path).exists()
 
 
-def test_container_image_wraps_in_apptainer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+def test_container_image_wraps_in_apptainer(tmp_path: Path, monkeypatch, configured) -> None:
     """Containment: --containall/--cleanenv, only workspace + run-home bound,
     binary bind-mounted, key via APPTAINERENV_ (env, never argv)."""
     binary = fake_claude(tmp_path, json.dumps(CANNED))
     # the fake stands in for apptainer itself; it records argv + env
     ws = tmp_path / "ws"
     ws.mkdir()
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", binary if configured else "/wrong/path")
+    options: dict[str, Any] = {} if configured else {"apptainer_binary": binary}
     harness = ClaudeCodeHarness(
         api_key="sk-c",
         binary="/real/claude",
         container_image="/img/agent.sif",
-        apptainer_binary=binary,
+        **options,
     )
     result = harness.run("task", ws)
     assert not result.is_error
@@ -598,7 +620,8 @@ def _recording_apptainer(tmp_path: Path, payload: str) -> tuple[str, Path, Path]
     return str(script), calls, envs
 
 
-def test_codex_author_runs_contained_in_apptainer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+def test_codex_author_runs_contained_in_apptainer(tmp_path: Path, monkeypatch, configured) -> None:
     """AUTHOR mode: BOTH codex login and codex exec run inside apptainer
     (--containall/--cleanenv), so neither exposes the author key to the host —
     login is contained too, not only the exec. The host codex binary is
@@ -608,13 +631,15 @@ def test_codex_author_runs_contained_in_apptainer(tmp_path: Path) -> None:
     binary, calls, envs = _recording_apptainer(tmp_path, json.dumps(CANNED))
     ws = tmp_path / "ws"
     ws.mkdir()
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", binary if configured else "/wrong/path")
+    options: dict[str, Any] = {} if configured else {"apptainer_binary": binary}
     harness = CodexHarness(
         api_key="sk-o",
         binary="/real/codex",
         model="gpt-5.6-terra",
         sandbox="danger-full-access",
         container_image="/img/agent.sif",
-        apptainer_binary=binary,
+        **options,
     )
     harness.run("task", ws)
     logged = calls.read_text()
@@ -640,7 +665,7 @@ def test_codex_author_runs_contained_in_apptainer(tmp_path: Path) -> None:
 
 def test_codex_command_resume_uses_bypass_not_sandbox_cd(tmp_path: Path) -> None:
     """`codex exec resume` has neither --sandbox nor --cd (passing them is an
-    argparse error, verified on 0.130.0). A fresh exec keeps --sandbox/--cd. On
+    argparse error, verified on 0.160.0). A fresh exec keeps --sandbox/--cd. On
     resume the recorded session's sandbox is inherited: the author adds the
     bypass flag (to also skip approvals), a read-only reader (the structured-
     output repair turn also resumes) adds NO sandbox flag and stays read-only by
@@ -775,6 +800,38 @@ def test_vertex_mode_swaps_the_key_for_adc_env(tmp_path: Path, monkeypatch) -> N
     assert "ANTHROPIC_API_KEY" not in env
 
 
+@pytest.mark.parametrize("small_model", ["", "configured-small-model"])
+@pytest.mark.parametrize("contained", [False, True])
+def test_vertex_small_fast_model_defaults_to_session_model(
+    tmp_path: Path, monkeypatch, small_model: str, contained: bool
+) -> None:
+    from outerloop.harness import VertexConfig
+
+    captured = {}
+
+    def fake_popen(command, cwd, env, **kw):
+        captured["env"] = env
+        raise OSError("stop here")
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    vertex = VertexConfig(project="p-123", small_model=small_model)
+    # the config exports the slot only when set; an empty value would tell the
+    # CLI to use no model at all, so the harness fills it from the session model
+    assert vertex.env().get("ANTHROPIC_SMALL_FAST_MODEL") == (small_model or None)
+    h = ClaudeCodeHarness(
+        api_key="",
+        binary="/abs/claude",
+        model="session-model",
+        container_image="/img.sif" if contained else "",
+        vertex=vertex,
+    )
+    assert h.run("brief", tmp_path).is_error
+    expected = small_model or h.model
+    assert captured["env"]["ANTHROPIC_SMALL_FAST_MODEL"] == expected
+    if contained:
+        assert captured["env"]["APPTAINERENV_ANTHROPIC_SMALL_FAST_MODEL"] == expected
+
+
 def test_vertex_contained_session_binds_the_adc_file(tmp_path: Path, monkeypatch) -> None:
     from outerloop.harness import ClaudeCodeHarness, VertexConfig
 
@@ -804,16 +861,22 @@ def test_vertex_contained_session_binds_the_adc_file(tmp_path: Path, monkeypatch
     assert "APPTAINERENV_ANTHROPIC_API_KEY" not in env
 
 
-def test_vertex_from_env_is_the_single_owner(monkeypatch) -> None:
+@pytest.mark.parametrize("small_model", [None, " configured-small-model "])
+def test_vertex_from_env_is_the_single_owner(monkeypatch, small_model) -> None:
     from outerloop.harness import vertex_from_env
 
     monkeypatch.delenv("OUTERLOOP_VERTEX_PROJECT", raising=False)
     assert vertex_from_env() is None
     monkeypatch.setenv("OUTERLOOP_VERTEX_PROJECT", "p-9")
     monkeypatch.setenv("OUTERLOOP_VERTEX_ADC", "~/adc.json")
+    if small_model is None:
+        monkeypatch.delenv("OUTERLOOP_VERTEX_SMALL_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("OUTERLOOP_VERTEX_SMALL_MODEL", small_model)
     cfg = vertex_from_env()
     assert cfg is not None and cfg.project == "p-9" and cfg.region == "global"
     assert cfg.adc_file.endswith("/adc.json") and not cfg.adc_file.startswith("~")
+    assert cfg.small_model == (small_model or "").strip()
 
 
 def test_vertex_from_env_resolves_ambient_adc_under_the_real_home(tmp_path, monkeypatch) -> None:
@@ -844,19 +907,41 @@ def test_role_key_tolerates_a_missing_file_only_under_vertex(tmp_path, monkeypat
         role_key(missing, "codex")  # vertex never excuses a non-claude backend
 
 
-def test_default_binary_prefers_the_recorded_path(monkeypatch) -> None:
-    """init records OUTERLOOP_<BACKEND>_BIN; every lane (climb, follow-up, steward)
-    spawns that binary, else the native installer's ~/.local/bin path (#294)."""
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_default_binary_prefers_the_recorded_path(monkeypatch, tmp_path, backend) -> None:
     from outerloop.harness import default_binary
 
-    monkeypatch.delenv("OUTERLOOP_CLAUDE_BIN", raising=False)
-    monkeypatch.delenv("OUTERLOOP_CODEX_BIN", raising=False)
-    assert default_binary("claude").endswith("/.local/bin/claude")
-    assert default_binary("codex").endswith("/.local/bin/codex")
-    monkeypatch.setenv("OUTERLOOP_CLAUDE_BIN", "/opt/bin/claude")
-    assert default_binary("claude") == "/opt/bin/claude"
-    monkeypatch.setenv("OUTERLOOP_CODEX_BIN", "~/tools/codex")
-    assert default_binary("codex").endswith("/tools/codex") and "~" not in default_binary("codex")
+    key = f"OUTERLOOP_{backend.upper()}_BIN"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))  # not the runner's own ~/.local/bin
+    assert default_binary(backend) == backend
+    binary = tmp_path / backend
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    assert default_binary(backend) == str(binary.resolve())
+    monkeypatch.setenv(key, f"/opt/bin/{backend}")
+    assert default_binary(backend) == f"/opt/bin/{backend}"
+    monkeypatch.setenv(key, f"~/tools/{backend}")
+    assert default_binary(backend) == str(Path.home() / "tools" / backend)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_default_binary_falls_back_to_the_native_install_dir(monkeypatch, tmp_path, backend):
+    """A Slurm job with a bare PATH still finds a CLI the native installer put
+    under ~/.local/bin; a recorded path or a PATH hit wins over it."""
+    from outerloop.harness import default_binary
+
+    monkeypatch.delenv(f"OUTERLOOP_{backend.upper()}_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    local = tmp_path / ".local" / "bin" / backend
+    local.parent.mkdir(parents=True)
+    local.write_text("#!/bin/sh\n")
+    assert default_binary(backend) == backend  # not executable yet
+    local.chmod(0o755)
+    assert default_binary(backend) == str(local)
+    assert default_binary(backend, {"PATH": ""}) == backend  # no HOME given: no guess
 
 
 def test_no_lane_hardcodes_the_harness_path() -> None:
@@ -865,6 +950,6 @@ def test_no_lane_hardcodes_the_harness_path() -> None:
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src" / "outerloop"
-    for module in ("attempt.py", "followup.py", "steward.py"):
+    for module in ("attempt.py", "steward.py"):
         text = (src / module).read_text()
         assert "~/.local/bin/claude" not in text and "~/.local/bin/codex" not in text, module

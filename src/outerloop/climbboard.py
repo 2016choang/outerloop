@@ -28,13 +28,16 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from outerloop.hypothesis import MAX_HYPOTHESIS_CHARS as MAX_HYPOTHESIS_CHARS
+from outerloop.hypothesis import report_hypothesis
+from outerloop.inbox import wake_pending
+from outerloop.job_names import run_job_name, run_key
+from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as BOARD_BRANCH
 from outerloop.markers import marker
-from outerloop.runstate import ENDED, RunRecord, list_runs, run_dir
+from outerloop.runstate import ENDED, PARKED, RunRecord, list_runs, run_dir
 
 log = logging.getLogger("outerloop.climbboard")
 
-BOARD_BRANCH = "research-log"
-MAX_HYPOTHESIS_CHARS = 160
 MAX_SUMMARY_CHARS = 90  # what the table shows; the full line stays in the row
 MAX_CURVE_POINTS = 160
 MAX_CURVE_RUNS_PER_AGENT = 5  # at most this many curves per agent, so one
@@ -42,6 +45,7 @@ MAX_CURVE_RUNS_PER_AGENT = 5  # at most this many curves per agent, so one
 # (this per-agent cap is the whole bound — no global total ceiling, which
 # would drop the oldest agent once agents * 5 exceeded it)
 MAX_ROWS_PER_BENCHMARK = 2000
+MAX_ROWS_BYTES = 900_000  # the contents API returns no inline content past 1 MB
 
 
 @dataclass(frozen=True)
@@ -55,16 +59,16 @@ class ClimbRow:
     gpu_hours: float
     hypothesis: str
     pr_url: str
+    verification: str = "gate"
     report: str = ""  # reports/<file>.md when the ledger has archived it
     note: str = ""  # the gate's own verdict sentence, when it recorded one
 
 
-_NUM = re.compile(r"^(Baseline|Candidate): ([-+0-9.e]+)", re.M)
-_HYP = re.compile(r"Hypothesis[:*\s]+(.+)", re.I)
+_NUM = re.compile(r"^(Baseline|Candidate)(?: \(self-reported\))?: ([-+0-9.e]+)", re.M)
 
 
 def _report_fields(text: str) -> tuple[float | None, float | None, str]:
-    """(baseline, candidate, hypothesis one-liner) out of a run report."""
+    """(baseline, candidate, hypothesis paragraph) out of a run report."""
     baseline = candidate = None
     for key, raw in _NUM.findall(text):
         try:
@@ -75,12 +79,7 @@ def _report_fields(text: str) -> tuple[float | None, float | None, str]:
             baseline = value
         else:
             candidate = value
-    hyp = ""
-    m = _HYP.search(text)
-    if m:
-        hyp = re.sub(r"[`*_]|\s+", lambda g: " " if g.group().isspace() else "", m.group(1))
-        hyp = hyp.strip().rstrip("-").strip()[:MAX_HYPOTHESIS_CHARS]
-    return baseline, candidate, hyp
+    return baseline, candidate, report_hypothesis(text)
 
 
 def summarize(text: str, cap: int = MAX_SUMMARY_CHARS) -> str:
@@ -182,7 +181,7 @@ def collect_rows(
         records = list_runs(root)
     out: dict[str, list[ClimbRow]] = {}
     for record in records:
-        # only ENDED runs: an in-review run's outcome is not known yet (its
+        # only ENDED runs: a parked run's outcome is not known yet (its
         # PR may be rejected), and a published row is never rewritten
         if record.target != target or record.state != ENDED:
             continue
@@ -192,6 +191,7 @@ def collect_rows(
             continue
         baseline, candidate, hyp = _report_fields(report)
         stage = record.stage or {}
+        hyp = hyp or str(stage.get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
         ended = datetime.fromtimestamp(record.updated or record.created, tz=UTC)
         outcome = record.ending or "ended"
         # link the report only when the ledger's own marker says it is on the
@@ -203,7 +203,7 @@ def collect_rows(
             lines = marker.splitlines()
             if lines and lines[0].startswith(("archived", "pointer-pending", "done")):
                 if len(lines) > 1 and lines[1].startswith("reports/") and lines[1].endswith(".md"):
-                    # the ledger's own path: an in-review archive keeps its
+                    # the ledger's own path: a parked archive keeps its
                     # date even after the ENDED transition re-stamps updated
                     report = lines[1]
                 else:  # legacy marker without a path line
@@ -216,6 +216,7 @@ def collect_rows(
                 agent=record.agent_id,
                 ended=ended.strftime("%Y-%m-%d %H:%M:%S"),
                 outcome=outcome,
+                verification=record.verification,
                 baseline=baseline,
                 candidate=candidate,
                 gpu_hours=round(float(stage.get("gpu_hours_used") or 0.0), 2),  # type: ignore[arg-type]
@@ -231,26 +232,43 @@ def collect_rows(
 def merge_rows(existing_json: str | None, fresh: list[ClimbRow]) -> list[dict[str, Any]]:
     """Existing board rows plus any new ones, one per run id, oldest first.
     A run already on the board keeps its published row (reports are final at
-    terminal state; the board never rewrites history)."""
+    terminal state; the board never rewrites history). The one exception is a
+    hypothesis an earlier board cut short: when the fresh row's hypothesis
+    extends the published one, the longer text replaces it."""
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    longer = {r.run_id: r.hypothesis for r in fresh if r.hypothesis}
     if existing_json:
         try:
             for item in json.loads(existing_json):
                 if isinstance(item, dict) and item.get("run_id") not in seen:
+                    had = str(item.get("hypothesis") or "")
+                    full = longer.get(str(item.get("run_id")), "")
+                    if had and len(full) > len(had) and full.startswith(had):
+                        item = {**item, "hypothesis": full}
                     rows.append(item)
                     seen.add(str(item.get("run_id")))
         except ValueError:
             log.warning("unreadable board JSON; rebuilding from local records")
     for row in fresh:
         if row.run_id not in seen:
-            rows.append(asdict(row))
+            payload = asdict(row)
+            if row.verification == "gate":
+                payload.pop("verification")
+            rows.append(payload)
             seen.add(row.run_id)
     rows.sort(key=lambda r: str(r.get("ended", "")))
-    # the board is a bounded VIEW (the contents API caps file sizes); the
-    # full history stays in reports/ on this same branch, and the trim is
-    # said out loud in CLIMB.md, never silent
-    return rows[-MAX_ROWS_PER_BENCHMARK:]
+    # the board is a bounded VIEW, by rows and by bytes (the contents API
+    # returns nothing inline past 1 MB); the full history stays in reports/
+    # on this same branch, and the trim is said out loud in CLIMB.md
+    rows = rows[-MAX_ROWS_PER_BENCHMARK:]
+    while len(rows) > 1:
+        size = len(json.dumps(rows, indent=1).encode())
+        if size <= MAX_ROWS_BYTES:
+            break
+        # drop the overshoot's share of the oldest rows, then measure again
+        rows = rows[max(1, len(rows) * (size - MAX_ROWS_BYTES) // size) :]
+    return rows
 
 
 def _fmt(value: Any) -> str:
@@ -275,6 +293,7 @@ def render_md(
         "",
         "Written by the kernel when runs end. Data: `climb/data/<benchmark>.json`;",
         "chart: open `index.html` from a clone of this branch.",
+        "This page is attempt history. Confirmed results: [BENCHMARKS.md](BENCHMARKS.md).",
     ]
     for benchmark in sorted(boards):
         rows = boards[benchmark]
@@ -288,19 +307,27 @@ def render_md(
         # number (owner decision: per-run declared bases confused more than
         # they informed as a headline)
         start = (starts or {}).get(benchmark)
+        claim_label = (
+            " (includes self-reported values)"
+            if any(r.get("verification") == "self_report" for r in rows)
+            else ""
+        )
         start_chip = f" · baseline (start): **{_fmt(start)}**" if start is not None else ""
         lines += [
             "",
             f"## {benchmark}",
             "",
-            f"Attempts: **{len(rows)}** ({len(improved)} improved) · best candidate: "
+            f"Attempts: **{len(rows)}** ({len(improved)} improved) · best candidate{claim_label}: "
             f"**{_fmt(best)}** ({direction}){start_chip} · GPU-hours: **{gpu:.1f}**",
         ]
-        if len(rows) >= MAX_ROWS_PER_BENCHMARK:
+        if (
+            len(rows) >= MAX_ROWS_PER_BENCHMARK
+            or len(json.dumps(rows, indent=1)) > 0.9 * MAX_ROWS_BYTES
+        ):
             lines += [
                 "",
-                f"Only the newest {MAX_ROWS_PER_BENCHMARK} attempts are on the board; "
-                "archived reports stay in `reports/` on this branch.",
+                f"Only the newest {len(rows)} attempts are on the board (its data file is "
+                "bounded); archived reports stay in `reports/` on this branch.",
             ]
         lines += [
             "",
@@ -322,7 +349,9 @@ def render_md(
             report = f"[report]({r['report']})" if r.get("report") else ""
             lines.append(
                 f"| {ended} | {r.get('agent', '')} | {hyp} | {outcome} "
-                f"| {_fmt(r.get('candidate'))} | {_fmt(r.get('gpu_hours'))} | {report} |"
+                f"| {_fmt(r.get('candidate'))}"
+                + (" (self-reported)" if r.get("verification") == "self_report" else "")
+                + f" | {_fmt(r.get('gpu_hours'))} | {report} |"
             )
     return "\n".join(lines) + "\n"
 
@@ -398,7 +427,9 @@ def render_html(
         "border-radius:2px;display:inline-block;box-sizing:border-box}\n"
         ".pill{border-radius:.6rem;padding:.05rem .55rem;font-size:.72rem;\n"
         "font-weight:600;color:#fff}\n"
-        ".run.queue{width:100%;padding-bottom:.55rem}\n"
+        # the table cannot wrap (one job per line), so on a narrow screen it
+        # scrolls inside its card instead of pushing past it
+        ".run.queue{width:100%;padding-bottom:.55rem;overflow-x:auto;max-width:100%}\n"
         ".run.queue table{width:100%;border-collapse:collapse;margin-top:.35rem;\n"
         "  font-size:.72rem;font-variant-numeric:tabular-nums}\n"
         ".run.queue th{text-align:left;font-weight:500;color:var(--muted);\n"
@@ -408,6 +439,7 @@ def render_html(
         ".run.queue tr:last-child td{border-bottom:0}\n"
         ".run.queue .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}\n"
         ".run.queue td.name{max-width:24rem;overflow:hidden;text-overflow:ellipsis}\n"
+        "@media (max-width:640px){.run.queue td.name{max-width:9rem}}\n"
         ".run.queue td.part,.run.queue td.time{color:var(--muted)}\n"
         ".run.queue .st{display:inline-block;min-width:1.5rem;text-align:center;\n"
         "  border-radius:.4rem;padding:0 .35rem;font-size:.66rem;font-weight:600}\n"
@@ -421,6 +453,8 @@ def render_html(
         f"<header><h1>{target} <span>· climb</span></h1>\n"
         "<button id='theme' title='theme: auto / light / dark'>auto</button>\n"
         "</header>\n"
+        "<p>This page is attempt history. Confirmed results: "
+        "<a href='BENCHMARKS.md'>BENCHMARKS.md</a>.</p>\n"
         "<div id='now' class='chips'></div>\n"
         "<div id='charts'></div>\n<script>\n"
         f"const data = {payload};\n"
@@ -522,8 +556,15 @@ def render_html(
         "  const wins = rows.filter(r => won.has(r.outcome)).length;\n"
         "  const gpu = rows.reduce((a, r) => a + (r.gpu_hours || 0), 0);\n"
         "  const el = document.getElementById('charts');\n"
-        "  const h = document.createElement('h2'); h.textContent = b; el.append(h);\n"
-        "  const chips = document.createElement('div'); chips.className = 'chips';\n"
+        + (
+            "  const trust = rows.some(r => r.verification === 'self_report');\n"
+            "  const h = document.createElement('h2');\n"
+            "  h.textContent = b + (trust ? ' (includes self-reported values)' : ''); "
+            "el.append(h);\n"
+            if any(r.get("verification") == "self_report" for rows in boards.values() for r in rows)
+            else "  const h = document.createElement('h2'); h.textContent = b; el.append(h);\n"
+        )
+        + "  const chips = document.createElement('div'); chips.className = 'chips';\n"
         "  const chip = (label, value) => {\n"
         "    const c = document.createElement('span'); c.className = 'chip';\n"
         "    const strong = document.createElement('b'); strong.textContent = value;\n"
@@ -692,15 +733,10 @@ def render_html(
         "    .then(r => r.ok ? r.json() : null)\n"
         "    .then(s => { if (s && Array.isArray(s.runs)) { strip = s; render(); } })\n"
         "    .catch(() => {});\n"
-        "const stateHue = r => r.state === 'in-review' ? '150 55% 38%'\n"
-        "  : r.state === 'implementing' ? '262 45% 52%'\n"
+        "const stateHue = r => r.state === 'parked' ? '150 55% 38%'\n"
+        "  : r.state === 'running' ? '262 45% 52%'\n"
         "  : r.phase === 'author-sleep' ? '212 55% 46%' : '38 65% 42%';\n"
-        "// kernel phase names, translated for the page: 'in gate' = the\n"
-        "// kernel is measuring a submitted candidate; 'experiments' = the\n"
-        "// author launched its own jobs and sleeps until they finish\n"
-        "const stateName = r => r.state !== 'waiting' ? r.state.replace('-', ' ')\n"
-        "  : r.phase === 'author-sleep' ? 'experiments'\n"
-        "  : r.phase === 'candidate' ? 'in gate' : 'waiting';\n"
+        "const stateName = r => r.waiting ? r.state + ' \u00b7 ' + r.waiting : r.state;\n"
         "const render = () => {\n"
         "  if (!strip) return;\n"
         "  now.textContent = '';\n"
@@ -724,6 +760,14 @@ def render_html(
         "      a.textContent = 'PR'; top.append(a);\n"
         "    }\n"
         "    card.append(top);\n"
+        "    if (r.author_model) {\n"
+        "      const a = document.createElement('span');\n"
+        "      a.textContent = ((r.author_history || []).length > 1\n"
+        "        ? r.author_history.map(h => h.backend + ' / ' + h.model).join(' → ')\n"
+        "        : r.author_backend + ' / ' + r.author_model)\n"
+        "        + (r.author_overridden ? ' (override)' : '');\n"
+        "      a.style.display = 'block'; card.append(a);\n"
+        "    }\n"
         "    if (r.direction) {\n"
         "      const d = document.createElement('span'); d.className = 'dir';\n"
         "      d.textContent = r.direction; d.style.display = 'block';\n"
@@ -858,16 +902,16 @@ def render_html(
 STATUS_PATH = "climb/status.json"
 # The queue view shows the kernel's own jobs only. Fixed-name jobs (the tick
 # chain, issue sessions, climb sessions) are matched by shape; per-run jobs
-# (wake, followup, launch) are matched against the names the kernel itself
-# derives from this target's run ids, with the same 60-character cut Slurm
-# forces on them; an eval's name is a liveness hash and is claimed only
+# (wake, launch) are matched against the names the kernel itself
+# derives from this target's run ids, including legacy 60-character cuts
+# and current run keys; an eval is claimed only
 # through its run's marker. Anything else on the account is the operator's
 # and never leaves the cluster.
-JOB_NAME_LIMIT = 60
+LEGACY_JOB_NAME_LIMIT = 60
 FIXED_JOB_PATTERNS = tuple(
     re.compile(p)
     for p in (
-        r"^(autoresearch|outerloop)-(resident|tick)$",
+        r"^outerloop-(resident|tick)(-[0-9a-f]{12})?$",
         r"^climb-[\w.-]+-agent-\d+$",
         r"^(steward|climb)-issue-\d+$",
     )
@@ -883,7 +927,7 @@ def run_job_names(
     root: Path, target: str, records: list[RunRecord] | None = None
 ) -> dict[str, tuple[str, str, bool]]:
     """Expected per-run job names for `target`: name -> (run_id, agent,
-    is_prefix). Exact for wake and followup; a prefix for launches, whose
+    is_prefix). Exact for wakes; a prefix for launches, whose
     names end in the experiment's own label. Every run of the target counts,
     ended ones too: a finishing job can outlive its record's state.
 
@@ -896,11 +940,13 @@ def run_job_names(
             continue
         rid, agent = record.run_id, record.agent_id
         for name, prefix in (
-            (f"wake-{rid}", False),
-            (f"followup-{rid}", False),
+            (f"wake-{rid}"[:LEGACY_JOB_NAME_LIMIT], False),  # legacy 60-character names
+            (f"{rid}-launch-"[:LEGACY_JOB_NAME_LIMIT], True),
+            (run_job_name(rid, prefix="wake-"), False),
             (f"{rid}-launch-", True),
+            (f"{run_key(rid)}-launch-", True),
         ):
-            key = name[:JOB_NAME_LIMIT]
+            key = name
             if key in out and out[key][0] != rid:
                 # two runs whose names collide under the cut: the job is still
                 # the kernel's, but nobody can say whose, so it is claimed by none
@@ -956,10 +1002,11 @@ def queue_rows(
         run_id = agent = ""
         if job_id in owners:  # an eval of one of this target's live runs
             run_id, agent = owners[job_id]
-        elif name in expected and not expected[name][2]:  # wake / followup, exact
+        elif name in expected and not expected[name][2]:  # wake, exact
             run_id, agent = expected[name][:2]
         elif any(name.startswith(k) for k, v in expected.items() if v[2]):  # a launch
-            run_id, agent = next(v[:2] for k, v in expected.items() if v[2] and name.startswith(k))
+            key = max((k for k, v in expected.items() if v[2] and name.startswith(k)), key=len)
+            run_id, agent = expected[key][:2]
         elif is_fixed_kernel_job(name):
             found = _AGENT_RE.search(name)
             agent = found.group(0) if found else ""
@@ -983,7 +1030,7 @@ def queue_rows(
     return rows
 
 
-_LIVE_STATES = ("implementing", "waiting", "in-review", "concluding")
+_LIVE_STATES = ("running", "parked")
 
 
 def _phrase(text: str, cap: int = 64) -> str:
@@ -994,6 +1041,23 @@ def _phrase(text: str, cap: int = 64) -> str:
     for sep in (": ", " — ", " -- "):
         first = first.split(sep, 1)[0]
     return summarize(first, cap)
+
+
+def _waiting_on(record: Any, exp_done: int, exp_total: int, pending: bool) -> str:
+    """What a parked run waits for, read off the record: its launched jobs, the
+    gate measuring its submit, review on its PR, or just its next wake (a
+    checkpoint sleep, or a message already waiting in its inbox)."""
+    if record.state != PARKED:
+        return ""
+    if exp_total > exp_done:
+        return "jobs"  # messages wait behind jobs, so jobs come first
+    if pending:
+        return "wake"
+    if str((record.stage or {}).get("phase", "")) == "candidate":
+        return "gate"
+    if record.pr_url:
+        return "review"
+    return "wake"
 
 
 def _experiment_progress(root: Path, record: Any) -> tuple[int, int, int]:
@@ -1045,24 +1109,42 @@ def collect_status(
         for b in getattr(contract, "benchmarks", ())
     }
     gpu_budget = getattr(getattr(contract, "budgets", None), "gpu_hours_per_run", None)
+    topup = getattr(getattr(contract, "budgets", None), "review_topup", None)
     runs = []
     for record in records:
         if record.target != target or record.state not in _LIVE_STATES:
             continue
         stage = record.stage or {}
-        note = str(stage.get("syscall_note") or stage.get("report") or "")
-        _b, _c, hyp = _report_fields(note)
+        from outerloop.harness import resume_config_block
+
+        blocked = resume_config_block(stage)
+        note = blocked or str(stage.get("report") or "")
+        hyp = report_hypothesis(note) or str(stage.get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
         exp_done, exp_total, exp_minutes = _experiment_progress(root, record)
         depth_k, sleep_k, bench_minutes = budgets.get(record.benchmark, (None, None, 0))
+        gpu_ceiling = gpu_budget
+        if topup is not None and (record.stage or {}).get("review_topup"):
+            # the review top-up raised this run's ceilings when its PR opened
+            depth_k = None if depth_k is None else depth_k + topup.launches
+            sleep_k = None if sleep_k is None else sleep_k + topup.sleeps
+            gpu_ceiling = None if gpu_budget is None else gpu_budget + topup.gpu_hours
         runs.append(
             {
                 "run_id": record.run_id,
+                **({"verification": record.verification} if record.verification != "gate" else {}),
+                **({"channels": record.channels} if record.channels else {}),
                 "agent": record.agent_id,
+                "author_backend": record.author_backend or "claude",
+                "author_model": record.author_model,
+                "author_history": record.author_history,
+                "author_overridden": record.author_overridden,
                 "benchmark": record.benchmark,
                 "state": record.state,
-                "phase": stage.get("phase", ""),
+                "phase": "configuration-blocked" if blocked else stage.get("phase", ""),
                 # the agent's own headline: what it says it is working on
-                "direction": _phrase(hyp or note.replace("\n", " ")),
+                "direction": (blocked or _phrase(hyp or note.replace("\n", " ")))
+                + (" (self-reported)" if record.verification == "self_report" else ""),
+                "hypothesis": hyp,
                 "since": record.updated or record.created,
                 # a run that never launched HAS used zero — absent keys must
                 # not blank the card's meters (a plain submit writes none)
@@ -1084,8 +1166,11 @@ def collect_status(
                     else 0
                 ),
                 "gpu_hours_used": float(stage.get("gpu_hours_used") or 0.0),  # type: ignore[arg-type]
-                "gpu_hours_budget": gpu_budget,
+                "gpu_hours_budget": gpu_ceiling,
                 "pr_url": record.pr_url,
+                "waiting": _waiting_on(
+                    record, exp_done, exp_total, wake_pending(run_dir(root, record.run_id), record)
+                ),
             }
         )
     runs.sort(key=lambda r: str(r.get("run_id")))
@@ -1130,11 +1215,18 @@ def service_status(
             # edits the contract — all real transitions the strip must show
             keys = (
                 "run_id",
+                "author_backend",
+                "author_model",
+                "author_history",
+                "author_overridden",
                 "state",
                 "phase",
+                "waiting",
                 "gpu_hours_used",
                 "gpu_hours_budget",
                 "direction",
+                "hypothesis",
+                "pr_url",
                 "exp_done",
                 "exp_total",
                 "exp_minutes",
@@ -1362,12 +1454,10 @@ def service_climb_board(
     # render without it until a later pass reads it again. An index that
     # could not be READ at all (None) is never rewritten this pass.
     wanted = {b: directions.get(b, "min") for b in sorted(set(boards) | set(index or {}))}
-    # the starting positions come from the target's ledger on its default
-    # branch — best-effort: a missing or unreadable ledger just drops the chip
+    # Read the baseline at this pass's research-log pin; failure drops the chip.
     starts: dict[str, float] = {}
     try:
-        # ref HEAD = the repo's default branch, whatever it is named
-        raw_leader = github.get_file_content(target, "results/leader.json", "HEAD")
+        raw_leader = github.get_file(target, "results/leader.json", head) if head else None
         if raw_leader:
             for name, entry in json.loads(raw_leader).items():
                 value = entry.get("baseline") if isinstance(entry, dict) else None

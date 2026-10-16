@@ -1,7 +1,12 @@
 # The pre-PR verification loop
 
-**Status: proposal (2026-08-15).** The mechanics of verification as a step of
-the climb transaction. `judge-placement.md` argues *where* the verifier
+**Status: built — the tick passes `--panel verify,review` to every climb job
+by default (the off-switch is `OUTERLOOP_PANEL=""`; local mode without an
+image also turns the panel off unless `OUTERLOOP_PANEL_UNCONTAINED=1`);
+sequencing stages 1–4 below are live, the retriever egress (5) is still to
+come.** The mechanics
+of verification as a step of the climb transaction. `judge-placement.md`
+argues *where* the verifier
 belongs (inside the orchestrator) and why the reviewer stays external — this
 note does not repeat that argument. It specifies the loop that runs there:
 what happens between "the candidate measured improved" and "a PR exists",
@@ -11,9 +16,10 @@ result-policies), `reviewer-infra.md` (threat model), and `consolidation.md`
 
 ## Why pre-PR
 
-Today the verifier reads bot PRs after they open. Moving it before the PR
-changes what a PR *is*: the output of verification rather than the input to
-it. A maintainer never sees half-baked work — the recurring cost of watching
+Before this loop, the verifier read bot PRs after they opened. Moving it
+before the PR changes what a PR *is*: the output of verification rather
+than the input to it. A maintainer never sees half-baked work — the
+recurring cost of watching
 early drafts was named the day the notes-vs-PR question first came up. Three
 more things fall out of the same move:
 
@@ -25,7 +31,7 @@ more things fall out of the same move:
 - **Event-driven, not clock-driven.** The verify step fires when the
   candidate measures improved, inside the climb job — no second event plane.
 - **The strong jail.** Judge sessions adopt the climb's apptainer
-  containment when this step lands; today's GitHub-side judges run in the
+  containment; the GitHub-side judges run in the
   runner sandbox instead. Backend eligibility above rests on the token
   point, not on the jail.
 
@@ -123,90 +129,24 @@ before hibernating (author skill), data-fenced wakes re-ground facts, and
 distillation of reports into lessons is the curator role — nothing
 load-bearing lives only in a compressible medium.
 
-## Re-reading a follow-up
+## Submitting during review
 
-A PR's content changes after publish in exactly one kernel-driven way: a
-follow-up session answers review feedback with a code change, which the
-responder re-measures and pushes. That push replaces the content the panel
-blessed, so the record's `auto_blessed_head` is cleared — the tick arms a
-self-merge only on an exact head match, so a changed PR could only ever be
-merged by a human. The follow-up now closes that gap the same way the climb
-opened the PR: **the same panel reads the new head.**
+A parked author with a PR wakes through the same author leg as any other
+parked run. Replies and unsubmitted edits do not invoke measurement. A submit
+runs the gate and panel, delivers both verdicts through the inbox, and uses
+`attempt.publish` to fast-forward the PR head. The record's blessing remains
+bound to the published head. The sweep merges only a quiet, clean PR at that blessed head, with the API
+head guard, while its base contract still permits auto mode. It never arms
+GitHub auto-merge in this mode.
 
-- The responder posts its reply and writes the record (cursors advanced,
-  blessing cleared) FIRST, then runs the panel. Judges take minutes; a
-  responder killed mid-read must cost an unarmed PR, never a silent push
-  or a repeated wake.
-- The panel's `base/` is the merge-base of the pushed head and the
-  kernel-pinned base sha (after a base sync the two coincide); its contract
-  text is that base's. The claim is a *follow-up re-measure on an open PR*,
-  naming the PR's previous number — never a fresh pre-PR improvement claim.
-- The read is posted on the thread under the follow-up marker, with the
-  panel transcript and one closing line that says who merges.
-- **Bless** — `auto_blessed_head = pushed sha` — only when the read is clean
-  (no blocking finding, no degraded lens), the tree's contract says
-  `merge: auto`, and the workspace HEAD still equals the pushed sha after
-  the judges ran (they hold a shell next to the checkout). The tick then
-  arms once GitHub reports the PR clean and up to date.
-- Everything else is written down and left to a human: blocking findings
-  (the panel's explicit demand), a degraded read, a manual dial (the owner's
-  preference, not doubt), a panel that could not run, no trusted base.
-
-The tick threads the climb's `--panel` to author follow-ups (never the
-steward's — its PRs are not panel-blessed) and adds one read's walltime to
-the job on top of the author's budget, both under the partition cap; it tells
-the follow-up how many minutes the read actually got (`--panel-minutes`), so
-a cap that eats the allowance costs the read — skipped, and said so on the
-thread — never the author's session. The follow-up builds the panel only
-after the run's OWN author is resolved; a judge key that equals that
-author's credential (role separation on the keys themselves, not the paths)
-drops the panel for this job and posts the skip, the same way — the reply
-never depends on the panel. A panel config that would die at startup is
-left off the follow-up (the reply still goes out; the PR stays
-human-merged; the tick's contract alarm already names the misconfig).
-
-**The revise loop is a wake type.** A blocking re-read (findings, not a
-degraded lens) is recorded on the run — the panel's data-fenced findings and
-the pushed head they were read on — and the tick submits a follow-up for it
-exactly as it does for a maintainer's comment or a base move: every step a
-job, on the one follow-up channel. The woken author addresses or rebuts the
-findings; a code change is re-measured and re-read, and a read that still
-blocks sets the wake again. Bounded by `PANEL_WAKE_CAP` revisions, after
-which the findings are left to a human (the panel's explicit demand stands).
-A wake is spent when a follow-up services it, and superseded by any later
-push (it fires only while GitHub's head is the read head); an open panel
-wake also holds off the auto-arm, whatever the record says about blessing.
-
-## Measuring a follow-up's change
-
-A follow-up's re-measure runs where the contract says the benchmark runs.
-`gpus: 0` benchmarks are measured inline in the follow-up job, as before. A
-GPU benchmark is never measured on that CPU node: the follow-up **seals** the
-session's change as a commit on the PR's current head (the climb's snapshot,
-line memory excluded), asks the dispatched measurer for one measure of that
-tree on the GPU lane, and — on a cluster — **parks**: it posts the author's
-reply now (the comments are serviced), records the sealed sha, its retaining
-ref, the eval job ids and the fresh seed on the run, and ends. Nothing is
-pushed yet. The tick polls those jobs; while they run, no comment is serviced
-and nothing is armed (the sealed change lands first, so the next answer is
-given on the tree the maintainer will actually see). When every job is
-terminal the tick submits a follow-up, which finishes on the sealed tree:
-ledger under the cross-seed floor, disarm, one commit with the standard
-message, push, the measured-number comment, the candidate row, the body
-edit, the record (blessing cleared, stage cleared, snapshot released) — and
-then the panel re-read of the pushed head, exactly as for an inline change.
-A synchronous compute (LocalCompute) returns the value at once and the same
-follow-up applies it; a failed dispatched eval is abandoned and said on the
-thread, with the workspace back on the pushed head.
-
-Placement is derived from the contract's `gpus:` — the author never chooses
-where its change is measured, and the follow-up carries the same cluster
-coordinates the climb does.
+The wake job carries the panel's allowance alongside the author session's
+budget. A skipped panel is reported in the inbox and on the PR and cannot
+bless a head. See [lifecycle.md](lifecycle.md).
 
 ## What changes on GitHub
 
 - `verify.yml` on targets thins to defense-in-depth (a re-check of the
-  posted PR) or retires once the pre-PR loop is live; the choice can be
+  posted PR) or retires; the choice can be
   per-target.
 - The **advisory reviewer for human PRs is untouched** — it is an external
   service with standalone value, and none of this note applies to it.

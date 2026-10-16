@@ -44,7 +44,7 @@ Package skeleton, CI gates, governance docs, architecture (ops+safety reviewed).
       Claude Code adapter (scrubbed session env, timeout, key-redacted
       transcript to disk) + fake adapter for tests
 - [x] Runs span sessions: per-run HOME + native resume (`resume_session_id`)
-      + bounded wake prompt (`render_wake`) so a run hibernates through
+      + bounded wake text (the inbox renderer) so a run hibernates through
       multi-day experiments with its agentic context intact (orchestrator-side
       wake scheduling lands in phase 4 with `compute`)
 - [ ] Session sandboxing: scrubbed env (no PAT/billing keys), hard timeouts,
@@ -172,6 +172,9 @@ open-ended sweep space.
 - [ ] Task selection reads lessons/ + recent runs/ (the loop's research memory)
 - [ ] Periodic distillation pass: raw reports → bounded lessons/<target>.md
 - [ ] Weekly digest aggregates per-run reports; cost ledger; leaderboard history
+- [x] Leaderboard on research-log: pending at publish, confirmed at observed
+      merge; main-commit links and `outerloop migrate-ledger` for existing targets.
+      PRs carry only the measured tree.
 - [x] Climb board on the research-log branch: `climb/<benchmark>.json` +
       `CLIMB.md` + `index.html`; a Pages site can serve the same files at the
       public flip
@@ -183,6 +186,8 @@ open-ended sweep space.
 ## Cross-cluster (dev plan, 2026-08-29)
 
 Research findings sync through GitHub; job state never leaves its cluster.
+Design note: design/multi-cluster.md (2026-09-15) fills in the tiers against
+the code and against Empire AI, NERSC and ALCF, and plans the Empire AI try-out.
 
 - [x] Findings memory: every attempt fetches the target's `research-log`
       branch — the brief inlines the newest reports, the full archive lands
@@ -251,6 +256,9 @@ Research findings sync through GitHub; job state never leaves its cluster.
       PR-quality bar is met
 - [ ] egolearn as second research target; second harness backend if volume warrants
 - [ ] API model tiering informed by pilot data; cloud burst if queues block
+- [ ] Model gateway (design/model-gateway.md), with the first cloud
+      integration (0.4): conformance check first, then the gateway as an
+      optional service; the per-session bridge goes once it is the default
 
 ## Meta: benchmarking autoresearch itself (maintainer direction 2026-08-08)
 

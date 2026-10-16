@@ -2,7 +2,7 @@
 
 The Codex CLI is not run here (no binary in CI); these tests pin the argv shape
 and the defensive JSONL parsing. The exact flag spellings and event schema are
-verified on the cluster — see CodexHarness.
+verified against the pinned release — see CodexHarness.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 import outerloop.harness as harness_mod
 from outerloop.harness import (
@@ -19,6 +21,8 @@ from outerloop.harness import (
     _parse_codex_result,
     _rmtree_at,
 )
+
+pytestmark = pytest.mark.usefixtures("codex_host")
 
 
 def test_command_has_expected_flags() -> None:
@@ -67,12 +71,21 @@ def test_command_resume_uses_resume_subcommand() -> None:
 
 
 def test_parse_success_pulls_thread_id_and_final_text() -> None:
-    # schema verified against codex-cli 0.130.0: thread.started -> thread_id
+    # schema verified against codex-cli 0.160.0: thread.started -> thread_id
     stdout = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "019ff8f0-abc"}),
             json.dumps({"type": "turn.started"}),
-            json.dumps({"type": "turn.completed", "usage": {"output_tokens": 29}}),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "output_tokens": 29,
+                        "cache_write_input_tokens": 7,
+                        "reasoning_output_tokens": 11,
+                    },
+                }
+            ),
         ]
     )
     result = _parse_codex_result(stdout, "final answer\n", 0, "t.jsonl")
@@ -98,6 +111,43 @@ def test_parse_flags_turn_failed_with_nested_message() -> None:
     result = _parse_codex_result(stdout, "", 0)
     assert result.is_error is True
     assert "401 Unauthorized" in result.error_detail
+
+
+RECONNECT = {
+    "type": "error",
+    "message": "Reconnecting... 1/5 (stream disconnected before completion: Connection closed.)",
+}
+DONE = {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5}}
+
+
+def test_parse_recovered_error_is_not_a_failure() -> None:
+    stdout = "\n".join(map(json.dumps, [RECONNECT, DONE]))
+    result = _parse_codex_result(stdout, "done", 0)
+    assert result.is_error is False
+    assert result.stop_reason == "completed"
+    assert result.tokens == {"input_tokens": 100, "output_tokens": 5}
+
+
+@pytest.mark.parametrize(
+    "events, returncode",
+    [
+        ([RECONNECT, {"type": "turn.failed", "error": {"message": "gave up"}}], 0),
+        ([DONE, RECONNECT], 0),  # an error with no completed turn after it
+        ([RECONNECT, DONE], 1),
+        ([RECONNECT, {"type": "turn.failed"}, DONE], 0),  # a failed turn stays failed
+    ],
+)
+def test_parse_unrecovered_error_is_a_failure(events: list[dict], returncode: int) -> None:
+    result = _parse_codex_result("\n".join(map(json.dumps, events)), "", returncode)
+    assert result.is_error is True
+    assert result.tokens == {}
+
+
+def test_parse_detail_names_the_fatal_error_not_recovered_ones() -> None:
+    events = [RECONNECT, DONE] * 10 + [{"type": "error", "message": "quota exhausted"}]
+    result = _parse_codex_result("\n".join(map(json.dumps, events)), "", 0)
+    assert result.is_error is True
+    assert result.error_detail == "quota exhausted"
 
 
 def test_parse_skips_timestamped_log_lines() -> None:
@@ -285,3 +335,30 @@ def test_run_does_not_follow_a_symlinked_run_home(monkeypatch: Any, tmp_path: Pa
     monkeypatch.setattr(CodexHarness, "_login", lambda self, hm: None)
     CodexHarness(api_key="k").run("brief", workspace)
     assert (outside / ".codex" / ".tmp" / "keep" / "f").read_text() == "x"  # untouched
+
+
+def test_last_message_rejects_author_symlink(monkeypatch: Any, tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    confidential = tmp_path / "host-confidential.txt"
+    confidential.write_text("synthetic confidential host contents")
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, command: list[str], **kwargs: Any) -> None:
+            self.last_message = Path(command[command.index("--output-last-message") + 1])
+
+        def communicate(self, **kwargs: Any) -> tuple[str, str]:
+            self.last_message.symlink_to(confidential)
+            return '{"type":"turn.completed"}', ""
+
+    monkeypatch.setattr(harness_mod.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(CodexHarness, "_login", lambda self, home: None)
+    result = CodexHarness(api_key="k").run("brief", workspace)
+    assert not result.is_error
+    assert result.final_text == ""
+    assert confidential.read_text() == "synthetic confidential host contents"
+    for artifact in tmp_path.glob("ws-*"):
+        if artifact.is_file():
+            assert "synthetic confidential host contents" not in artifact.read_text()

@@ -105,15 +105,33 @@ def _wire(evaluator, workspace, base_ws=None):
 
 
 def run_climb(
-    tmp_path, values, session=None, config=CONFIG, changed=None, harness=None, contract=None, **kw
+    tmp_path,
+    values=(),
+    session=None,
+    config=CONFIG,
+    changed=None,
+    harness=None,
+    contract=None,
+    measurer=None,
+    snapshot=None,
+    inbox_dir=None,
+    **kw,
 ):
+    """attempt_once over the standard fake wiring; every seam is overridable
+    (a custom `measurer`/`snapshot`/`inbox_dir` replaces the inline ones, and
+    `changed` may be a list or a callable returning the paths per call)."""
     harness = harness or FakeHarness(result=session or ok_session())
     evaluator = FakeEvaluator(values=list(values))
-    measurer, snapshot = _wire(evaluator, tmp_path)
+    if measurer is None or snapshot is None:
+        wired, wired_snapshot = _wire(evaluator, tmp_path)
+        measurer = measurer or wired
+        snapshot = snapshot or wired_snapshot
     # `created` is a brief-only input, so a resume rejects it; a fresh run gets the
     # usual stamp. (Callers can still override via kw.)
     if "created" not in kw and not kw.get("resume_session_id"):
         kw["created"] = "2026-08-06T00:00:00Z"
+    if changed is None:
+        changed = ["src/pilot/solvers/tsp.py"]
     result = attempt_once(
         config,
         contract or CONTRACT,
@@ -122,8 +140,9 @@ def run_climb(
         measurer,
         "base",
         snapshot,
+        inbox_dir=inbox_dir or tmp_path.parent / (tmp_path.name + "-run"),
         ruler="mean tour length over the frozen pool",
-        changed_paths=lambda: changed if changed is not None else ["src/pilot/solvers/tsp.py"],
+        changed_paths=changed if callable(changed) else (lambda: changed),
         **kw,
     )
     return result, harness, evaluator
@@ -161,27 +180,19 @@ def test_improved_result_exposes_the_candidate_sha(tmp_path: Path) -> None:
 
 
 def test_attempt_once_resume_entry_skips_the_brief(tmp_path: Path) -> None:
-    # Phase 2a primitive: a cumulative depth pass resumes the prior session with
-    # the improve prompt instead of a fresh brief (the depth loop, part 2, drives
-    # this; here we verify the entry point alone).
-    result, harness, _ = run_climb(
-        tmp_path, [13.876, 13.10], resume_session_id="prev-sess", improve_prompt="beat 13.876"
+    # A resumed session gets only its pending inbox and current budgets.
+    from outerloop.inbox import AUTHOR_PROTOCOL, Message, append
+
+    append(
+        tmp_path.parent / (tmp_path.name + "-run"),
+        Message(0, "note", "human", "", 1.0, "note:1", {"text": "beat 13.876"}),
     )
+    result, harness, _ = run_climb(tmp_path, [13.876, 13.10], resume_session_id="prev-sess")
     assert result.outcome == "improved"
     brief_text, _ws, resumed = harness.calls[0]  # the FIRST call is the resume
-    # the exact-equality proves no fresh brief was rendered: a brief would carry
-    # the task/contract preamble, never equal the bare improve prompt.
-    assert brief_text == "beat 13.876" and resumed == "prev-sess"
-
-
-def test_resume_entry_couples_session_and_prompt(tmp_path: Path) -> None:
-    # resume-entry is a coupled pair (both or neither): a lone session id burns a
-    # promptless turn; a lone improve_prompt would be silently discarded by the
-    # fresh-brief branch (a depth pass becoming a fresh attempt). Reject both.
-    with pytest.raises(ValueError, match="together"):
-        run_climb(tmp_path, [13.876, 13.10], resume_session_id="prev-sess")
-    with pytest.raises(ValueError, match="together"):
-        run_climb(tmp_path, [13.876, 13.10], improve_prompt="beat it")
+    assert "# Task" not in brief_text
+    assert "beat 13.876" in brief_text and resumed == "prev-sess"
+    assert brief_text.startswith("Budgets:") and AUTHOR_PROTOCOL in brief_text
 
 
 def test_resume_entry_requires_a_resuming_backend(tmp_path: Path) -> None:
@@ -194,7 +205,6 @@ def test_resume_entry_requires_a_resuming_backend(tmp_path: Path) -> None:
             tmp_path,
             [13.876, 13.10],
             resume_session_id="prev-sess",
-            improve_prompt="beat it",
             harness=FakeHarness(result=ok_session(), supports_resume=False),
         )
 
@@ -218,7 +228,6 @@ def test_resume_entry_rejects_brief_only_inputs(tmp_path: Path) -> None:
                 tmp_path,
                 [13.876, 13.10],
                 resume_session_id="prev-sess",
-                improve_prompt="beat it",
                 **brief_only,
             )
 
@@ -229,15 +238,9 @@ def test_first_run_brief_has_no_baseline_number(tmp_path: Path) -> None:
     result, harness, _ = run_climb(tmp_path, [13.876, 13.10])  # brief_baseline defaults None
     assert result.outcome == "improved" and result.baseline == 13.876
     brief_text = harness.calls[0][0]
-    assert "no score recorded yet" in brief_text  # no reference number
+    assert "current score unknown" in brief_text  # no reference number
     assert "currently" not in brief_text  # and no fabricated baseline
     assert "lower is better" in brief_text  # the metric context still orients
-
-
-def test_direction_min_regression_is_no_improvement(tmp_path: Path) -> None:
-    result, _, _ = run_climb(tmp_path, [13.876, 14.5])
-    assert result.outcome == "no-improvement"
-    assert "negative result" in result.note
 
 
 # --- author syscalls (research-loop-buildout.md Phase A): the sleep side ---
@@ -273,7 +276,10 @@ def test_author_sleep_parks_on_a_sealed_snapshot(tmp_path: Path) -> None:
 
     _write_syscall(
         tmp_path,
-        {"launches": [{"name": "probe", "command": "uv run probe.py"}], "note": "check tails"},
+        {
+            "launches": [{"name": "probe", "command": "uv run probe.py"}],
+            "messages": [{"to": "self", "text": "check tails", "reply_to": None}],
+        },
     )
     launched: list = []
     with pytest.raises(RunParked) as exc:
@@ -282,7 +288,7 @@ def test_author_sleep_parks_on_a_sealed_snapshot(tmp_path: Path) -> None:
     assert p.phase == "author-sleep"
     assert p.afterany == "afterany:900"
     assert p.candidate_sha == "cand1"  # sealed BEFORE the jobs were submitted
-    assert p.syscall is not None and p.syscall.note == "check tails"
+    assert p.syscall is not None and p.syscall.messages[0]["text"] == "check tails"
     assert p.launches_used == 1 and p.sleeps_used == 1
     sha, request = launched[0]
     assert sha == "cand1" and request.launches[0].name == "probe"
@@ -316,7 +322,10 @@ def test_checkpoint_sleep_parks_with_no_dependency(tmp_path: Path) -> None:
     assert exc.value.launches_used == 0  # a checkpoint burns only the sleep
 
 
-def test_submit_parks_the_dispatched_gate_with_the_submitted_marker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("capacity_wait", [False, True])
+def test_submit_parks_the_dispatched_gate_with_the_submitted_marker(
+    tmp_path: Path, capacity_wait: bool
+) -> None:
     # `submit` is a launch whose job is the GATE (buildout Phase B): the tree
     # is sealed, the dispatched gate parks the run as a candidate carrying the
     # submitted marker + budget counts, and a sibling launch rides the same
@@ -334,18 +343,20 @@ def test_submit_parks_the_dispatched_gate_with_the_submitted_marker(tmp_path: Pa
     launched: list = []
     harness = FakeHarness(result=ok_session())
     m = ParkingMeasurer(park_on_call=1)
+    if capacity_wait:
+        from outerloop.measure import MeasurementPending
+
+        def wait(*args, **kwargs):
+            raise MeasurementPending((), capacity_wait=True, note="measure infrastructure wait")
+
+        m.results = wait  # type: ignore[method-assign]
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            DEEP_CONTRACT,
+        run_climb(
             tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
+            harness=harness,
+            contract=DEEP_CONTRACT,
+            measurer=m,
+            snapshot=_bare_snapshot(),
             launcher=_fake_launcher(launched),
         )
     p = exc.value
@@ -355,6 +366,20 @@ def test_submit_parks_the_dispatched_gate_with_the_submitted_marker(tmp_path: Pa
     assert p.afterany.endswith(":900")  # gate evals + the sibling launch, one afterany
     sha, request = launched[0]
     assert sha == "cand1" and request.launches[0].name == "probe"
+
+    from outerloop.attempt import _park_run
+    from outerloop.launchlog import read_ledger
+    from outerloop.runstate import RunRecord
+
+    assert p.wait_note == ("measure infrastructure wait" if capacity_wait else "")
+    assert p.capacity_wait == capacity_wait
+    record = RunRecord(run_id="test", target="org/pilot", task_title="t", state="running")
+    _park_run(tmp_path, record, p, "ref", None, 1000)
+    rows = read_ledger(tmp_path / "runs" / "test")
+    assert len(rows) == 1
+    assert rows[0]["event"] == "submitted"
+    assert rows[0]["job_ids"] == ["900"]
+    assert rows[0]["commit"] == "cand1"
 
 
 def test_a_submits_sibling_sweep_is_clamped_too(tmp_path: Path) -> None:
@@ -376,17 +401,11 @@ def test_a_submits_sibling_sweep_is_clamped_too(tmp_path: Path) -> None:
     )
     launched: list = []
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            contract,
+        run_climb(
             tmp_path,
-            FakeHarness(result=ok_session()),
-            ParkingMeasurer(park_on_call=1),
-            "base",
-            _bare_snapshot(),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
+            contract=contract,
+            measurer=ParkingMeasurer(park_on_call=1),
+            snapshot=_bare_snapshot(),
             launcher=_fake_launcher(launched),
         )
     assert exc.value.submitted
@@ -395,54 +414,21 @@ def test_a_submits_sibling_sweep_is_clamped_too(tmp_path: Path) -> None:
     assert exc.value.syscall is not None and exc.value.syscall.launches[0].concurrency == 3
 
 
-def test_dropped_bare_submit_does_not_buy_the_terminal_gate(tmp_path: Path) -> None:
-    """The refuse-twice bypass: after two bare submits are refused, the
-    dropped request must not be measured at finish — a metered run with no
-    returned launches ends as an unmeasured negative (panel only), never a
-    gate eval."""
-    metered = CONTRACT.replace(
-        "    metric: mean_tour_length\n",
-        "    metric: mean_tour_length\n    gpus: 1\n    eval_minutes: 240\n",
-    ).replace("gpu_hours_per_run: 1", "gpu_hours_per_run: 10")
-    harness = _SeqHarness(["first try", "second try"], submit_on=(1, 2))
-    m = ParkingMeasurer(park_on_call=1)  # any measurement would PARK loudly
-    result = attempt_once(
-        CONFIG,
-        metered,
-        tmp_path,
-        harness,
-        m,
-        "base",
-        _bare_snapshot(),
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-        launcher=_fake_launcher([]),
+def test_stop_without_submit_is_unmeasured(tmp_path: Path) -> None:
+    result, _harness, evaluator = run_climb(
+        tmp_path, [], contract=DEEP_CONTRACT, launcher=_fake_launcher([])
     )
-    assert result.outcome == "no-improvement"  # maps to the negative-result ending
-    assert "unmeasured finish" in result.note
+    assert result.outcome == "no-improvement" and result.note == "ended without a submit"
+    assert evaluator.calls == []
+    assert result.session is not None and result.session.final_text
 
 
 def test_unchanged_tree_finish_is_never_measured(tmp_path: Path) -> None:
     """A finish with no changed paths has nothing to measure — the gate
     would compare base against itself (metered or not)."""
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: [],
-        created="t",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.9], changed=[])
     assert result.outcome == "no-improvement"  # maps to the negative-result ending
-    assert "unchanged from base" in result.note
+    assert "no code change; metric noise" in result.note
     assert evaluator.calls == []  # nothing was measured
 
 
@@ -451,20 +437,7 @@ def test_submitted_unchanged_tree_is_fed_back_without_a_gate(tmp_path: Path) -> 
     author gets the feedback (and the eval charge back); conceding then
     ends the run honestly."""
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: [],
-        created="t",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.9], harness=harness, changed=[])
     assert result.outcome == "no-improvement"
     assert evaluator.calls == []  # base-vs-base was never run
 
@@ -479,65 +452,22 @@ def test_feature_off_metered_runs_still_measure_at_finish(tmp_path: Path) -> Non
         "    metric: mean_tour_length\n",
         "    metric: mean_tour_length\n    gpus: 1\n    eval_minutes: 240\n",
     ).replace("gpu_hours_per_run: 1", "gpu_hours_per_run: 10")
-    harness = FakeHarness(result=ok_session())
     m = ParkingMeasurer(park_on_call=1)
     with pytest.raises(RunParked) as exc:  # the gate parked = it RAN
-        attempt_once(
-            CONFIG,
-            metered,
-            tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
-            launcher=None,
-        )
+        run_climb(tmp_path, contract=metered, measurer=m, snapshot=_bare_snapshot(), launcher=None)
     assert exc.value.phase == "candidate"
 
 
-def test_failed_gate_submit_feeds_back_to_the_author(tmp_path: Path) -> None:
-    # an inline gate that rejects a submitted candidate resumes the AUTHOR with
-    # the result (it decides what happens next) — never a silent terminal; the
-    # author's plain finish then ends the run honestly.
-    harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, 13.9, 13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+def _gate_negative_attempt(tmp_path: Path, values, harness, contract: str = CONTRACT):
+    """A submit the inline gate rejects: every seal has the same content, a
+    stub launcher (nothing is ever launched)."""
+    return run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        values,
+        harness=harness,
+        contract=contract,
         launcher=lambda sha, req: "",
-    )
-    assert result.outcome == "no-improvement"
-    assert harness.resumes == [None, "s1"]  # the author heard the gate result
-    assert len(evaluator.calls) == 3  # the concluding tree differed, so it was measured
-
-
-def _gate_negative_attempt(tmp_path: Path, harness, evaluator, contract: str = CONTRACT):
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    return attempt_once(
-        CONFIG,
-        contract,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-        launcher=lambda sha, req: "",
-        tree_of=lambda sha: "same-tree",  # every seal has the same content
+        tree_of=lambda sha: "same-tree",
     )
 
 
@@ -547,8 +477,8 @@ def test_unchanged_tree_after_a_gate_negative_is_not_measured_again(tmp_path: Pa
     measured a second time (the speedrun fleet paid a second 8 GPU-hour gate
     for an identical tree, 2026-08-28)."""
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])  # a third eval would empty the queue
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    # a third eval would empty the queue
+    result, _, evaluator = _gate_negative_attempt(tmp_path, [13.9, 13.9], harness)
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1"]
     assert len(evaluator.calls) == 2
@@ -558,8 +488,7 @@ def test_identical_resubmit_is_told_so_without_a_second_gate(tmp_path: Path) -> 
     """A resubmit of the tree the gate already judged runs nothing: the author
     is told the verdict stands and decides again (bounded by sleep_k)."""
     harness = _SeqHarness(["the claim", "again", "conceded"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    result, _, evaluator = _gate_negative_attempt(tmp_path, [13.9, 13.9], harness)
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1", "s2"]
     assert len(evaluator.calls) == 2
@@ -573,10 +502,11 @@ def test_conceding_after_an_errored_eval_ends_without_another_gate(tmp_path: Pat
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "conceded"], submit_on=(1,))
-    evaluator = FakeEvaluator(values=[13.9, EvalError("job hit its walltime (TIMEOUT)")])  # type: ignore[list-item]
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
-    assert result.outcome == "eval-error"
-    assert "walltime" in result.note
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, EvalError("job hit its walltime (TIMEOUT)")], harness
+    )
+    assert result.outcome == "no-improvement"
+    assert result.note == "ended without a submit"
     assert harness.resumes == [None, "s1"]
     assert len(evaluator.calls) == 2
 
@@ -587,8 +517,9 @@ def test_resubmitting_after_an_errored_eval_runs_it_again(tmp_path: Path) -> Non
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "again", "conceded"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, EvalError("job hit its walltime (TIMEOUT)"), 13.9])  # type: ignore[list-item]
-    result = _gate_negative_attempt(tmp_path, harness, evaluator)
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, EvalError("job hit its walltime (TIMEOUT)"), 13.9], harness
+    )
     assert result.outcome == "no-improvement"
     assert harness.resumes == [None, "s1", "s2"]
     assert len(evaluator.calls) == 3
@@ -602,8 +533,6 @@ def test_resubmit_after_a_gate_verdict_keeps_scope_and_snapshot_guards(tmp_path:
     from outerloop.orchestrator import EvalError
 
     harness = _SeqHarness(["the claim", "again"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    measurer, _snapshot = _wire(evaluator, tmp_path)
     seals = {"n": 0}
 
     def snapshot() -> str:
@@ -612,54 +541,41 @@ def test_resubmit_after_a_gate_verdict_keeps_scope_and_snapshot_guards(tmp_path:
             raise EvalError("git objects unwritable")
         return f"cand{seals['n']}"
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        [13.9, 13.9],
+        harness=harness,
+        snapshot=snapshot,
         launcher=lambda sha, req: "",
         tree_of=lambda sha: "same-tree",
     )
     assert result.outcome == "eval-error" and "snapshot" in result.note
     assert seals["n"] == 2
 
-    harness = _SeqHarness(["the claim", "again"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    measurer, snapshot2 = _wire(evaluator, tmp_path)
-    paths = iter([["src/pilot/solvers/tsp.py"], ["src/pilot/solvers/tsp.py", "docs/roadmap.md"]])
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    harness = _SeqHarness(["the claim", "again", "still dirty", "abandoned"], submit_on=(1, 2, 3))
+    paths = iter([["src/pilot/solvers/tsp.py"], ["docs/roadmap.md"], ["docs/roadmap.md"]])
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot2,
-        ruler="r",
-        changed_paths=lambda: next(paths),
-        created="t",
+        [13.9, 13.9],
+        harness=harness,
+        changed=lambda: next(paths),
         launcher=lambda sha, req: "",
         tree_of=lambda sha: "same-tree",
     )
-    assert result.outcome == "scope-violation" and "docs/roadmap.md" in result.note
+    assert result.outcome == "no-improvement" and result.tree_rejected
+    assert len(harness.prompts) == 4
 
 
 def test_identical_resubmit_past_the_sleep_budget_ends_on_the_verdict(tmp_path: Path) -> None:
-    """The unchanged-tree reuse runs BEFORE the budget check, so an author out
-    of sleeps (or GPU-hours) is not refused a gate it would never run; past
-    the sleep budget the attempt simply ends on the standing verdict."""
+    """An exhausted submit is refused; the ensuing stop ends unmeasured."""
     one_sleep = CONTRACT.replace("    direction: min\n", "    direction: min\n    sleep_k: 1\n", 1)
     harness = _SeqHarness(["the claim", "again", "never reached"], submit_on=(1, 2))
-    evaluator = FakeEvaluator(values=[13.9, 13.9])
-    result = _gate_negative_attempt(tmp_path, harness, evaluator, contract=one_sleep)
+    result, _, evaluator = _gate_negative_attempt(
+        tmp_path, [13.9, 13.9], harness, contract=one_sleep
+    )
     assert result.outcome == "no-improvement"
-    assert harness.resumes == [None, "s1"]  # the second resubmit was the last word
+    assert harness.resumes == [None, "s1", "s2"]
+    assert result.note == "ended without a submit"
     assert len(evaluator.calls) == 2
 
 
@@ -677,20 +593,10 @@ def test_inline_gate_never_dispatches_a_submits_sibling_launches(tmp_path: Path)
         },
     )
     launched: list = []
-    harness = _SeqHarness(["the claim", "conceded"])
-    evaluator = FakeEvaluator(values=[13.9, 13.9, 13.9])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, _, _ = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        [13.9, 13.9, 13.9],
+        harness=_SeqHarness(["the claim", "conceded"]),
         launcher=_fake_launcher(launched),
     )
     assert result.outcome == "no-improvement"
@@ -719,7 +625,7 @@ def test_over_budget_request_wakes_one_refusal_then_measures(tmp_path: Path) -> 
     result, harness, _ = run_climb(
         tmp_path, [13.876, 13.10], contract=tight, launcher=_fake_launcher(launched)
     )
-    assert result.outcome == "improved" and launched == []
+    assert result.outcome == "no-improvement" and launched == []
     refusal_text, _ws, resumed = harness.calls[1]  # second call = the refusal wake
     assert "REFUSED" in refusal_text and "launch budget" in refusal_text
     assert resumed == "s1"  # the SAME session was woken
@@ -738,7 +644,7 @@ def test_author_sleep_refuses_an_out_of_scope_tree_before_launching(tmp_path: Pa
         launcher=_fake_launcher(launched),
         changed=["docs/ruler-tamper.md"],
     )
-    assert result.outcome == "scope-violation" and launched == []
+    assert result.outcome == "no-improvement" and launched == []
 
 
 def test_malformed_syscall_request_is_a_loud_error(tmp_path: Path) -> None:
@@ -765,21 +671,7 @@ def test_seeded_benchmark_measures_both_sides_under_one_fresh_seed(tmp_path: Pat
     """seed_env: the orchestrator draws ONE seed per climb, pins baseline
     and candidate to it (paired), and reports it on the result for the
     ledger — nothing about the pool was knowable when the solver wrote."""
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876, 13.10])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        SEEDED_CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="2026-08-09T00:00:00Z",
-    )
+    result, _, evaluator = run_climb(tmp_path, [13.876, 13.10], contract=SEEDED_CONTRACT)
     assert result.outcome == "improved"
     first, second = evaluator.seen_env
     assert first is not None and set(first) == {"PILOT_TSP_SEED"}
@@ -879,18 +771,7 @@ def test_candidate_measure_parks_after_the_session(tmp_path: Path) -> None:
     harness = FakeHarness(result=ok_session())
     m = ParkingMeasurer(park_on_call=1)  # the gate's first (baseline+candidate) call parks
     with pytest.raises(RunParked) as exc:
-        attempt_once(
-            CONFIG,
-            CONTRACT,
-            tmp_path,
-            harness,
-            m,
-            "base",
-            _bare_snapshot(),
-            ruler="r",
-            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-            created="t",
-        )
+        run_climb(tmp_path, harness=harness, measurer=m, snapshot=_bare_snapshot())
     assert exc.value.phase == "candidate"
     assert exc.value.candidate_sha == "cand1"
     assert exc.value.session is not None  # the session ran before this park
@@ -948,24 +829,11 @@ def test_snapshot_failure_is_eval_error_not_a_crash(tmp_path: Path) -> None:
     """A snapshot failure (the session ran, the tree could not be captured) is
     an eval-error result with the session — never an escaping exception."""
     harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876])  # baseline only; no candidate reached
-    measurer, _ = _wire(evaluator, tmp_path)
 
     def snapshot() -> str:
         raise EvalError("git write-tree failed")
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-    )
+    result, _, _ = run_climb(tmp_path, [13.876], harness=harness, snapshot=snapshot)
     assert result.outcome == "eval-error"
     assert result.session is not None and "snapshot" in result.note
 
@@ -1025,27 +893,13 @@ def test_forbidden_paths_are_scope_violations(tmp_path: Path) -> None:
 def test_out_of_scope_tree_is_rejected_before_the_snapshot(tmp_path: Path) -> None:
     # the out-of-scope edit could be to the ruler itself — it is never
     # snapshotted OR measured, not merely rejected after the fact.
-    harness = FakeHarness(result=ok_session())
-    evaluator = FakeEvaluator(values=[13.876])
-    measurer, _ = _wire(evaluator, tmp_path)
     snapshotted: list[int] = []
 
     def snapshot() -> str:
         snapshotted.append(1)
         return "cand1"
 
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["docs/secret.md"],
-        created="t",
-    )
+    result, _, _ = run_climb(tmp_path, [13.876], snapshot=snapshot, changed=["docs/secret.md"])
     assert result.outcome == "scope-violation"
     assert snapshotted == []  # never snapshotted the out-of-scope tree
 
@@ -1129,7 +983,8 @@ def test_subprocess_evaluator_rejects_nonfinite(tmp_path: Path) -> None:
         SubprocessEvaluator(timeout_s=30).evaluate(tmp_path, """printf '{"m": Infinity}\n'""", "m")
 
 
-def test_subprocess_evaluator_container_wrapping(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+def test_subprocess_evaluator_container_wrapping(tmp_path: Path, monkeypatch, configured) -> None:
     """With an image set, the eval command runs inside apptainer."""
     import stat as stat_mod
 
@@ -1140,8 +995,11 @@ def test_subprocess_evaluator_container_wrapping(tmp_path: Path) -> None:
         f'#!/bin/sh\nprintf "%s " "$@" > {tmp_path}/eval_argv\nprintf \'{{"m": 2.5}}\n\'\n'
     )
     fake.chmod(fake.stat().st_mode | stat_mod.S_IEXEC)
+    monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", str(fake) if configured else "/wrong/path")
     evaluator = SubprocessEvaluator(
-        timeout_s=30, container_image="/img/pilot.sif", apptainer_binary=str(fake)
+        timeout_s=30,
+        container_image="/img/pilot.sif",
+        **({} if configured else {"apptainer_binary": str(fake)}),
     )
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -1178,6 +1036,20 @@ def test_pr_body_carries_table_and_redacts(tmp_path: Path) -> None:
     assert "written before the orchestrator measured" in body
 
 
+def test_pr_body_measurement_provenance() -> None:
+    from outerloop.orchestrator import AttemptResult
+
+    result = AttemptResult(
+        outcome="improved", baseline=4096, candidate=3712, candidate_sha="abcdef0123456789"
+    )
+    body = pr_body(result, CONFIG, (), base_sha="123456789abcdef0")
+    measured = body.split("## Measured", 1)[1]
+    assert "Base `1234567` and candidate `abcdef0`" in measured
+    assert "same eval command read from the base tree" in measured
+    assert "| baseline (tsp) | 4096" in measured
+    assert "| candidate | 3712" in measured
+
+
 def test_pr_body_marks_inherited_prose_from_a_resumed_session(tmp_path: Path) -> None:
     """A candidate-wake publish reruns no session; the PR must say so."""
     session = ok_session(text="predecessor's report, carried forward")
@@ -1200,7 +1072,10 @@ def test_pr_body_does_not_mark_zero_turn_backends_as_carried_forward(tmp_path: P
 
 
 def test_report_covers_failure_outcomes(tmp_path: Path) -> None:
+    # 14.5 against 13.876 is a minimize-direction regression: a bare negative
     result, _, _ = run_climb(tmp_path, [13.876, 14.5])
+    assert result.outcome == "no-improvement"
+    assert "negative result" in result.note
     report = result.report(CONFIG)
     assert "no-improvement" in report
     assert "13.876" in report
@@ -1231,14 +1106,16 @@ def test_report_redacts_secrets(tmp_path: Path) -> None:
 
 def test_progress_render_and_ledger_roundtrip(tmp_path: Path) -> None:
     from outerloop.progress import (
+        LeaderEntry,
         load_leader,
         render_markdown,
-        update_leader,
         write_progress,
     )
 
-    entries = update_leader({}, "tsp", "mean_tour_length", "min", 13.876, 13.1, "r1", "2026-08-06")
-    entries = update_leader(entries, "sokoban", "solve_rate", "max", 0.25, 0.31, "r2", "2026-08-06")
+    entries = {
+        "tsp": LeaderEntry("tsp", "mean_tour_length", "min", 13.876, 13.1, "r1", "2026-08-06"),
+        "sokoban": LeaderEntry("sokoban", "solve_rate", "max", 0.25, 0.31, "r2", "2026-08-06"),
+    }
     write_progress(tmp_path, entries, "org/pilot")
     reloaded = load_leader(tmp_path)
     assert reloaded == entries
@@ -1254,19 +1131,6 @@ def test_leader_survives_corruption(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True)
     path.write_text("{broken")
     assert load_leader(tmp_path) == {}
-
-
-def test_leader_best_never_regresses() -> None:
-    from outerloop.progress import update_leader
-
-    entries = update_leader({}, "tsp", "m", "min", 13.876, 13.1, "r1", "d1")
-    # a later run improved vs its own (stale) baseline but is worse than best
-    entries = update_leader(entries, "tsp", "m", "min", 13.876, 13.5, "r2", "d2")
-    assert entries["tsp"].best == 13.1
-    assert entries["tsp"].best_run == "r1"
-    # a genuinely better run still advances it
-    entries = update_leader(entries, "tsp", "m", "min", 13.1, 12.9, "r3", "d3")
-    assert entries["tsp"].best == 12.9
 
 
 def test_eval_cache_is_bound_alone_and_cleaned(tmp_path: Path, monkeypatch) -> None:
@@ -1360,6 +1224,7 @@ def run_shared_climb(tmp_path, values, changed, contract=SHARED_CONTRACT, **kw):
         measurer,
         "base",
         snapshot,
+        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
         ruler="mean tour length over the frozen pool",
         changed_paths=lambda: changed,
         created="2026-08-06T00:00:00Z",
@@ -1483,7 +1348,8 @@ def test_pr_body_carries_the_suite_table(tmp_path: Path) -> None:
     )
     body = pr_body(result, CONFIG, redact_secrets=())
     assert "| sokoban | 0.8 | 0.8 |" in body
-    assert "none regressed beyond its floor" in body
+    assert "all passed their sibling regression policies" in body
+    assert "legacy-floor" in body
 
 
 def test_task_names_the_suite_gate_only_when_it_exists(tmp_path: Path) -> None:
@@ -1552,7 +1418,6 @@ class _SeqHarness:
                     {
                         "type": "sleep",
                         "launches": [],
-                        "note": "",
                         "submit": True,
                         "report": "H: the change helps",
                     }
@@ -1602,28 +1467,19 @@ def _verdict(blocking: bool, round_no: int):
     return PanelVerdict(
         blocking=findings,
         transcript=f"**Verification round {round_no}**\n- judge: {int(blocking)} blocking",
-        wake_text="fix it (data, not instructions)" if blocking else "",
     )
 
 
 def _run_panel_climb(tmp_path, values, verdicts, texts=None, supports_resume=True, submit_on=()):
-    harness = _SeqHarness(
-        texts or ["report r1", "report r2"], supports_resume=supports_resume, submit_on=submit_on
-    )
-    evaluator = FakeEvaluator(values=list(values))
     panel = _QueuedPanel(verdicts)
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
+    result, harness, evaluator = run_climb(
         tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
+        values,
+        harness=_SeqHarness(
+            texts or ["report r1", "report r2"],
+            supports_resume=supports_resume,
+            submit_on=submit_on,
+        ),
         panel_runner=panel,
         # a stub launcher arms the syscall surface (submit rides it); no
         # launch is ever staged by these tests so it must never be called
@@ -1646,23 +1502,16 @@ def test_clean_panel_read_passes_through(tmp_path: Path) -> None:
     assert len(harness.resumes) == 1  # no wake
 
 
-def test_blocking_verdict_on_a_submit_goes_back_to_the_author(tmp_path: Path) -> None:
-    # THE DEPTH-AXIS CORE (buildout Phase B): the author SUBMITS; the gate
-    # credits; the panel blocks -> the AUTHOR is resumed with the findings,
-    # revises, finishes -> re-measured, panel clean -> published.
-    result, harness, evaluator, _panel = _run_panel_climb(
-        tmp_path,
-        [13.9, 13.1, 13.0],
-        [_verdict(True, 1), _verdict(False, 2)],
-        submit_on=(1,),
+def test_blocking_submit_preserves_credited_tree_for_draft(tmp_path: Path) -> None:
+    from outerloop.inbox import pending
+
+    result, _harness, evaluator, _panel = _run_panel_climb(
+        tmp_path, [13.9, 13.1], [_verdict(True, 1)], submit_on=(1,)
     )
-    assert result.outcome == "improved"
-    assert result.panel_rounds == 2 and not result.panel_blocking_open
-    # the verdict resumed the SAME session and the revision was re-measured
-    assert harness.resumes == [None, "s1"]
-    assert len(evaluator.calls) == 3  # baseline + candidate + revised candidate
-    assert result.candidate == 13.0
-    assert "round 1" in result.panel_transcript and "round 2" in result.panel_transcript
+    assert result.outcome == "improved" and result.panel_blocking_open
+    assert result.panel_rounds == 1 and len(evaluator.calls) == 2
+    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    assert {m.kind for m in messages} == {"panel-verdict", "gate-verdict"}
 
 
 def test_a_backend_that_cannot_resume_drafts_a_blocking_finding(tmp_path: Path) -> None:
@@ -1690,23 +1539,14 @@ def test_blocking_on_a_plain_finish_stays_open_for_a_draft_pr(tmp_path: Path) ->
     assert harness.resumes == [None]  # NO resume without a submit
 
 
-def test_revision_that_loses_the_improvement_is_a_named_negative(tmp_path: Path) -> None:
-    # submit -> credited -> blocking -> the author revises... and the revision
-    # regresses. The gate ends it with the panel-context note. (The author is
-    # NOT resumed again: its submit was consumed; the regressed re-measure is
-    # a plain finish.)
-    result, _h, _e, _p = _run_panel_climb(
-        tmp_path, [13.9, 13.1, 14.5], [_verdict(True, 1)], submit_on=(1,)
-    )
-    assert result.outcome == "no-improvement"
-    assert "lost the improvement" in result.note
-    assert result.panel_rounds == 1
-
-
 def test_panel_pr_body_carries_banner_and_transcript(tmp_path: Path) -> None:
     result, _h, _e, _p = _run_panel_climb(tmp_path, [13.9, 13.1], [_verdict(True, 1)])
     body = pr_body(result, CONFIG, redact_secrets=())
-    assert body.startswith("> **Draft")
+    assert body.startswith(
+        "> **Draft — the verification panel found blocking issues.** "
+        "They are listed under Pre-PR verification below; "
+        "the author has been asked to address them."
+    )
     assert "## Pre-PR verification" in body
     assert "Verification round 1" in body
 
@@ -1717,7 +1557,6 @@ def test_degraded_final_read_marks_the_result_and_skips_the_wake(tmp_path: Path)
     degraded = PanelVerdict(
         blocking=(),
         transcript="**Verification round 1**\n- judge: no verdict",
-        wake_text="",
         degraded=True,
     )
     result, harness, _e, _p = _run_panel_climb(tmp_path, [13.9, 13.1], [degraded])
@@ -1735,21 +1574,8 @@ def test_wake_without_a_session_id_fails_closed_to_draft(tmp_path: Path) -> None
             return SessionResult(**{**session.__dict__, "session_id": ""})
 
     harness = _NoIdHarness(["report r1"])
-    evaluator = FakeEvaluator(values=[13.9, 13.1])
-    panel = _QueuedPanel([_verdict(True, 1)])
-    measurer, snapshot = _wire(evaluator, tmp_path)
-    result = attempt_once(
-        CONFIG,
-        CONTRACT,
-        tmp_path,
-        harness,
-        measurer,
-        "base",
-        snapshot,
-        ruler="r",
-        changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
-        created="t",
-        panel_runner=panel,
+    result, _, _ = run_climb(
+        tmp_path, [13.9, 13.1], harness=harness, panel_runner=_QueuedPanel([_verdict(True, 1)])
     )
     assert result.outcome == "improved"
     assert result.panel_blocking_open  # draft path, not a blind fresh session
@@ -1759,6 +1585,18 @@ def test_wake_without_a_session_id_fails_closed_to_draft(tmp_path: Path) -> None
 FLOOR_CONTRACT = CONTRACT.replace(
     "    direction: min\n",
     "    direction: min\n    min_delta: 0.5\n",
+    1,
+)
+
+DECIMAL_FLOOR_CONTRACT = CONTRACT.replace(
+    "    direction: min\n",
+    "    direction: min\n    min_delta: 0.1\n",
+    1,
+)
+
+INF_FLOOR_CONTRACT = CONTRACT.replace(
+    "    direction: min\n",
+    "    direction: min\n    min_delta: .inf\n",
     1,
 )
 
@@ -1781,44 +1619,33 @@ def test_gate_publishes_a_floor_clearing_delta(tmp_path: Path) -> None:
     assert result.outcome == "improved"
 
 
-def test_gate_credits_an_exact_floor_delta_and_rejects_below_it(tmp_path: Path) -> None:
-    # boundary matches clears_min_delta: the floor is INCLUSIVE — the
-    # contract's floor is the smallest movement it calls real, so a delta
-    # equal to it publishes; anything below it is the noise the floor models
-    result, _, _ = run_climb(tmp_path, [13.876, 13.376], contract=FLOOR_CONTRACT)
-    assert result.outcome == "improved"
-    result, _, _ = run_climb(tmp_path, [13.876, 13.4], contract=FLOOR_CONTRACT)
+@pytest.mark.parametrize(
+    ("contract", "at_the_floor", "below_the_floor"),
+    [
+        # boundary matches clears_min_delta: the floor is INCLUSIVE — the
+        # contract's floor is the smallest movement it calls real, so a delta
+        # equal to it publishes; anything below it is the noise the floor models
+        (FLOOR_CONTRACT, [13.876, 13.376], [13.876, 13.4]),
+        # 0.3 - 0.2 is 0.09999999999999998 in binary; the contract said 0.1 and
+        # the candidate moved 0.1, so the gate must credit it
+        (DECIMAL_FLOOR_CONTRACT, [0.3, 0.2], [0.3, 0.2001]),
+        # an infinite floor has no at-the-floor case: it rejects even a huge
+        # movement instead of crashing on it
+        (INF_FLOOR_CONTRACT, None, [13.876, 1.0]),
+    ],
+)
+def test_gate_credits_an_exact_floor_delta_and_rejects_below_it(
+    tmp_path: Path,
+    contract: str,
+    at_the_floor: list[float] | None,
+    below_the_floor: list[float],
+) -> None:
+    if at_the_floor is not None:
+        result, _, _ = run_climb(tmp_path, at_the_floor, contract=contract)
+        assert result.outcome == "improved"
+    result, _, _ = run_climb(tmp_path, below_the_floor, contract=contract)
     assert result.outcome == "no-improvement"
     assert "inside the contract's significance floor" in (result.note or "")
-
-
-DECIMAL_FLOOR_CONTRACT = CONTRACT.replace(
-    "    direction: min\n",
-    "    direction: min\n    min_delta: 0.1\n",
-    1,
-)
-
-
-INF_FLOOR_CONTRACT = CONTRACT.replace(
-    "    direction: min\n",
-    "    direction: min\n    min_delta: .inf\n",
-    1,
-)
-
-
-def test_gate_rejects_under_an_infinite_floor_instead_of_crashing(tmp_path: Path) -> None:
-    result, _, _ = run_climb(tmp_path, [13.876, 1.0], contract=INF_FLOOR_CONTRACT)
-    assert result.outcome == "no-improvement"
-    assert "inside the contract's significance floor" in (result.note or "")
-
-
-def test_gate_credits_an_exact_decimal_floor_despite_binary_rounding(tmp_path: Path) -> None:
-    # 0.3 - 0.2 is 0.09999999999999998 in binary; the contract said 0.1 and
-    # the candidate moved 0.1, so the gate must credit it
-    result, _, _ = run_climb(tmp_path, [0.3, 0.2], contract=DECIMAL_FLOOR_CONTRACT)
-    assert result.outcome == "improved"
-    result, _, _ = run_climb(tmp_path, [0.3, 0.2001], contract=DECIMAL_FLOOR_CONTRACT)
-    assert result.outcome == "no-improvement"
 
 
 def test_branch_prefix_derives_from_the_agent_id() -> None:
@@ -1843,7 +1670,7 @@ def test_a_submits_report_is_what_the_panel_reads_and_the_pr_shows(tmp_path: Pat
 
     def panel(baseline, candidate, text):
         seen.append(text)
-        return PanelVerdict(blocking=(), transcript="panel: ok", wake_text="")
+        return PanelVerdict(blocking=(), transcript="panel: ok")
 
     result, _harness, _ = run_climb(
         tmp_path,
@@ -1871,6 +1698,7 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
         {
             "sleep": 1,
             "launch": "wd",
+            "commit": "abcdef0123456789",
             "why": "try 6400",
             "array": 1,
             "concurrency": 0,
@@ -1914,7 +1742,7 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
     measured_at = body.index("## Measured")
     assert report_at < experiments_at < measured_at
     assert "Written by the author at submit" in body and "A longer warmdown helps." in body
-    assert '| 1 | wd | try 6400 | wd | exit 0, 1h15m | {"val": 3.28} \\| tail |' in body
+    assert '| 1 | wd | abcdef0 | try 6400 | wd | exit 0, 1h15m | {"val": 3.28} \\| tail |' in body
     # a pipe at the cut is escaped after the cut, so no bare backslash escapes the separator
     cut = pr_body(
         result,
@@ -1923,8 +1751,8 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
         experiments=[{**rows[0], "result": "x" * 159 + "|" + "y" * 20}],
     )
     assert "x" * 159 + "\\| |" in cut and "x\\ |" not in cut
-    assert "| 2 | lr (x4, 2 at a time) | lr sweep | lr.3 | TIMEOUT |  |" in body
-    assert "| 3 | late |  | late | not back |  |" in body
+    assert "| 2 | lr (x4, 2 at a time) | unknown | lr sweep | lr.3 | TIMEOUT |  |" in body
+    assert "| 3 | late | unknown |  | late | not back |  |" in body
     # no report: the session's last words, with the old banner; no table when nothing ran
     plain = pr_body(
         AttemptResult(outcome="improved", baseline=1.0, candidate=0.9, session=ok_session()),
@@ -1934,17 +1762,14 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
     assert "Session prose" in plain and "## Experiments" not in plain
 
 
-def test_a_submit_without_a_report_is_refused_not_fatal(tmp_path: Path) -> None:
-    """A session under an older tool (no --report flag) submits without a report:
-    the author is woken with the refusal and the flag to use, the run goes on."""
+def test_submit_without_report_is_accepted(tmp_path: Path) -> None:
     _write_syscall(tmp_path, {"launches": [], "submit": True})
     result, harness, _ = run_climb(
         tmp_path, [13.876, 13.10], contract=DEEP_CONTRACT, launcher=_fake_launcher([])
     )
-    assert result.outcome == "improved"  # the run went on after the refusal
-    refusal_text, _ws, resumed = harness.calls[1]
-    assert "REFUSED" in refusal_text and "submit --report <file>" in refusal_text
-    assert resumed == "s1"
+    # one author session: a retry would charge an extra author leg
+    assert result.outcome == "improved" and len(harness.calls) == 1
+    assert "no report was given" in pr_body(result, CONFIG, ())
 
 
 def test_a_report_less_resubmit_of_a_judged_tree_is_refused_too(tmp_path: Path) -> None:
@@ -1953,7 +1778,11 @@ def test_a_report_less_resubmit_of_a_judged_tree_is_refused_too(tmp_path: Path) 
     from outerloop.orchestrator import AttemptResult
 
     _write_syscall(tmp_path, {"launches": [], "submit": True})
-    judged = ("cand1", AttemptResult(outcome="no-improvement", baseline=13.876, candidate=13.9))
+    judged = (
+        "base",
+        "cand1",
+        AttemptResult(outcome="no-improvement", baseline=13.876, candidate=13.9),
+    )
     result, harness, _ = run_climb(
         tmp_path,
         [13.876, 13.10],
@@ -1962,7 +1791,1401 @@ def test_a_report_less_resubmit_of_a_judged_tree_is_refused_too(tmp_path: Path) 
         judged=judged,
     )
     refusal_text, _ws, resumed = harness.calls[1]
-    assert "REFUSED" in refusal_text and "submit --report <file>" in refusal_text
+    assert "gate-verdict" in refusal_text and "REFUSED" not in refusal_text
     assert resumed == "s1"
     # the run went on: with no new request the judged negative stands, never a dead run
+    assert result.outcome == "no-improvement"
+
+
+@pytest.mark.parametrize("judged_note", ["", "candidate is inside the significance floor"])
+def test_explicit_end_uses_report_and_last_verdict(tmp_path, judged_note):
+    from outerloop.orchestrator import AttemptResult
+    from outerloop.syscall_cli import main
+
+    class Author:
+        def run(self, brief_text, workspace, resume_session_id=None):
+            (workspace / "report.md").write_text("A useful negative finding.")
+            assert main(["end", "--report", "report.md"], root=workspace) == 0
+            return ok_session("Final text is not the report.")
+
+    judged = (
+        ("base", "sealed", AttemptResult(outcome="no-improvement", note=judged_note))
+        if judged_note
+        else None
+    )
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=Author(),
+        launcher=_fake_launcher([]),
+        judged=judged,
+    )
+    assert result.outcome == "no-improvement"
+    assert result.note == (judged_note or "ended without a submit")
+    assert result.session.final_text == "A useful negative finding."
+    assert not evaluator.calls
+
+
+@pytest.mark.parametrize("added", [False, True])
+def test_review_topup_meter_file_brief_and_wake(tmp_path, added):
+    import json
+
+    from outerloop.contract import load_contract
+    from outerloop.syscall import Launch, SyscallRequest, budget_error
+    from outerloop.syscall_cli import main
+
+    contract_text = CONTRACT.replace(
+        "    direction: min", "    direction: min\n    gpus: 1\n    eval_minutes: 30"
+    )
+    contract = load_contract(contract_text, "org/pilot")
+    bench = contract.benchmarks[0]
+    ceilings = contract.budgets.ceilings(bench, added)
+    request = SyscallRequest(launches=(Launch("probe", "true", 30),))
+    assert (
+        bool(
+            budget_error(
+                request,
+                launches_used=bench.depth_k,
+                launch_budget=ceilings[0],
+                sleeps_used=bench.sleep_k,
+                sleep_budget=ceilings[1],
+                gpu_hours_used=1,
+                gpu_hour_budget=ceilings[2],
+                gpus=1,
+            )
+        )
+        is not added
+    )
+    # Each ceiling independently enforces the added allowance.
+    for changes, expected in (
+        ({"launches_used": ceilings[0]}, "launch budget"),
+        ({"sleeps_used": ceilings[1]}, "sleep budget"),
+        ({"gpu_hours_used": ceilings[2]}, "GPU-hour budget"),
+    ):
+        assert expected in budget_error(
+            request,
+            launch_budget=ceilings[0],
+            sleep_budget=ceilings[1],
+            gpu_hour_budget=ceilings[2],
+            gpus=1,
+            launches_used=int(changes.get("launches_used", 0)),
+            sleeps_used=int(changes.get("sleeps_used", 0)),
+            gpu_hours_used=float(changes.get("gpu_hours_used", 0)),
+        )
+
+    class Author:
+        def run(self, brief_text, workspace, resume_session_id=None):
+            note = contract.budgets.review_topup.note(added)
+            assert note in brief_text
+            budget = json.loads((workspace / ".outerloop" / "budget.json").read_text())
+            assert budget == dict(
+                launches_remaining=ceilings[0],
+                sleeps_remaining=ceilings[1],
+                gpu_hours_remaining=ceilings[2],
+                review_topup=note,
+            )
+            if resume_session_id:
+                assert f"{ceilings[0]} launches and {ceilings[1]} sleeps" in brief_text
+                assert f"{ceilings[2]:.1f} GPU-hours" in brief_text
+            else:
+                assert f"{ceilings[0]} experiment launches, {ceilings[1]} sleeps" in brief_text
+                assert f"{ceilings[2]:g} GPU-hours this run" in brief_text
+            assert main(["end"], root=workspace) == 0
+            return ok_session()
+
+    for resume in ("", "s1"):
+        result, _, _ = run_climb(
+            tmp_path,
+            [],
+            harness=Author(),
+            contract=contract_text,
+            launcher=_fake_launcher([]),
+            review_topup=added,
+            resume_session_id=resume,
+        )
+        assert result.outcome == "no-improvement"
+
+
+@pytest.mark.parametrize("kind", ["comment", "check-result"])
+def test_author_inbox_redacts_rendered_content(kind):
+    from outerloop.inbox import Message
+    from outerloop.orchestrator import _render_author_inbox
+
+    secret = "planted-kernel-secret"
+    message = Message(
+        1,
+        kind,
+        "ci" if kind == "check-result" else "human",
+        "org/repo#9",
+        0,
+        "key",
+        {"text": secret, "body": secret, "log_tail": secret, "url": "https://example.com"},
+    )
+    prompt = _render_author_inbox([message], budgets="budget", redact_secrets=(secret,))
+    assert secret not in prompt
+    assert "[redacted]" in prompt
+
+
+def test_same_tree_new_base_runs_gate(tmp_path):
+    from outerloop.orchestrator import AttemptResult
+
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [13.0, 12.0],
+        judged=("old-base", "old-seal", AttemptResult(outcome="no-improvement")),
+        tree_of=lambda sha: "same-tree",
+    )
+    assert result.outcome == "improved"
+    assert len(evaluator.calls) == 2
+
+
+def test_same_tree_same_base_reuses_gate(tmp_path):
+    from outerloop.orchestrator import AttemptResult
+
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        judged=("base", "old-seal", AttemptResult(outcome="no-improvement", note="old verdict")),
+        tree_of=lambda sha: "same-tree",
+    )
+    assert result.outcome == "no-improvement"
+    assert result.note == "old verdict"
+    assert not evaluator.calls
+
+
+def test_legacy_judged_without_base_is_not_reused(tmp_path):
+    from outerloop.attempt import _stage_judged
+    from outerloop.runstate import RunRecord
+
+    record = RunRecord(
+        run_id="legacy",
+        target="org/pilot",
+        task_title="t",
+        state="parked",
+        stage={"judged": {"sha": "old-seal", "outcome": "no-improvement"}},
+    )
+    judged = _stage_judged(record)
+    assert judged is None
+    result, _, evaluator = run_climb(
+        tmp_path, [13.0, 12.0], judged=judged, tree_of=lambda sha: "same-tree"
+    )
+    assert result.outcome == "improved"
+    assert len(evaluator.calls) == 2
+
+
+def _stale_checkpoint(tmp_path, **kwargs):
+    from outerloop.orchestrator import RunParked, SubmitPreflight
+
+    _write_syscall(
+        tmp_path,
+        {
+            "submit": True,
+            "report": "H: candidate",
+            "launches": [{"name": "probe", "command": "never run"}],
+        },
+    )
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            [],
+            contract=DEEP_CONTRACT,
+            launcher=lambda *a: pytest.fail("launcher ran"),
+            panel_runner=lambda *a: pytest.fail("panel ran"),
+            submit_preflight=lambda: SubmitPreflight("stale", "fresh", "release"),
+            **kwargs,
+        )
+    return caught.value
+
+
+def test_stale_submit_checkpoint_has_no_compute_charge(tmp_path):
+    p = _stale_checkpoint(tmp_path, launches_used=3, gpu_hours_used=1.0)
+    assert (p.launches_used, p.sleeps_used, p.gpu_hours_used) == (3, 1, 1.0)
+    assert p.phase == "author-sleep" and p.afterany == "" and not p.submitted
+    assert p.base_sha == "fresh" and p.candidate_sha == "cand1" and p.session
+
+
+def test_stale_submit_discards_sibling_launches(tmp_path):
+    from outerloop.attempt import _park_run
+    from outerloop.inbox import pending
+    from outerloop.launchlog import read_ledger
+    from outerloop.runstate import RunRecord, load_record
+
+    p = _stale_checkpoint(tmp_path)
+    assert p.syscall is not None and p.syscall.launches == () and not p.syscall.submit
+    record = RunRecord(run_id="test", target="org/pilot", task_title="t", state="running")
+    _park_run(tmp_path, record, p, "ref", None, 1000)
+    assert load_record(tmp_path, "test").stage["syscall_launches"] == []
+    assert read_ledger(tmp_path / "runs" / "test") == []
+    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    receipt = next(m for m in messages if m.key.startswith("refused:"))
+    assert "No sibling launches ran" in receipt.payload["text"]
+    assert "must be restaged" in receipt.payload["text"]
+
+
+def test_stale_submit_respects_sleep_cap(tmp_path):
+    from outerloop.orchestrator import SubmitPreflight
+
+    harness = _SeqHarness(["submit", "again"], submit_on=(1, 2))
+    meters = []
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=harness,
+        contract=DEEP_CONTRACT,
+        sleeps_used=20,
+        launcher=lambda *a: pytest.fail("launch"),
+        submit_preflight=lambda: SubmitPreflight("stale", "fresh", "main"),
+        on_meter=lambda *counts: meters.append(counts),
+    )
+    assert result.outcome == "no-improvement" and "no gate" in result.note
+    assert not evaluator.calls
+    assert all(counts == (0, 20, 0.0) for counts in meters)
+
+
+def test_stale_submit_repeated_tip_still_delivers_receipt(tmp_path):
+    from outerloop.inbox import pending
+
+    _stale_checkpoint(tmp_path)
+    directory = tmp_path.parent / (tmp_path.name + "-run")
+    messages = pending(directory, 0)
+    last = messages[-1].seq
+    _stale_checkpoint(tmp_path, sleeps_used=1, inbox_seq=last)
+    assert len([m for m in pending(directory, 0) if m.key == "base:fresh:2"]) == 1
+    assert any(m.key == "refused:fresh:2" for m in pending(directory, last))
+
+
+def test_folded_submit_with_old_pin_checkpoints(tmp_path):
+    from outerloop.inbox import pending
+    from outerloop.orchestrator import RunParked, SubmitPreflight
+
+    _write_syscall(tmp_path, {"submit": True, "report": "H: folded"})
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            [],
+            launcher=lambda *a: pytest.fail("launch"),
+            submit_preflight=lambda: SubmitPreflight("outdated-pin", "tip", "main"),
+        )
+    assert caught.value.base_sha == "tip"
+    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    assert not any(m.kind == "base-moved" for m in messages)
+    assert any(
+        "contains tip, but the gate was pinned to a base tip that has since moved"
+        in m.payload.get("text", "")
+        for m in messages
+    )
+
+
+def test_stale_preflight_precedes_cache_and_compute_budget(tmp_path):
+    from outerloop.orchestrator import RunParked, SubmitPreflight
+
+    class NeverMeasured:
+        @property
+        def baseline_cache(self):
+            pytest.fail("cached baseline looked up")
+
+        def results(self, measures):
+            pytest.fail("measurement ran")
+
+    contract = DEEP_CONTRACT.replace(
+        "    direction: min\n",
+        "    direction: min\n    baseline: cached\n    min_delta: 0.01\n"
+        "    gpus: 1\n    eval_minutes: 60\n",
+    )
+    _write_syscall(
+        tmp_path,
+        {
+            "submit": True,
+            "report": "H: candidate",
+            "launches": [{"name": "probe", "command": "x", "minutes": 60}],
+        },
+    )
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            contract=contract,
+            measurer=NeverMeasured(),
+            snapshot=lambda: "seal",
+            inbox_dir=tmp_path / "inbox",
+            launcher=lambda *a: pytest.fail("launch"),
+            launches_used=3,
+            gpu_hours_used=1.0,
+            submit_preflight=lambda: SubmitPreflight("stale", "tip", "main"),
+        )
+    assert caught.value.gpu_hours_used == 1.0 and caught.value.launches_used == 3
+
+
+def test_stale_checkpoint_checks_scope_before_sealing(tmp_path):
+    from outerloop.orchestrator import SubmitPreflight
+
+    _write_syscall(tmp_path, {"submit": True, "report": "H: candidate"})
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        changed=[".github/workflows/ci.yml"],
+        launcher=lambda *a: pytest.fail("launch"),
+        submit_preflight=lambda: SubmitPreflight("stale", "tip", "main"),
+    )
+    assert result.outcome == "no-improvement" and not evaluator.calls
+
+
+def test_withdraw_consumed_after_session_without_compute(tmp_path):
+    from outerloop.orchestrator import AttemptResult
+    from outerloop.syscall_cli import main
+
+    events: list[str] = []
+
+    class Author:
+        def run(self, brief_text, workspace, resume_session_id=None):
+            assert main(["end", "--withdraw", "Superseded"], root=workspace) == 0
+            assert not events
+            events.append("session ended")
+            return ok_session()
+
+    def withdraw(reason):
+        assert events == ["session ended"]
+        events.append(reason)
+        return ""
+
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=Author(),
+        launcher=_fake_launcher([]),
+        on_withdraw=withdraw,
+        on_stop=lambda session: AttemptResult(outcome="review", session=session),
+    )
+    assert events == ["session ended", "Superseded"]
+    assert result.outcome == "review"
+    assert not evaluator.calls
+
+
+def test_gpu_capacity_refusal_reaches_author_without_charging(tmp_path):
+    from outerloop.operator_limits import CapacityError
+
+    _write_syscall(tmp_path, {"launches": [{"name": "probe", "command": "x"}]})
+    calls = []
+    meters = []
+    note = "operator GPU limit: requested 2, reserved/running 4, effective max_gpus 4"
+
+    def launcher(sha, request):
+        calls.append(request)
+        raise CapacityError(note)
+
+    result, harness, _ = run_climb(
+        tmp_path, [], launcher=launcher, on_meter=lambda *args: meters.append(args)
+    )
+    assert result.outcome == "no-improvement"
+    assert "REFUSED" in harness.calls[1][0]
+    assert note in harness.calls[1][0]
+    assert harness.calls[1][2] == "s1"
+    assert meters
+    assert all(launches == sleeps == hours == 0 for launches, sleeps, hours in meters)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("can_resume", [False, True])
+def test_capacity_refusal_parks_and_next_wake_delivers_note(tmp_path, can_resume):
+    from outerloop.inbox import pending, wake_pending
+    from outerloop.operator_limits import CapacityError
+    from outerloop.orchestrator import RunParked
+    from outerloop.runstate import RunRecord
+
+    note = "operator GPU limit for owner/repo: requested 1, running/pending 4, effective max_gpus 4"
+    launched = []
+    meters = []
+
+    class Author:
+        supports_resume = can_resume
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            if self.calls == 2:
+                assert resume_session_id == "s1"
+                assert note in brief_text
+            _write_syscall(workspace, {"launches": [{"name": "probe", "command": "x"}]})
+            return ok_session()
+
+    def launcher(sha, request):
+        launched.append(sha)
+        raise CapacityError(note)
+
+    author = Author()
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            [],
+            harness=author,
+            contract=DEEP_CONTRACT,
+            launcher=launcher,
+            launches_used=1,
+            sleeps_used=1,
+            gpu_hours_used=0.1,
+            on_meter=lambda *args: meters.append(args),
+        )
+    park = caught.value
+    assert author.calls == len(launched) == (2 if can_resume else 1)
+    assert park.capacity_wait and park.phase == "author-sleep"
+    assert park.candidate_sha == launched[-1]
+    assert park.session and park.session.session_id == "s1"
+    assert park.syscall is not None and not park.syscall.launches
+    assert not park.afterany and not park.submitted
+    assert (park.launches_used, park.sleeps_used, park.gpu_hours_used) == (1, 1, 0.1)
+    assert all(meter == (1, 1, 0.1) for meter in meters)
+    directory = tmp_path.parent / (tmp_path.name + "-run")
+    refusal = pending(directory, 0)[-1]
+    assert refusal.source == "kernel" and refusal.kind == "note"
+    assert refusal.payload["quoted_text"] == note
+    # Deliver on wake without the note triggering a hot retry loop.
+    record = RunRecord("run", "owner/repo", "work", "parked", inbox_seq=refusal.seq - 1)
+    assert not wake_pending(directory, record)
+    _, harness, _ = run_climb(
+        tmp_path,
+        [],
+        contract=DEEP_CONTRACT,
+        launcher=launcher,
+        resume_session_id=park.session.session_id,
+        inbox_seq=refusal.seq - 1,
+        launches_used=park.launches_used,
+        sleeps_used=park.sleeps_used,
+        gpu_hours_used=park.gpu_hours_used,
+    )
+    assert harness.calls[0][2] == "s1"
+    assert note in harness.calls[0][0]
+    assert "Capacity may now be free" in harness.calls[0][0]
+
+
+def test_repeated_budget_refusal_keeps_existing_ending(tmp_path):
+    class Author:
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            _write_syscall(workspace, {"launches": [{"name": "probe", "command": "x"}]})
+            return ok_session()
+
+    author = Author()
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=author,
+        contract=DEEP_CONTRACT,
+        launcher=lambda *args: pytest.fail("over-budget launch"),
+        launches_used=100,
+    )
+    assert author.calls == 2
+    assert result.outcome == "no-improvement" and result.note == "ended without a submit"
+    assert not evaluator.calls
+
+
+@pytest.mark.parametrize("waiting", [False, True])
+def test_sibling_launch_capacity_race_keeps_evaluations_and_notifies_author(tmp_path, waiting):
+    from outerloop.inbox import pending
+    from outerloop.operator_limits import CapacityError
+    from outerloop.orchestrator import RunParked
+
+    _write_syscall(
+        tmp_path,
+        {"launches": [{"name": "probe", "command": "x"}], "submit": True, "report": "candidate"},
+    )
+    directory = tmp_path.parent / (tmp_path.name + "-run")
+
+    def launcher(sha, request):
+        raise CapacityError("operator GPU limit: capacity filled during evaluation dispatch")
+
+    measurer = ParkingMeasurer(park_on_call=1)
+    if waiting:
+        from outerloop.measure import MeasurementPending
+
+        def wait(*args, **kwargs):
+            raise MeasurementPending((), capacity_wait=True)
+
+        measurer.results = wait  # type: ignore[method-assign]
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            contract=DEEP_CONTRACT,
+            measurer=measurer,
+            snapshot=_bare_snapshot(),
+            inbox_dir=directory,
+            launcher=launcher,
+        )
+    parked = caught.value
+    assert parked.afterany == ("" if waiting else "afterany:101:102")
+    assert parked.capacity_wait == waiting
+    assert parked.launches_used == 0
+    assert parked.syscall is not None and not parked.syscall.launches
+    assert any(
+        "REFUSED" in str(m.payload) and "operator GPU limit" in str(m.payload)
+        for m in pending(directory, 0)
+    )
+
+
+def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
+    from outerloop.endpoints import EndpointUnavailable
+    from outerloop.orchestrator import RunParked
+
+    _write_syscall(
+        tmp_path, {"launches": [{"name": "a", "command": "x"}, {"name": "b", "command": "y"}]}
+    )
+    original = FakeHarness.run
+
+    def run(self, brief_text, workspace, resume_session_id=None):
+        if resume_session_id:
+            raise EndpointUnavailable("down")
+        return original(self, brief_text, workspace, resume_session_id)
+
+    monkeypatch.setattr(FakeHarness, "run", run)
+    tight = CONTRACT.replace("    direction: min\n", "    direction: min\n    depth_k: 1\n", 1)
+    with pytest.raises(RunParked) as raised:
+        run_climb(tmp_path, [], contract=tight, launcher=_fake_launcher([]))
+    park = raised.value
+    assert park.capacity_wait and park.phase == "author-sleep"
+    assert park.session and park.session.session_id == "s1"
+    assert park.candidate_sha and park.sleeps_used == 0 and park.launches_used == 0
+
+
+@pytest.mark.parametrize(
+    "kind,retry,entry",
+    [
+        # one case per distinct entry into the refusal (the `where` word and the
+        # preflight that turns a submit into a checkpoint); "outdated-pin"
+        # reaches the identical branch as "stale" — they diverge only after a
+        # checkpoint is taken, which the refusal never does
+        ("launch", "end", "fresh"),
+        ("submit", "end", "fresh"),
+        ("stale", "end", "fresh"),
+        ("launch", "end", "replies-only"),  # no launcher wired, replies only
+        ("submit", "end", "wake"),  # refusal delivered into a resume entry
+        # the author's answers after a refusal: an explicit end, failed wakes
+        # (outcome + preserved rejection — one per session classification), and
+        # an outage on the refusal wake
+        ("submit", "explicit-end", "fresh"),
+        ("submit", "error", "fresh"),
+        # both budget_exhausted branches: session walltime (stop_reason) and
+        # max-turns (error_detail)
+        ("submit", "timeout", "fresh"),
+        ("submit", "budget", "fresh"),
+        ("submit", "outage", "fresh"),
+        # recovery: an in-scope request proceeds and only the new work is
+        # charged — the measured gate, or a park when the request launches
+        ("submit", "clean", "fresh"),
+        ("launch", "clean", "fresh"),
+    ],
+)
+def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
+    from outerloop.endpoints import EndpointUnavailable
+    from outerloop.inbox import pending
+    from outerloop.orchestrator import RunParked, SubmitPreflight
+
+    # Nonzero starting meters catch both accidental charges and resets.
+    meters: list[tuple[int, int, float]] = []
+    seals: list[tuple[str, ...]] = []
+    launches: list = []
+    paths = [".github/workflows/ci.yml", *[f"report-{i:02}.md" for i in range(12)]]
+    request: dict[str, object] = {"launches": [{"name": "probe", "command": "x", "minutes": 1}]}
+    if kind != "launch":
+        request.update(submit=True, report="H: candidate")
+    evaluator = FakeEvaluator(values=[13.9, 13.9])
+    measurer, _ = _wire(evaluator, tmp_path)
+    directory = tmp_path / "run"
+
+    class Author:
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            if self.calls == 1:
+                _write_syscall(workspace, request)
+            elif self.calls == 2 or (retry == "clean" and self.calls <= 4):
+                assert resume_session_id == "s1"
+                assert (
+                    "Refused:" in brief_text if self.calls == 2 else "Refused again:" in brief_text
+                )
+                assert "Nothing ran and nothing was charged." in brief_text
+                assert "Authors may change: src/pilot/solvers/." in brief_text
+                assert ".github/workflows/ci.yml" in brief_text
+                assert "report-08.md" in brief_text and "report-09.md" not in brief_text
+                assert not seals and not launches and not evaluator.calls
+                assert meters and all(m == (1, 2, 0.25) for m in meters)
+                if retry == "outage":
+                    raise EndpointUnavailable("unavailable")
+                if retry in ("timeout", "budget", "error"):
+                    return replace(
+                        ok_session(),
+                        is_error=True,
+                        stop_reason="timeout" if retry == "timeout" else "tool_use",
+                        error_detail="error_max_turns: Reached maximum number of turns (120)"
+                        if retry == "budget"
+                        else "session failed",
+                    )
+                if retry == "explicit-end":
+                    _write_syscall(workspace, {"type": "end", "report": "abandoned"})
+                if retry == "clean":
+                    if self.calls == 4:
+                        paths[:] = ["src/pilot/solvers/tsp.py"]
+                    _write_syscall(workspace, request)
+            else:
+                assert retry == "clean" and kind == "submit"
+            return ok_session()
+
+    def snapshot():
+        seals.append(tuple(paths))
+        return "candidate"
+
+    contract = DEEP_CONTRACT.replace(
+        "    direction: min\n", "    direction: min\n    gpus: 1\n    eval_minutes: 10\n"
+    )
+    author = Author()
+
+    def launcher(sha, request):
+        launches.append((sha, request))
+        return "afterany:1"
+
+    def attempt():
+        return attempt_once(
+            CONFIG,
+            contract,
+            tmp_path,
+            author,
+            measurer,
+            "base",
+            snapshot,
+            inbox_dir=directory,
+            ruler="r",
+            changed_paths=lambda: paths,
+            launcher=launcher if entry != "replies-only" else None,
+            on_replies=lambda replies: None,
+            resume_session_id="s1" if entry == "wake" else "",
+            submit_preflight=lambda: SubmitPreflight(
+                kind if kind in ("stale", "outdated-pin") else "ready", "tip", "main"
+            ),
+            launches_used=1,
+            sleeps_used=2,
+            gpu_hours_used=0.25,
+            on_meter=lambda *m: meters.append(m),
+        )
+
+    if retry == "clean" and kind != "submit":
+        with pytest.raises(RunParked) as caught:
+            attempt()
+        park = caught.value
+        assert park.sleeps_used == 3
+        assert park.launches_used == (2 if kind == "launch" else 1)
+        assert park.gpu_hours_used == pytest.approx(0.25 + (1 / 60 if kind == "launch" else 0))
+        assert len(seals) == 1
+        assert len(launches) == (1 if kind == "launch" else 0)
+        assert not evaluator.calls
+    else:
+        result = attempt()
+        expected = {
+            "outage": "session-outage",
+            "timeout": "session-budget",
+            "budget": "session-budget",
+            "error": "session-error",
+        }
+        assert result.outcome == expected.get(retry, "no-improvement")
+        assert result.tree_rejected == (retry != "clean")
+        if retry == "clean":
+            assert len(seals) == 1 and len(evaluator.calls) == 2 and not launches
+            assert meters[-1] == pytest.approx((1, 3, 0.25 + 20 / 60))
+        else:
+            assert not seals and not launches and not evaluator.calls
+            assert all(m == (1, 2, 0.25) for m in meters)
+            assert author.calls == 2
+    receipts = [m for m in pending(directory, 0) if m.key.startswith("refusal:")]
+    assert len(receipts) == (3 if retry == "clean" else 1)
+    assert all(m.payload["text"].startswith("Refused again:") for m in receipts[1:])
+    assert receipts[0].source == "kernel" and receipts[0].kind == "note"
+    assert ".github/workflows/ci.yml" in receipts[0].payload["text"]
+    assert ".github/workflows/ci.yml" in (tmp_path / ".outerloop/messages.json").read_text()
+
+
+def test_repeated_scope_refusals_then_clean_request(tmp_path):
+    from outerloop.inbox import pending
+
+    paths = ["src/pilot/solvers/tsp.py"]
+    meters: list[tuple[int, int, float]] = []
+
+    class Author:
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            if self.calls == 1:
+                # Spend the existing refusal allowance before any scope refusal.
+                _write_syscall(
+                    workspace, {"launches": [{"name": str(i), "command": "x"} for i in range(4)]}
+                )
+            elif self.calls in (2, 3, 4, 5):
+                if self.calls == 2:
+                    paths[:] = ["report.md"]
+                else:
+                    assert (
+                        "Refused:" in brief_text
+                        if self.calls == 3
+                        else "Refused again:" in brief_text
+                    )
+                    assert "report.md. Nothing ran and nothing was charged." in brief_text
+                    assert "Authors may change: src/pilot/solvers/." in brief_text
+                    assert meters and all(m == (0, 0, 0.0) for m in meters)
+                if self.calls == 5:
+                    paths[:] = ["src/pilot/solvers/tsp.py"]
+                _write_syscall(workspace, {"submit": True, "report": "H: candidate"})
+            else:
+                assert self.calls == 6
+            return ok_session()
+
+    harness = Author()
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [13.9, 13.9],
+        harness=harness,
+        contract=DEEP_CONTRACT,
+        launcher=lambda *a: pytest.fail("launch"),
+        changed=paths,
+        on_meter=lambda *m: meters.append(m),
+    )
+    assert result.outcome == "no-improvement" and harness.calls == 6
+    assert not result.tree_rejected
+    assert len(evaluator.calls) == 2
+    assert meters[-1] == (0, 1, 0.0)
+    receipts = [
+        m
+        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+        if m.key.startswith("refusal:")
+    ]
+    assert len(receipts) == 4
+
+
+def test_scope_refusal_after_accepted_submit_still_says_again(tmp_path):
+    from outerloop.inbox import pending
+
+    paths = iter([["report.md"], ["src/pilot/solvers/tsp.py"], ["report.md"]])
+    harness = _SeqHarness(["dirty", "clean", "dirty again", "abandoned"], submit_on=(1, 2, 3))
+    result, harness, evaluator = run_climb(
+        tmp_path,
+        [13.9, 13.9],
+        harness=harness,
+        contract=DEEP_CONTRACT,
+        changed=lambda: next(paths),
+        launcher=lambda *a: pytest.fail("launch"),
+    )
+    assert result.outcome == "no-improvement" and result.tree_rejected
+    assert len(harness.prompts) == 4 and len(evaluator.calls) == 2
+    notes = [
+        m
+        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+        if m.key.startswith("refusal:")
+    ]
+    assert len(notes) == 2
+    assert notes[0].payload["text"].startswith("Refused:")
+    assert notes[1].payload["text"].startswith("Refused again:")
+
+
+@pytest.mark.parametrize("history", ["none", "legacy", "current"])
+@pytest.mark.parametrize("large_scope", ["count", "length"])
+def test_scope_refusal_bounded_scope_and_prior_run_notes(tmp_path, history, large_scope):
+    from outerloop.inbox import Message, append, pending
+
+    directory = tmp_path.parent / (tmp_path.name + "-run")
+    if history != "none":
+        # Delivered notes from earlier kernels remain readable and mark a repeat.
+        payload = (
+            {
+                "text": "Your syscall request was REFUSED.",
+                "quoted_text": "out-of-scope paths: old.md",
+            }
+            if history == "legacy"
+            else {
+                "text": (
+                    "Refused: this request changes paths the contract does not allow "
+                    "authors to change: old.md."
+                )
+            }
+        )
+        append(directory, Message(0, "note", "kernel", "", 0, "refusal:old:0", payload))
+    allowed = (
+        [f"src/allowed-{i:02}/" for i in range(12)]
+        if large_scope == "count"
+        else ["src/" + "long/" * 250]
+    )
+    contract = DEEP_CONTRACT.replace("[src/pilot/solvers/]", "[" + ", ".join(allowed) + "]")
+    harness = _SeqHarness(["candidate", "abandoned"], submit_on=(1,))
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=harness,
+        contract=contract,
+        changed=["report.md"],
+        launcher=lambda *a: pytest.fail("launch"),
+        inbox_seq=1 if history != "none" else 0,
+    )
+    assert result.outcome == "no-improvement" and result.tree_rejected
+    assert not evaluator.calls
+    note = pending(directory, 0)[-1].payload["text"]
+    assert note.startswith("Refused:" if history == "none" else "Refused again:")
+    lead = "The kernel reported this result:\nQuoted data:"
+    assert f"{lead}\n```\n{note}\n```" in harness.prompts[1]
+    scope = note.split("Authors may change: ", 1)[1]
+    assert len(scope) <= 1001
+    assert scope.endswith("….")
+    if large_scope == "count":
+        assert ", ".join(allowed[:10]) in scope
+        assert allowed[10] not in scope
+
+
+def test_measure_and_decide_scope_backstop_is_terminal():
+    from outerloop.contract import load_contract
+    from outerloop.orchestrator import AttemptResult, measure_and_decide
+
+    class NeverMeasured:
+        def results(self, measures):
+            pytest.fail("out-of-scope tree measured")
+
+    contract = load_contract(CONTRACT, CONFIG.target)
+    result = measure_and_decide(
+        contract,
+        contract.benchmarks[0],
+        base_sha="base",
+        candidate_sha="candidate",
+        seed=1,
+        suite_seed=2,
+        measured_paths=[".github/workflows/ci.yml"],
+        measurer=NeverMeasured(),
+        min_relative_improvement=0.005,
+    )
+    assert isinstance(result, AttemptResult)
+    assert result.outcome == "scope-violation" and ".github/workflows/ci.yml" in result.note
+    assert result.tree_rejected
+
+
+@pytest.mark.parametrize("problem", ["budget", "malformed"])
+def test_scope_refusals_repeat_for_requests_with_other_problems(tmp_path, problem):
+    from outerloop.inbox import pending
+
+    class Author:
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            assert self.calls <= 4
+            if self.calls > 1:
+                assert (
+                    "Refused:" in brief_text if self.calls == 2 else "Refused again:" in brief_text
+                )
+            if self.calls == 4:
+                return ok_session()
+            request: dict[str, object] = {
+                "launches": [{"name": str(i), "command": "x"} for i in range(4)]
+            }
+            if problem == "malformed":
+                request = {"submit": "not-a-bool"}
+            _write_syscall(workspace, request)
+            return ok_session()
+
+    result, author, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=Author(),
+        contract=DEEP_CONTRACT,
+        changed=["report.md"],
+        launcher=lambda *a: pytest.fail("launch"),
+    )
+    assert result.outcome == "no-improvement" and result.tree_rejected
+    assert author.calls == 4 and not evaluator.calls
+    receipts = [
+        m
+        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+        if m.key.startswith("refusal:")
+    ]
+    assert len(receipts) == 3
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_scope_refusal_preserves_rejection_through_stop_callback(tmp_path, explicit):
+    from outerloop.orchestrator import AttemptResult
+
+    class Author:
+        calls = 0
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls += 1
+            if self.calls == 1:
+                _write_syscall(workspace, {"submit": True, "report": "candidate"})
+            elif explicit:
+                _write_syscall(workspace, {"type": "end"})
+            return ok_session()
+
+    result, author, evaluator = run_climb(
+        tmp_path,
+        [],
+        harness=Author(),
+        changed=["report.md"],
+        on_replies=lambda replies: None,
+        on_stop=lambda session: AttemptResult(outcome="review", session=session),
+    )
+    assert result.outcome == "review" and result.tree_rejected
+    assert author.calls == 2 and not evaluator.calls
+
+
+def test_scope_admission_uses_refreshed_submit_ancestry(tmp_path):
+    from outerloop.orchestrator import RunParked, SubmitPreflight
+
+    paths = ["docs/upstream.md", "src/pilot/solvers/tsp.py"]
+
+    class Author:
+        def run(self, brief_text, workspace, resume_session_id=None):
+            _write_syscall(workspace, {"submit": True, "report": "folded upstream"})
+            return ok_session()
+
+    def preflight():
+        # Fetching the new base removes upstream-owned changes from the diff.
+        paths[:] = ["src/pilot/solvers/tsp.py"]
+        return SubmitPreflight("outdated-pin", "tip", "main")
+
+    with pytest.raises(RunParked) as caught:
+        run_climb(
+            tmp_path,
+            [],
+            harness=Author(),
+            changed=paths,
+            launcher=lambda *a: pytest.fail("launch"),
+            submit_preflight=preflight,
+        )
+    assert caught.value.base_sha == "tip"
+    assert caught.value.sleeps_used == 1 and caught.value.launches_used == 0
+
+
+@pytest.mark.parametrize(
+    "change,main_evals", [("same", 1), ("count", 2), ("type", 2), ("legacy", 2)]
+)
+def test_cached_baseline_resource_identity_and_budget(tmp_path, monkeypatch, change, main_evals):
+    import json
+
+    from outerloop.contract import load_contract
+    from outerloop.measure import write_baseline_cache
+    from outerloop.orchestrator import MeasureOK, measure_and_decide
+    from outerloop.syscall import budget_error
+
+    contract_text = CONTRACT.replace(
+        "    direction: min\n",
+        "    direction: min\n    baseline: cached\n    min_delta: 0.01\n"
+        "    gpus: 2\n    eval_minutes: 30\n",
+    )
+    contract = load_contract(contract_text, CONFIG.target)
+    bench = contract.benchmarks[0]
+
+    class Measurer:
+        baseline_cache = tmp_path / "baselines"
+        image = "/eval.sif"
+        gpu_type = "type-a"
+
+        def results(self, measures):
+            assert len(measures) == main_evals
+            return {m.name: 10.0 if m.name == "baseline" else 9.0 for m in measures}
+
+    measurer = Measurer()
+    write_baseline_cache(
+        measurer.baseline_cache,
+        bench.name,
+        "base",
+        value=10.0,
+        seed=0,
+        run_tag="old",
+        image=measurer.image,
+        command=bench.command,
+        metric=bench.metric,
+        gpus=1 if change == "count" else 2,
+        gpu_type="type-b" if change == "type" else measurer.gpu_type,
+    )
+    if change == "legacy":
+        path = measurer.baseline_cache / f"{bench.name}@base.json"
+        data = json.loads(path.read_text())
+        del data["gpus"], data["gpu_type"]
+        path.write_text(json.dumps(data))
+
+    checked = []
+
+    def check_budget(request, **kwargs):
+        assert kwargs["main_evals"] == main_evals
+        error = budget_error(request, **kwargs)
+        assert bool(error) == (main_evals == 2)
+        checked.append(True)
+        return error
+
+    monkeypatch.setattr("outerloop.orchestrator.syscall_budget_error", check_budget)
+    _write_syscall(tmp_path, {"submit": True, "report": "H: candidate"})
+    run_climb(
+        tmp_path,
+        contract=contract_text,
+        measurer=measurer,
+        snapshot=lambda: "candidate",
+        inbox_dir=tmp_path / "inbox",
+        launcher=_fake_launcher([]),
+    )
+    assert checked
+    outcome = measure_and_decide(
+        contract,
+        bench,
+        base_sha="base",
+        candidate_sha="candidate",
+        seed=0,
+        suite_seed=0,
+        measured_paths=("src/pilot/solvers/tsp.py",),
+        measurer=measurer,
+        min_relative_improvement=0.005,
+    )
+    assert isinstance(outcome, MeasureOK)
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_v021_parked_brief_uses_current_rubric(tmp_path, rc1_record, monkeypatch, interrupt):
+    from unittest.mock import Mock
+
+    from outerloop.contract import read_guidance
+    from outerloop.panel import PanelVerdict
+    from outerloop.review import PullRequest
+    from outerloop.runstate import load_record
+    from outerloop.verifier import build_verify_agent_brief, verify_result_from_data
+
+    directory, source = rc1_record()
+    record = load_record(tmp_path, "one")
+    old_brief = (source / "brief.txt").read_text()
+    history = [old_brief]
+    calls = []
+    judgments = []
+    # Owner-approved tolerance: session history is immutable; no corrected or
+    # repeated initial brief is delivered. The next judgment uses today's rubric.
+    monkeypatch.setattr(
+        "outerloop.orchestrator.build_brief",
+        Mock(side_effect=AssertionError("fresh brief on resume")),
+    )
+
+    class Author:
+        supports_resume = True
+        fail = interrupt
+
+        def run(self, text, workspace, resume_session_id=None):
+            assert resume_session_id == record.resume_session_id == "s1"
+            assert old_brief not in text and "# Task" not in text
+            calls.append(text)
+            if self.fail:
+                self.fail = False
+                raise KeyboardInterrupt
+            history.append(text)
+            return ok_session("A mixture improved the score without an ablation.")
+
+    def judge(baseline, candidate, report):
+        pr = PullRequest(
+            repo="org/pilot",
+            number=9,
+            title="research",
+            body=report,
+            diff="+new mixture",
+            author="agentic-learning-bot",
+            labels=(),
+        )
+        brief = build_verify_agent_brief(
+            pr, CONTRACT, guidance=read_guidance(lambda name: None, "default")[1]
+        )
+        assert "documents each change's own effect" in brief
+        assert "picture of the landscape" in brief
+        judgment = verify_result_from_data(
+            {
+                "findings": [
+                    {
+                        "summary": "Missing ablation",
+                        "category": "other",
+                        "blocking": True,
+                        "confidence": "high",
+                    }
+                ],
+                "notes": "",
+            }
+        )
+        assert judgment.findings[0].category == "other"
+        judgments.append(brief)
+        return PanelVerdict(
+            blocking=tuple(judgment.findings), transcript="current rubric: taste advisory"
+        )
+
+    author = Author()
+    # Inline measurer retains the new slots over a retry; no second measurement.
+    evaluator = FakeEvaluator(values=[13.9, 13.0])
+    measurer, snapshot = _wire(evaluator, tmp_path)
+
+    def resume():
+        return run_climb(
+            tmp_path,
+            harness=author,
+            measurer=measurer,
+            snapshot=snapshot,
+            inbox_dir=directory,
+            resume_session_id=record.resume_session_id,
+            panel_runner=judge,
+        )[0]
+
+    if interrupt:
+        with pytest.raises(KeyboardInterrupt):
+            resume()
+        assert history == [old_brief] and not judgments
+    first = resume()
+    assert first.panel_blocking_open and first.outcome == "improved"
+    # A new wake on the same sealed bytes gets the same standard. Fix the
+    # snapshot seam to the candidate already measured by the first pass.
+    snapshot = lambda: first.candidate_sha
+    second = resume()
+    assert second.panel_blocking_open and second.candidate_sha == first.candidate_sha
+    assert len(evaluator.calls) == 2
+    assert len(judgments) == 2 and judgments[0] == judgments[1]
+    assert history.count(old_brief) == 1
+    assert (source / "brief.txt").read_text() == old_brief
+
+
+def test_v021_capacity_error_becomes_durable_park(tmp_path, rc1_record):
+    from outerloop.attempt import _park_run
+    from outerloop.inbox import pending
+    from outerloop.operator_limits import CapacityError
+    from outerloop.orchestrator import RunParked
+    from outerloop.runstate import load_record
+
+    directory, _ = rc1_record()
+    legacy = load_record(tmp_path, "one")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    refused = []
+
+    class Author:
+        supports_resume = True
+        retry_launch = True
+
+        def run(self, text, workspace, resume_session_id=None):
+            assert resume_session_id == "s1"
+            if self.retry_launch:
+                _write_syscall(workspace, {"launches": [{"name": "probe", "command": "true"}]})
+            else:
+                # a stop after the capacity note is the author's answer: no nudge
+                assert "Capacity may now be free" in text
+            return ok_session()
+
+    def launch(sha, request):
+        refused.append(sha)
+        raise CapacityError("operator GPU limit: full")
+
+    author = Author()
+    meters = []
+
+    def resume(record):
+        return attempt_once(
+            CONFIG,
+            DEEP_CONTRACT,
+            workspace,
+            author,
+            _wire(FakeEvaluator(), workspace)[0],
+            str(record.stage["base_sha"]),
+            lambda: str(record.stage["candidate_sha"]),
+            ruler="mean tour length",
+            changed_paths=lambda: ["src/pilot/solvers/tsp.py"],
+            inbox_dir=directory,
+            inbox_seq=record.inbox_seq,
+            resume_session_id=record.resume_session_id,
+            launcher=launch,
+            launches_used=int(record.stage["launches_used"]),
+            sleeps_used=int(record.stage["sleeps_used"]),
+            gpu_hours_used=float(record.stage["gpu_hours_used"]),
+            on_meter=lambda *args: meters.append(args),
+        )
+
+    with pytest.raises(RunParked) as caught:
+        resume(legacy)
+    park = caught.value
+    assert park.syscall is not None
+    assert park.capacity_wait and not park.afterany and not park.syscall.launches
+    assert len(refused) == 2  # one bounded in-session retry, then a durable park
+    for _ in range(2):
+        _park_run(tmp_path, legacy, park, "", 1, 1000002)
+    saved = load_record(tmp_path, "one")
+    notes = pending(directory, saved.inbox_seq)
+    capacity_notes = [m for m in notes if m.payload.get("context_only")]
+    assert len(capacity_notes) == 1 and "GPU limit" in capacity_notes[0].payload["quoted_text"]
+    assert saved.stage["capacity_wait"]
+    assert (
+        saved.stage["launches_used"],
+        saved.stage["sleeps_used"],
+        saved.stage["gpu_hours_used"],
+    ) == (1, 1, 0.1)
+    author.retry_launch = False
+    result = resume(saved)
+    assert result.outcome == "no-improvement"
+    assert len(refused) == 2
+    assert all(meter == (1, 1, 0.1) for meter in meters)
+
+
+@pytest.mark.parametrize(
+    "candidate,gain,refused,rule",
+    [
+        (99, 0, False, "no-regression"),
+        (100, 0, False, "no-regression"),
+        (100.5, 0, False, "free-allowance"),
+        (100.5001, 0.049999, True, "insufficient-gain"),
+        (133, 0.049999, True, "insufficient-gain"),
+        (133, 0.05, False, "gain-unlocked"),
+        (133, 0.050001, False, "gain-unlocked"),
+        (149.9999, 0.27, False, "gain-unlocked"),
+        (150, 0.27, True, "hard-cap"),
+        (160, 0.27, True, "hard-cap"),
+        (133, None, True, "insufficient-gain"),
+        (133, float("nan"), True, "non-finite"),
+        (133, float("inf"), True, "non-finite"),
+        (float("nan"), 0.27, True, "non-finite"),
+        (float("inf"), 0.27, True, "non-finite"),
+    ],
+)
+def test_conditional_suite_regression(candidate, gain, refused, rule):
+    from outerloop.contract import Regression
+    from outerloop.orchestrator import suite_regressed, suite_regression_verdict
+
+    policy = Regression(free_rel=0.005, max_rel=0.5, requires_gain_rel=0.05)
+    args = dict(regression=policy, climbed_gain_rel=gain)
+    assert suite_regressed(100, candidate, "min", **args) is refused
+    assert suite_regression_verdict(100, candidate, "min", **args) == (refused, rule)
+
+
+@pytest.mark.parametrize("direction,baseline,sign", [("min", 100, 1), ("max", -100, -1)])
+def test_regression_units_directions_and_defaults(direction, baseline, sign):
+    from outerloop.contract import Regression
+    from outerloop.orchestrator import suite_regressed
+
+    def refused(loss, policy, **kwargs):
+        return suite_regressed(
+            baseline,
+            baseline + sign * loss,
+            direction,
+            min_delta=2,
+            min_delta_rel=0.05,
+            regression=policy,
+            **kwargs,
+        )
+
+    assert not refused(5, None)
+    assert refused(5.01, None)
+    assert not refused(5, Regression())
+    assert refused(5.01, Regression())
+    assert not refused(49, Regression(free_rel=0.005, max_rel=0.5))
+    assert refused(50, Regression(free_rel=0.005, max_rel=0.5))
+    assert not refused(2, Regression(max=10, requires_gain=3))
+    assert refused(3, Regression(max=10, requires_gain=3), climbed_gain=2.99)
+    assert not refused(3, Regression(max=10, requires_gain=3), climbed_gain=3)
+    assert refused(10, Regression(max=10, requires_gain=3), climbed_gain=100)
+    assert refused(5, Regression(free_rel=0.05, max_rel=0.05))
+
+
+def test_regression_zero_and_nonfinite_baseline():
+    from outerloop.contract import Regression
+    from outerloop.orchestrator import suite_regressed
+
+    policy = Regression(free_rel=0.005, max_rel=0.5)
+    assert not suite_regressed(0, 0, "min", regression=policy)
+    assert suite_regressed(0, 0.001, "min", regression=policy)
+    for baseline in (float("nan"), float("inf"), -float("inf")):
+        assert suite_regressed(baseline, 1, "min", regression=policy)
+        assert suite_regressed(baseline, 1, "min")
+
+
+def test_legacy_suite_row_and_rule_reports():
+    import json
+    from dataclasses import replace
+
+    from outerloop.orchestrator import AttemptResult, SuiteMeasurement
+
+    legacy = json.loads(
+        (Path(__file__).parent / "fixtures/suite_measurement_legacy.json").read_text()
+    )
+    row = SuiteMeasurement(**legacy)
+    assert row.rule == "legacy-floor"
+    for rule in ("legacy-floor", "gain-unlocked", "hard-cap"):
+        result = AttemptResult(
+            outcome="improved", baseline=100, candidate=73, suite=(replace(row, rule=rule),)
+        )
+        assert rule in result.report(CONFIG)
+        assert rule in pr_body(result, CONFIG, redact_secrets=())
+
+
+def test_silent_stop_is_resumed_and_an_explicit_end_ends_the_run(tmp_path):
+    from outerloop.syscall_cli import main
+
+    class Author:
+        supports_resume = True
+
+        def __init__(self):
+            self.calls = []
+
+        def run(self, brief_text, workspace, resume_session_id=None):
+            self.calls.append((brief_text, resume_session_id))
+            if len(self.calls) == 2:
+                assert "ended without a syscall" in brief_text
+                assert main(["end"], root=workspace) == 0
+            return ok_session()
+
+    author = Author()
+    result, _, evaluator = run_climb(tmp_path, [], harness=author, launcher=_fake_launcher([]))
+    assert len(author.calls) == 2 and author.calls[1][1] == "s1"
+    assert result.outcome == "no-improvement"
+    assert not evaluator.calls
+
+
+def test_silent_stops_are_bounded(tmp_path):
+    from outerloop.orchestrator import SILENT_STOP_RESUMES
+
+    result, harness, _ = run_climb(tmp_path, [], launcher=_fake_launcher([]))
+    assert len(harness.calls) == 1 + SILENT_STOP_RESUMES
+    assert all("ended without a syscall" in call[0] for call in harness.calls[1:])
+    assert result.outcome == "no-improvement" and result.note == "ended without a submit"
+
+
+def test_silent_stop_with_an_open_pr_still_parks_for_review(tmp_path):
+    from outerloop.orchestrator import AttemptResult
+
+    stopped = []
+
+    def on_stop(session):
+        stopped.append(session)
+        return AttemptResult(outcome="review", session=session)
+
+    result, harness, _ = run_climb(tmp_path, [], launcher=_fake_launcher([]), on_stop=on_stop)
+    assert len(harness.calls) == 1 and len(stopped) == 1
+    assert result.outcome == "review"
+
+
+@pytest.mark.parametrize(
+    "key", ["refusal:", "refused:", "capacity-refusal:", "message-refused:", "publish-refused:"]
+)
+def test_a_stop_after_a_delivered_refusal_is_not_nudged(tmp_path, key):
+    import time
+
+    from outerloop.inbox import Message, append
+
+    inbox = tmp_path.parent / (tmp_path.name + "-run")
+    inbox.mkdir(exist_ok=True)
+    append(inbox, Message(0, "note", "kernel", "", time.time(), key + "x", {"text": "refused"}))
+    result, harness, _ = run_climb(tmp_path, [], launcher=_fake_launcher([]))
+    assert len(harness.calls) == 1
+    assert result.outcome == "no-improvement"
+
+
+def test_a_refusal_from_an_earlier_leg_does_not_disable_the_nudge(tmp_path):
+    import time
+
+    from outerloop.inbox import Message, append
+    from outerloop.orchestrator import SILENT_STOP_RESUMES
+
+    inbox = tmp_path.parent / (tmp_path.name + "-run")
+    inbox.mkdir(exist_ok=True)
+    note = {"text": "Refused: out-of-scope", "quoted_text": "out-of-scope paths: x"}
+    append(inbox, Message(0, "note", "kernel", "", time.time(), "refusal:old", note))
+    # the refusal was delivered on an earlier leg: this leg starts past it
+    result, harness, _ = run_climb(tmp_path, [], launcher=_fake_launcher([]), inbox_seq=1)
+    assert len(harness.calls) == 1 + SILENT_STOP_RESUMES
     assert result.outcome == "no-improvement"
