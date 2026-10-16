@@ -160,8 +160,11 @@ means a lower one is.
 
 The absolute cross-seed noise floor, in metric units. A comparison against
 the recorded best was measured under a different seed, so a delta inside
-the floor is noise, not progress. Right for a bounded metric such as a
-success rate. Set it from a seed-variance calibration.
+the floor is noise, not progress. A delta equal to the floor clears it.
+Right for a bounded metric such as a
+success rate. Set it from a seed-variance calibration. Credit also requires
+a relative improvement of at least 0.5%, which the kernel applies absolutely
+when the baseline is zero.
 
 - Type: number
 - Constraint: at least 0
@@ -171,7 +174,8 @@ success rate. Set it from a seed-variance calibration.
 
 The relative noise floor, as a fraction of the recorded level. Right for an
 unbounded metric such as wall-clock time, whose level drifts with hardware.
-Set both floors and the more conservative one applies.
+Set both floors and the more conservative one applies. The same 0.5%
+relative gate applies on top of it.
 
 - Type: number
 - Constraint: between 0 and 1.0
@@ -216,8 +220,11 @@ governs only the first eval once measured durations exist.
 
 The GPUs every dispatched job of this benchmark asks for, gate evals and
 author launches alike. A GPU benchmark needs its evals to dispatch (see
-`eval_minutes`) and the deployment to name a GPU lane; without one the tick
-refuses to launch attempts on it. Multi-node evals are not supported, so
+`eval_minutes`) and the deployment to name a GPU lane on lane-based compute;
+without one the tick
+refuses to launch attempts on it. Local compute needs no lane, and a
+target entry in `OUTERLOOP_GPU_LANES` stands in for the fleet default.
+Multi-node evals are not supported, so
 the value is bounded at one node's worth.
 
 - Type: integer

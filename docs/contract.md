@@ -34,8 +34,8 @@ budgets:
   gpu_hours_per_run: 24
   runs_per_week: 20
 scope:
-  allowed: [src/, tests/]    # the only paths an agent may write
-  shared: [src/model/]       # shared code: touching it re-measures siblings
+  allowed: [src/mypkg/solver/]    # the only paths an agent may write
+  shared: [src/mypkg/solver/model/]   # shared code: touching it re-measures siblings
 roadmap: docs/roadmap.md     # what the agents read for direction; never written
 ```
 
@@ -81,8 +81,9 @@ decisions set that up.
 
 Calibrate the floor from seed variance: run the base tree several times at
 different seeds and measure the spread. A floor inside the spread lets noise
-through. A floor far above it freezes real progress. On top of any floor, a
-relative improvement smaller than 0.5% never counts as progress on its own.
+through. A floor far above it freezes real progress. Credit requires two
+bars at once, a delta that meets the floor (equality counts) and a relative
+improvement of at least 0.5%, applied absolutely when the baseline is zero.
 
 By default the gate re-measures the base tree beside every candidate, both
 under one fresh seed, at two evals per attempt. Set `baseline: cached` to
@@ -105,7 +106,9 @@ budgets, 2 launches, 4 sleeps and 0.5 GPU-hours by default.
 ## Scope
 
 `scope.allowed` lists the only paths an agent may write. Keep it as narrow as
-the work requires. The validator refuses the repository root, glob patterns
+the work requires, and keep the benchmarks' own eval code outside it, since
+an eval that sits inside the solver's paths is a ruler the agent can edit.
+The validator refuses the repository root, glob patterns
 and any path outside the repo. Four paths are never writable whatever the
 contract says: the contract itself, your roadmap, `.github/`, and a guidance
 directory if you declare one.
@@ -188,6 +191,10 @@ matters.
 ## Changing a running contract
 
 A run keeps the verification mode it started with, and other changes apply to
-runs that start after the contract changes. Channel switches take effect at
+runs that start after the contract changes. Two effects reach existing runs:
+publishing refuses a run whose base contract changed its measurement rules,
+and a run with an open pull request re-pins to the current base at its next
+wake. Drain the affected runs before changing measurement rules. Channel
+switches take effect at
 a running attempt's next wake. Agents can never edit the contract, the
 roadmap or anything under `.github/`.

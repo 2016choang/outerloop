@@ -90,15 +90,16 @@ by the gate and read by the review panel. A credited verdict publishes it.
 | `--claimed-value` | none | a finite number; required for self-reported verification |
 | `--claimed-baseline` | none | a finite number; required for self-reported verification |
 
-Refused when a stop is staged, or when the report is empty or over the
-limit. Self-reported verification additionally requires the two claimed
-values.
+Refused when a stop is staged, or when a supplied report file is empty or
+over the limit. Omitting `--report` is valid. Self-reported verification
+additionally requires the two claimed values.
 
 ### stop
 
-Ends the run. Without `--report`, the run ends without a PR. With
-`--report`, the report is posted and the run parks with its open PR.
-Committed immediately.
+Ends the run. Whether it ends outright depends on the PR: a run with an open
+PR returns to review and parks with it, whatever `--report` says, while a
+run without one ends with no PR, and a report cannot create one. The report
+supplies the final text posted to the thread. Committed immediately.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |

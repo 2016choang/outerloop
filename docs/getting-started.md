@@ -1,15 +1,16 @@
 # Getting started
 
-This page walks you through one Outerloop run end to end: install the package, declare a contract in your repository, run guided setup, and watch the loop make its first climb. You need one machine, a GitHub repository you administer, and an API key for a Claude model.
+This page walks you through one Outerloop run end to end: install the package, declare a contract in your repository, run guided setup, and watch the loop make its first climb. You need one machine, a GitHub repository you administer, and Anthropic API keys for the author and the review judges.
 
 The tutorial uses the simplest supported setup: everything runs on your machine. [Install](install.md) covers Slurm clusters, upgrades and the other deployment shapes.
 
 ## Before you start
 
 - Python 3.12 or later on a Linux machine, or any machine you can leave a terminal open on.
+- `uv` on PATH. Install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` and check `uv --version`. Every evaluation runs through `uv run`, and `outerloop start` refuses to launch without it.
 - A GitHub repository you administer, so you can install a GitHub App on it and merge pull requests.
 - A benchmark command in that repository that prints a JSON metric, such as `{"success_rate": 0.42}`.
-- An Anthropic API key for the author model. A spend-capped key is recommended.
+- An Anthropic API key for the author model, and a second key for the review judges. Spend-capped keys are recommended.
 
 The loop opens pull requests, comments and pushes branches as a GitHub identity that is not yours. On the way you create that identity with `outerloop init`.
 
@@ -36,9 +37,13 @@ budgets:
   gpu_hours_per_run: 8
   runs_per_week: 10
 scope:
-  allowed: [src/, tests/]   # the ONLY paths the agent may write
+  allowed: [src/mypkg/solver/]   # the ONLY paths the agent may write
 roadmap: docs/roadmap.md   # what the agents read for direction; never written
 ```
+
+Keep the benchmark's own code, here `mypkg/eval.py`, outside `allowed`. Only
+the contract, the roadmap and `.github/` are forbidden everywhere, so an
+eval that sits inside the solver's paths is a ruler the agent can edit.
 
 Check the file before you push it:
 
@@ -56,8 +61,7 @@ Benchmarks the agent will try to improve:
     $ uv run python -m mypkg.eval --json
 
 The agent may write only to:
-  • src/
-  • tests/
+  • src/mypkg/solver/
 
 Always forbidden, whatever the contract says:
   • .github
@@ -69,7 +73,7 @@ Budget: 8.0 GPU-hours per run, 10 runs per week
 
 An invalid one names the field and the problem. Commit the file and push.
 
-Two decisions matter most. Your `command` must be deterministic and re-runnable and must print the metric, because that is what lets your CI re-verify an improvement instead of taking the agent's word. And `scope.allowed` should be as narrow as the work requires. Every field is described in [the contract](contract.md).
+Two decisions matter most. Your `command` must be deterministic and re-runnable and must print the metric, because that is what lets your CI re-verify an improvement instead of taking the agent's word. And `scope.allowed` should cover the solver's code only, with the benchmark's eval outside it. Every field is described in [the contract](contract.md).
 
 ## Step 3: run guided setup
 
@@ -77,7 +81,7 @@ Two decisions matter most. Your `command` must be deterministic and re-runnable 
 outerloop init
 ```
 
-The wizard asks for everything it needs and writes `~/.config/outerloop/.env`, plus the key files, all owner-only. Answer like this:
+The wizard asks for the deployment settings and writes `~/.config/outerloop/.env`, plus the author's key file, all owner-only. Answer like this:
 
 - `local` for the compute backend.
 - Your `owner/repo` for the target.
@@ -95,7 +99,16 @@ The App flow is three steps, each printed by init:
 2. Open the install URL init prints, choose **Only select repositories**, pick your repo, and click **Install**. Press Enter in init once GitHub shows the App as installed.
 3. init checks that the App can write your repo, then prints `wrote ~/.config/outerloop/.env` and `next: outerloop start`.
 
-The bot's login is `<slug>[bot]`, recorded in the settings file. The kernel holds the App's key and performs every GitHub write on the agents' behalf, and an agent session never sees a credential.
+The bot's login is `<slug>[bot]`, recorded in the settings file. The kernel holds the App's key and performs every GitHub write on the agents' behalf. An agent session never sees a GitHub credential; the only key it holds is its own model key.
+
+The wizard does not collect the judges' key. With the image accepted above, the review panel runs, and its judges need their own Anthropic key at `~/.config/outerloop/verifier_key`, never the author's. Create it before starting the loop:
+
+```bash
+printf '%s' "sk-ant-..." > ~/.config/outerloop/verifier_key
+chmod 600 ~/.config/outerloop/verifier_key
+```
+
+Without that key the tick refuses to claim issues and names the panel preflight in its log. Without an image the panel is off and no judge key is needed.
 
 ## Step 4: start the loop
 
@@ -133,7 +146,7 @@ state=running phase=candidate author=claude/claude-sonnet-4-5 \
 overridden=no GPU-hours=0.5/8.0 session-cost=$1.2044 unpriced-sessions=0
 ```
 
-The run's report lands on your repo: every attempt is written up, including the ones that failed, and a pull request opens only when your benchmark improves by more than noise and the review panel holds. You merge the pull request like any other, and your branch protection applies to the bot exactly as to a human contributor.
+The run's report lands on your repo: every attempt is written up, including the ones that failed, and a pull request opens only when your benchmark improves by more than noise and the review panel approves. A run with the panel off opens pull requests that say so. You merge the pull request like any other, and your branch protection applies to the bot exactly as to a human contributor.
 
 Stop the loop with Ctrl-C when you are done, or leave it running and read [operate](operate.md) for steering runs, setting limits and pausing work.
 

@@ -120,12 +120,13 @@ nav:
   - Concepts:
     - How it works: how-it-works.md
     - Storage: storage.md
+    - Messages: messages.md
     - Concurrency: concurrency.md
   - Reference:
     - Contract fields: reference/contract.md
     - Operator CLI: reference/cli.md
     - Agent syscalls: reference/syscalls.md
-    - Inbox messages: reference/inbox.md
+    - Inbox message format: reference/inbox.md
     - Environment variables: reference/environment.md
   - Project:
     - Roadmap: roadmap.md

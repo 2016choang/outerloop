@@ -1,6 +1,6 @@
 # The kernel and its agents
 
-Outerloop runs untrusted research agents against a small trusted kernel, and only the kernel's own measurement can grant credit for a change. This page explains the parts of that split: where trust sits, how agents reach the kernel, how a run waits out its experiments, and how a change earns credit.
+Outerloop runs untrusted research agents against a small trusted kernel, and in the default gate mode only the kernel's own measurement can grant credit for a change. This page explains the parts of that split: where trust sits, how agents reach the kernel, how a run waits out its experiments, and how a change earns credit.
 
 ## The kernel at a glance
 
@@ -28,7 +28,7 @@ Outerloop runs untrusted research agents against a small trusted kernel, and onl
 <text x="52" y="128" class="bt" text-anchor="start">Author agents  (agent-NN, one hypothesis per run)</text>
 <text x="52" y="150" class="bl" text-anchor="start">harness · Claude Code, Codex, Hermes</text>
 <text x="52" y="170" class="bl" text-anchor="start">no repository credentials</text>
-<text x="52" y="190" class="bl" text-anchor="start">edits only the contract's allowed paths</text>
+<text x="52" y="190" class="bl" text-anchor="start">kernel rejects out-of-scope edits</text>
 <text x="52" y="210" class="bl" text-anchor="start">edit → launch → sleep → wake → … → submit</text>
 
 <rect x="40" y="386" width="412" height="196" rx="6" class="box sb"/>
@@ -107,7 +107,7 @@ Outerloop runs untrusted research agents against a small trusted kernel, and onl
 <text x="688" y="456" class="bl" text-anchor="start">candidate vs base · paired</text>
 <text x="688" y="476" class="bl" text-anchor="start">or cached per base · seed</text>
 <text x="688" y="496" class="bl" text-anchor="start">drawn at measurement time</text>
-<text x="688" y="516" class="bl" text-anchor="start">credit when gain beats floor</text>
+<text x="688" y="516" class="bl" text-anchor="start">credit when gain meets floor</text>
 <rect x="956" y="410" width="298" height="120" rx="6" class="box k"/>
 <text x="968" y="434" class="bt" text-anchor="start">Panel rules</text>
 <text x="968" y="456" class="bl" text-anchor="start">judges spawn on credited work</text>
@@ -147,10 +147,10 @@ Outerloop runs untrusted research agents against a small trusted kernel, and onl
 <text x="1302" y="190" class="bl" text-anchor="start">on-prem · cloud · local</text>
 <rect x="1290" y="290" width="290" height="234" rx="6" class="box x"/>
 <text x="1302" y="314" class="bt" text-anchor="start">GitHub</text>
-<text x="1302" y="336" class="bl" text-anchor="start">the App is the only write</text>
-<text x="1302" y="356" class="bl" text-anchor="start">path · PRs, CI, auto-merge</text>
-<text x="1302" y="376" class="bl" text-anchor="start">when allowed · merged code</text>
-<text x="1302" y="396" class="bl" text-anchor="start">is the next runs' base</text>
+<text x="1302" y="336" class="bl" text-anchor="start">the kernel's identity is</text>
+<text x="1302" y="356" class="bl" text-anchor="start">the only write path · PRs, CI,</text>
+<text x="1302" y="376" class="bl" text-anchor="start">auto-merge when allowed · merged</text>
+<text x="1302" y="396" class="bl" text-anchor="start">code is the next runs' base</text>
 
 <rect x="1290" y="548" width="290" height="122" rx="6" class="box x"/>
 <text x="1302" y="572" class="bt" text-anchor="start">Model endpoints</text>
@@ -195,9 +195,9 @@ One resident loop, either a long-lived cluster job or a local process, does all 
 
 ## The trust boundary
 
-Everything inside the sandbox is untrusted. An author session runs in a container with no GitHub credentials, so it cannot push, merge or comment. Its edits stay within the paths the contract allows, and three places are forbidden everywhere: the contract itself, the roadmap and `.github/`. Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
+Everything inside the sandbox is untrusted. An author session runs in a container with no GitHub credentials, so it cannot push, merge or comment. Its whole workspace is mounted writable, and scope is not a per-path sandbox: the kernel rejects a candidate whose changes fall outside the paths the contract allows. Three places are forbidden everywhere: the contract itself, the roadmap and `.github/`. Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
 
-Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it is the only writer to the target repository, through a GitHub App. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
+Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it is the only writer to the target repository, through the configured GitHub identity, an App or a fine-grained PAT. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
 
 ## The syscall surface
 
@@ -213,7 +213,9 @@ When every job has finished, the kernel wakes the same session. The author resum
 
 ## The gate
 
-A `submit` seals the author's tree, and only the kernel's measurement can credit it. The gate measures the candidate against the base, either as a paired comparison under one fresh seed or against a cached baseline for that base commit. The kernel draws the seed at measurement time, so the author cannot tune to it. The candidate is credited only when its gain beats the floor the contract sets (`min_delta`), so seed luck cannot pose as progress. The contract's `baseline` field chooses between the two protocols, and [writing a contract](contract.md) walks through that choice.
+In the default `gate` mode, a `submit` seals the author's tree and only the kernel's measurement can credit it. The gate measures the candidate against the base, either as a paired comparison under one fresh seed or against a cached baseline for that base commit. The kernel draws the seed at measurement time, so the author cannot tune to it. Credit needs a relative improvement of at least 0.5% and a delta that meets the floor the contract sets (`min_delta`), so seed luck cannot pose as progress. The contract's `baseline` field chooses between the two protocols, and [writing a contract](contract.md) walks through that choice.
+
+A contract can instead set `verification: self_report`. The author claims two numbers, the kernel applies the same floors to the claimed pair, nothing is re-measured and no panel runs. Reports and the ledger label these results as self-reported, and they never arm automatic merging.
 
 ## The meter
 

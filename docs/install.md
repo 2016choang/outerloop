@@ -44,7 +44,7 @@ The loop refuses to start while a resident chain is queued or running, and a res
 
 With `OUTERLOOP_COMPUTE=local`, or with no `sbatch` on PATH, `outerloop start` runs the local loop in the foreground from the installed package. Ctrl-C stops it, and its saved records let it continue the work when you start it again. On a headless machine, run it under `nohup` or in tmux, or as a user service.
 
-Local compute has no lanes, so GPU benchmarks need no GPU partition: evaluations and the author's launches run on the machine's own GPUs, shared first come first served. Launch arrays run their tasks in parallel as GPUs become available, and `OUTERLOOP_LOCAL_GPUS` overrides automatic detection through `nvidia-smi` (`0` disables GPU allocation). The author's session itself starts with no GPU visible, so an experiment that needs one goes through the author's `launch` syscall, where it is recorded and metered against `gpu_hours_per_run`.
+Local compute has no lanes, so GPU benchmarks need no GPU partition: evaluations and the author's launches run on the machine's own GPUs, shared first come first served. Launch arrays run their tasks in parallel as GPUs become available, and `OUTERLOOP_LOCAL_GPUS` overrides automatic detection through `nvidia-smi` (`0` disables GPU allocation). The author's session itself starts with `CUDA_VISIBLE_DEVICES` empty, so an experiment that needs a GPU goes through the author's `launch` syscall, where it is recorded and metered against `gpu_hours_per_run`. Uncontained, that is a default the session could reset; containment is what keeps the GPU out of the session, which is one more reason to run with the image.
 
 Without a container image, sessions run under the harness's own sandbox and evaluations run bare on your machine with your keys, and the loop says so once at start. The verification panel is off in this mode unless you set `OUTERLOOP_PANEL_UNCONTAINED=1`, because an uncontained judge holds a shell next to its own key file. A pull request opened without a panel says so. A Codex or Hermes author needs the image in every mode. For priorities, walltime accounting, or several machines, use Slurm.
 
@@ -116,7 +116,7 @@ Add the bot as a direct collaborator with **Write** on every target repo, not to
 
 Everything above lands in `~/.config/outerloop/.env`, written by `outerloop init`, with every file owner-only (0600). `start` and the chain's deploy step refuse a file that is not owned by you or is group- or world-writable, so `chmod 600` it.
 
-Settings resolve in order: command-line flags, the process environment, then `.env`. The resident chain re-reads an allowlist of author and model knobs from the file each tick and exports them to every job it submits. A change there applies to every run started after the next cadence, and to a parked run the next time its wake is submitted. Placement, the state root, the cadence and the tick host are read when the chain starts, so restart the chain to change them. The author's backend and model are fixed per run in its record and never change midway.
+Startup settings are read when the chain starts: the mode, the tick's placement, the state root, the cadence and the tick host. Restart the chain to change them. The resident chain re-reads an allowlist of author, model, panel, image and GPU-lane settings from the file each tick, including QOS, and a present entry wins over the inherited environment even when it is empty. A change there applies to every run started after the next cadence, and to a parked run the next time its wake is submitted. A local or login loop reads the file once at launch, and the shell's values win there. The author's backend and model are fixed per run in its record and never change midway.
 
 Every variable, its default and when it is required is in the [environment reference](reference/environment.md).
 
@@ -138,7 +138,9 @@ GPU jobs request at least 8 cores and 64 GB of host memory per GPU. On nodes wit
 
 On a cluster, evals and launches run inside the Apptainer image at `OUTERLOOP_IMAGE` (default `~/outerloop-images/agent-py312.sif`), in a jail that binds only the checked-out tree. An eval that needs data must fetch it into the tree. The published image lives at [huggingface.co/outerloop-science/agent-image](https://huggingface.co/outerloop-science/agent-image), built from `containers/agent-py312.def`. On Linux with Apptainer installed, `outerloop init` downloads it (about 200 MB), verifies its published checksum and records it. `--image` points at your own, and `--no-image` keeps runs uncontained even when an image is on disk by writing `OUTERLOOP_IMAGE=`.
 
-When Apptainer is missing or cannot run containers, init says so, prints the install steps for your system and continues uncontained. Run `outerloop init --force` after installing it. Check a working install with `apptainer exec docker://alpine:3.20 cat /etc/alpine-release`, which prints a version number.
+Only the local loop supports that uncontained fallback. On Slurm the tick does not service a target without an image, and Codex and Hermes authors need one in every mode.
+
+When Apptainer is missing or cannot run containers, init says so, prints the install steps for your system and continues uncontained, which the local loop supports as above. Run `outerloop init --force` after installing it. Check a working install with `apptainer exec docker://alpine:3.20 cat /etc/alpine-release`, which prints a version number.
 
 - Ubuntu: the project's PPA builds amd64 and arm64. The package carries the AppArmor profile that Ubuntu 23.10 and later require.
 
@@ -178,6 +180,8 @@ Enable the Claude models in the project's Model Garden, mint ADC with `gcloud au
 ## Upgrading
 
 A local install upgrades with `outerloop upgrade`, which is `pip install --upgrade outerloop-science` under one verb (`--pre` tracks pre-releases). Then run `outerloop permissions --open` and follow the page it opens, and stop and restart the loop to pick up the new code.
+
+New formats for run records are migrated as the kernel reads them, so an upgrade needs no migration step. An older kernel cannot read the new ones: drain or end active runs before rolling back past a format change, since a rollback needs the records translated by hand.
 
 A resident Slurm deployment runs from a checkout, and `OUTERLOOP_AUTO_UPDATE` in `.env` says whether the deploy step moves it. `off`, the default, leaves the checkout alone: you upgrade when you choose, and the loop keeps running the code you validated. `release` moves it to the newest release tag at the next cadence, pre-releases included, and the repo is public so no credential is needed. `main` follows every merge and is meant for the kernel's own developers. Whatever moves the checkout, you or the policy, the environment is synced to the commit that is checked out, or the deploy rolls back to the last commit whose environment was installed.
 

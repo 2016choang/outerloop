@@ -3,14 +3,18 @@
 Every environment variable you set to configure an Outerloop deployment:
 its meaning, its default and when it is required. Most live in the operator
 settings file (`~/.config/outerloop/.env`, written by `outerloop init` and
-read once at each launch). The rest are exported in the shell around
-`outerloop start`. See [the install guide](../install.md) for the whole
+read at each launch). The launch exports an allowlist from the file, so a
+variable outside that allowlist must be exported in the shell around
+`outerloop start`; the sections below mark those with "the shell only".
+See [the install guide](../install.md) for the whole
 deployment procedure.
 
 Variables the kernel sets for its own child sessions are not listed here.
-A flag always beats the environment, and the environment beats the settings
-file. An empty value in the settings file is an off-switch, not an unset
-key.
+A flag always beats the environment. For a foreground loop the environment
+beats the settings file, and an empty value in the settings file is an
+off-switch, not an unset key. The resident chain is the exception: it
+re-reads its allowlist from the file each tick, and a present entry wins
+over the inherited environment even when it is empty.
 
 ## Variable summary
 
@@ -33,7 +37,7 @@ key.
 | `OUTERLOOP_CACHE_ROOT` | where downloaded runtimes are cached | `<root>/cache` |
 | `OUTERLOOP_BRIDGE_RUNTIME` | where the bridge runtime is installed | `<cache>/bridge` |
 | `OUTERLOOP_TARGET` | the repo being climbed | unset |
-| `OUTERLOOP_GITHUB_APP_FILE` | the GitHub App's private-key JSON | unset |
+| `OUTERLOOP_GITHUB_APP_FILE` | the GitHub App config file init writes | unset |
 | `OUTERLOOP_BOT_LOGIN` | the login the kernel acts as | unset |
 | `OUTERLOOP_BOT_ALIASES` | former logins of the same bot | unset |
 | `OUTERLOOP_AUTHOR_BACKEND` | the author's harness | `claude` |
@@ -46,13 +50,13 @@ key.
 | `OUTERLOOP_PANEL_CODEX_KEY_FILE` | key for a Codex panel lens | unset |
 | `OUTERLOOP_PANEL_HERMES_KEY_FILE` | key for a Hermes panel lens | unset |
 | `OUTERLOOP_PANEL_UNCONTAINED` | run panel judges outside the container | off |
-| `OUTERLOOP_STEWARD_KEY_FILE` | the steward's key; turns the lane on | `~/.config/outerloop/steward_key` |
+| `OUTERLOOP_STEWARD_KEY_FILE` | the steward's key; turns the lane on | unset |
 | `OUTERLOOP_CLAUDE_KEY_FILE` | the author's Claude key file | `~/.config/outerloop/claude_key` |
 | `OUTERLOOP_CODEX_KEY_FILE` | the author's Codex key file | `~/.config/outerloop/codex_key` |
 | `OUTERLOOP_HERMES_KEY_FILE` | the author's Hermes key file | `~/.config/outerloop/hermes_key` |
-| `REVIEW_BACKEND` | backend for the review lens | `claude` |
-| `REVIEW_MODEL` | model for the review lens | unset |
-| `REVIEW_ENDPOINT` | endpoint profile for the review lens | unset |
+| `REVIEW_BACKEND` | backend for the standalone reviewer | `claude` |
+| `REVIEW_MODEL` | model for the standalone reviewer | unset |
+| `REVIEW_ENDPOINT` | endpoint profile for the standalone reviewer | unset |
 | `OUTERLOOP_TOKEN_PRICES` | token prices for session cost accounting | unset |
 | `OUTERLOOP_VERTEX_PROJECT` | GCP project that routes Claude through Vertex | unset |
 | `OUTERLOOP_VERTEX_REGION` | Vertex region | `global` |
@@ -68,6 +72,7 @@ key.
 | `OUTERLOOP_CLAUDE_BIN` | absolute path of the Claude CLI | PATH lookup |
 | `OUTERLOOP_CODEX_BIN` | absolute path of the Codex CLI | PATH lookup |
 | `REVIEW_HERMES_REPO` | Hermes source checkout | `~/hermes-agent` |
+| `REVIEW_HERMES_PROVIDER` | native Hermes provider, `openai` or `openrouter` | unset |
 | `OUTERLOOP_CODEX_WEB_SEARCH` | Codex's built-in web search | `auto` |
 | `OUTERLOOP_HERMES_RESUME_MAX_CHARS` | Hermes resume payload cap | 120000 |
 | `OUTERLOOP_GPU_PARTITION` | the GPU lane for evals and launches | unset |
@@ -80,7 +85,7 @@ key.
 | `OUTERLOOP_MAX_JOB_MINUTES` | walltime cap for climb jobs | 360 |
 | `OUTERLOOP_JOB_PARTITION` | partition the walltime cap is sized for | unset |
 | `OUTERLOOP_DISPATCH_WAKE` | `0` disarms dispatched wakes | armed |
-| `OUTERLOOP_HARNESS_TIMEOUT_SECONDS` | timeout of the harness health check | 300 |
+| `OUTERLOOP_HARNESS_TIMEOUT_SECONDS` | deadline for one harness upgrade | 300 |
 | `OUTERLOOP_NATIVE_LOG_MAX_BYTES` | cap on a session's native log kept | 32 MiB |
 
 ## Placement and state
@@ -183,7 +188,9 @@ PAT rather than a GitHub App. One identity or the other, never both.
 ### `OUTERLOOP_IMAGE`
 
 The Apptainer image sessions and evals run in. An empty value is the
-off-switch: runs stay uncontained even when an image is on disk.
+off-switch for local Claude runs: they stay uncontained even when an image
+is on disk. On Slurm the tick does not service a target without an image,
+and Codex and Hermes authors need one in every mode.
 
 - Default: `~/outerloop-images/agent-py312.sif`
 
@@ -218,18 +225,22 @@ target without it.
 
 ### `OUTERLOOP_GITHUB_APP_FILE`
 
-The GitHub App's private-key JSON, downloaded from the App's settings page.
-With `OUTERLOOP_PAT_FILE` unset, this is the identity the kernel posts as.
+The GitHub App config file `outerloop init` writes, `github_app.<slug>.json`.
+It is Outerloop's own JSON, holding `app_id`, `installation_id` and
+`private_key`, the path of the separate PEM file beside it. With
+`OUTERLOOP_PAT_FILE` unset, this is the identity the kernel posts as.
 
 - Default: unset
 
 ### `OUTERLOOP_BOT_LOGIN`
 
 The login the kernel acts as, so it can recognize its own comments. `init`
-records it. The App's login is `<slug>[bot]`.
+records it: the App's login is `<slug>[bot]`, and a PAT's is the token's
+login. When init cannot read the PAT's login, set the variable by hand in
+the settings file, or rerun `outerloop init --force` with network access.
 
 - Default: unset
-- Required: with a GitHub App identity
+- Required: for both identities; the tick services no target without it
 
 ### `OUTERLOOP_BOT_ALIASES`
 
@@ -321,13 +332,16 @@ default, because an uncontained judge holds a shell on the launch node.
 
 - Values: `1`
 - Default: off
+- Configuration: the shell only
 
 ### `OUTERLOOP_STEWARD_KEY_FILE`
 
-The steward's own key file. Its presence turns the steward lane on, and
-the steward always runs Claude, so this names a Claude key.
+The steward's own key file. Setting it turns the steward lane on, and
+the steward always runs Claude, so this names a Claude key. The lane also
+needs a steward scope in the contract. Unset by default: creating the
+file at the default path is not enough, the variable must name it.
 
-- Default: `~/.config/outerloop/steward_key`
+- Default: unset
 
 ### `OUTERLOOP_CLAUDE_KEY_FILE`
 
@@ -349,20 +363,24 @@ The author's native-provider key file for a Hermes author.
 
 ### `REVIEW_BACKEND`
 
-The backend the review lens runs on, when it is not the author's.
+The backend the standalone reviewer runs on, in its own GitHub workflow.
+It does not select the climber's panel lenses; those come from
+`OUTERLOOP_PANEL`.
 
 - Values: `claude`, `codex` or `hermes`
 - Default: `claude`
 
 ### `REVIEW_MODEL`
 
-The model the review lens runs on.
+The model the standalone reviewer runs on. The claude backend has no
+built-in default, so a claude reviewer without a model skips with a
+could-not-run stub.
 
 - Default: unset
 
 ### `REVIEW_ENDPOINT`
 
-The endpoint profile the review lens's model is served by.
+The endpoint profile the standalone reviewer's model is served by.
 
 - Default: unset
 
@@ -452,6 +470,17 @@ runs Hermes.
 
 - Default: `~/hermes-agent`
 
+### `REVIEW_HERMES_PROVIDER`
+
+The provider a native Hermes author or reviewer authenticates with. Set
+`openai` or `openrouter`; anything else fails validation unless an endpoint
+profile covers the role. With `openrouter`, name models in OpenRouter's
+`provider/model` form, such as `openai/gpt-5.6-terra`. With `openai`, use
+the provider's native id, such as `gpt-5.6-terra`, with no prefix.
+
+- Values: `openai` or `openrouter`
+- Default: unset; the standalone reviewer alone defaults to `openrouter`
+
 ### `OUTERLOOP_CODEX_WEB_SEARCH`
 
 Whether a Codex session keeps its built-in web search. `auto` keeps it on
@@ -474,11 +503,13 @@ with a configuration-blocked notice naming the value to raise it to.
 ### `OUTERLOOP_GPU_PARTITION`
 
 The partition GPU evals and author launches run on. A contract with GPU
-benchmarks needs it, and without a lane the tick refuses to launch attempts
-on them rather than queue evals that can never run.
+benchmarks needs this lane, and without one the tick refuses to launch
+attempts on them rather than queue evals that can never run. Local compute
+has no lanes, so it needs none, and a target entry in `OUTERLOOP_GPU_LANES`
+satisfies the check without this variable.
 
 - Default: unset
-- Required: for GPU benchmarks
+- Required: for GPU benchmarks on lane-based compute (Slurm)
 
 ### `OUTERLOOP_GPU_ACCOUNT`
 
@@ -518,6 +549,7 @@ detection gets it wrong or misses them.
 
 - Default: auto-detected
 - Constraint: a non-negative integer
+- Configuration: the shell only
 
 ## Loop pacing
 
@@ -529,6 +561,7 @@ disables coalescing. A value at or above half the cadence is clamped down
 so it cannot stall the loop.
 
 - Default: the lesser of 10 minutes and half the cadence
+- Configuration: the shell only
 
 ### `OUTERLOOP_MAX_JOB_MINUTES`
 
@@ -538,6 +571,7 @@ so Slurm does not reject the submission outright. Clamped between the
 
 - Default: 360
 - Constraint: 40 to 600
+- Configuration: the shell only
 
 ### `OUTERLOOP_JOB_PARTITION`
 
@@ -546,6 +580,7 @@ partition with a longer `MaxTime` to raise the walltime cap with
 `OUTERLOOP_MAX_JOB_MINUTES`.
 
 - Default: unset
+- Configuration: the shell only
 
 ### `OUTERLOOP_DISPATCH_WAKE`
 
@@ -555,21 +590,27 @@ disarm comes from touching `<root>/DISARM_WAKE`.
 
 - Values: `0` disarms, anything else is armed
 - Default: armed
+- Configuration: the shell only
 
 ## Diagnostics
 
 ### `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`
 
-How long `outerloop harness status` waits for one harness health check.
+The deadline for one harness upgrade, installation and verification
+together. A longer install, such as the Hermes runtime, is cut off at this
+deadline. Probes in `outerloop harness status` use their own short fixed
+timeouts.
 
 - Default: 300
 - Constraint: positive and finite
+- Configuration: the shell only
 
 ### `OUTERLOOP_NATIVE_LOG_MAX_BYTES`
 
 How much of a session's native harness log is kept as evidence.
 
 - Default: 32 MiB
+- Configuration: the shell only
 
 ## Endpoint profiles
 

@@ -90,7 +90,7 @@ outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
 | `--author-model` | prompted | the climbing author's model |
 | `--claude-model` | prompted | model for every Claude role; required, no default |
 | `--image` | the published one | path to an Apptainer image for sessions and evals |
-| `--no-image` | off | no image: runs stay uncontained even if one is on disk |
+| `--no-image` | off | no image: local runs stay uncontained even if one is on disk |
 | `--author-key-file` | prompted | path to an existing file holding the author's model key |
 | `--yes` | off | non-interactive: use flags, do not prompt |
 | `--force` | off | overwrite an existing config without asking |
@@ -144,7 +144,7 @@ outerloop tick --root ROOT [--grace-s GRACE_S] [--lease-ttl-s LEASE_TTL_S]
 | --- | --- | --- |
 | `--root` | required | state root on the shared filesystem |
 | `--grace-s` | 900 | seconds a finished experiment's delivery job gets before the sweep steps in |
-| `--lease-ttl-s` | 5400 | seconds after which a held run lease counts as stale |
+| `--lease-ttl-s` | 5400 | seconds after which a held run lease counts as stale when the scheduler cannot confirm the holder |
 | `--min-free-gb` | 10 | skip launching new work below this many GB free on the state filesystem |
 | `--loop` | off | run a tick every cadence in the foreground |
 | `--cadence-min` | 30 | minutes between `--loop` ticks |

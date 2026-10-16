@@ -76,7 +76,7 @@ max_active_attempts = 1
 
 Limits are re-read at admission, including inside existing runs. Invalid TOML, unknown keys, unreadable files, negative values and non-integers are logged and fail closed for GPU work and fresh attempts. Replace the file atomically.
 
-Each GPU check with a finite ceiling takes one scheduler snapshot of your running and pending jobs. A job belongs to this fleet only when its name contains a run id present under `<root>/runs/`, so your unrelated jobs do not count. Over-ceiling experiments receive an author-visible refusal without launch or GPU-hour charges. Evaluations wait for capacity, and waiting does not exhaust wake retries. Lowering a ceiling never cancels existing jobs.
+Each GPU check with a finite ceiling takes one scheduler snapshot of your running and pending jobs. A job belongs to this fleet when its name carries a run id present under `<root>/runs/`, or the hashed run key the kernel substitutes for long ids. Your unrelated jobs do not count, and neither do this fleet's jobs from before the current naming: drain those before relying on a ceiling. Over-ceiling experiments receive an author-visible refusal without launch or GPU-hour charges. Evaluations wait for capacity, and waiting does not exhaust wake retries. Lowering a ceiling never cancels existing jobs.
 
 !!! warning
     These are live admission ceilings, not a scheduler-enforced quota. Two
@@ -100,9 +100,9 @@ The resident chain checks its successor every tick and before handover, requeues
 On by default. Think hard before changing any of them.
 
 - The bot never merges and is never a code owner, so your branch protection applies to it like any contributor's. `merge: auto` is an explicit per-repo opt-in. In that mode the sweep merges a clean PR only at the head its gate and panel approved, through your required checks, and it never arms GitHub auto-merge.
-- Agent sessions run with no credentials in their environment, and pushes happen after the session ends.
+- Agent sessions run with no GitHub credential in their environment; each holds only its own model key. Pushes happen after the session ends.
 - Only maintainer-authored issues and comments become tasks. Everything else, including PR descriptions and diffs, is data, never instructions.
-- Budgets (tokens, dollars, GPU-hours, runs per week) are enforced in code, and a run that hits a cap ends.
+- Launches, sleeps, GPU-hours and runs per week are enforced in code, and so are the session turn and walltime ceilings. Token and dollar spending is not metered, so cap the keys at the provider instead.
 - A pause file in the state root stops the loop from anywhere with write access, with no cluster login needed.
 
 ## Getting help

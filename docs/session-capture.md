@@ -43,8 +43,9 @@ tokens, keyed by the exact configured model:
 export OUTERLOOP_TOKEN_PRICES='{"open-model":{"input_tokens":2,"cached_input_tokens":0.5,"output_tokens":10,"cache_creation_input_tokens":2.5}}'
 ```
 
-Input and output rates are required, and every nonzero bucket needs a
-finite, nonnegative rate. Missing models or rates, malformed prices, or
+The input and output usage counters are required, and every bucket with a
+nonzero count needs a finite, nonnegative rate. A zero-count bucket needs
+no rate. Missing models or rates, malformed prices, or
 absent usage leave that session's cost unknown, and an unknown cost makes
 the run's total unknown. Explicit zero rates price a free or self-hosted
 model at zero. This prices recorded usage, not invoices.

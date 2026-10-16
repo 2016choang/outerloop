@@ -108,14 +108,17 @@ makes the endpoint unavailable. A malformed file is a configuration error.
 
 The kernel reads the file outside the session sandbox each time a session
 starts, including resumes and wakes, so publishing a new address reroutes
-the next session without a restart. When a session starts, one
-models-list request checks the server
-with a three-second timeout and the profile key.
+the next session without a restart. Each read resolves the address and, for
+a `URL_FILE` profile, one models-list request checks the server with a
+three-second timeout and the profile key.
 
 ## Outages
 
-A missing address file or a dead server parks fresh runs and defers parked
-wakes without spending wake retries, and nothing polls in the background.
+A profile with a `URL_FILE` is probed before every session: a missing address
+file, a bad record or a dead server parks fresh runs and defers parked wakes
+without spending wake retries, and nothing polls in the background. A fixed
+`URL` profile is not probed, so a dead fixed server surfaces as ordinary
+session failures instead.
 Run `outerloop status` to see which endpoint each run waits for and since
 when:
 

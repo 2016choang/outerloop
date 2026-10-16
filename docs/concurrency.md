@@ -30,7 +30,9 @@ No update is lost. Every ledger edit is applied against a consistent read of the
 
 Both a wake job armed at park time and the tick's sweep can try to wake the same run, and a wake holder can die mid-session.
 
-Whoever wakes a run first creates `lease.json` atomically, an exclusive create that lets exactly one contender win. The lease records its holder and a timestamp. A lease is stale when the holder's job is no longer alive per the scheduler, or when its age passes a TTL. The sweep reaps a stale lease by renaming it to a tombstone and checking it got the lease it observed, so a faster reaper cannot delete a fresh lease.
+Whoever wakes a run first creates `lease.json` atomically, an exclusive create that lets exactly one contender win. The lease records its holder and a timestamp. Staleness follows the holder's liveness, a three-way rule. A holder the scheduler reports alive is never stale, however old the lease, because a wake can queue behind hours of evals. A holder the scheduler reports dead is stale at once. When the scheduler cannot answer, only the TTL proves staleness, so a query outage never looks like a dead holder.
+
+The sweep reaps a stale lease by renaming it to a tombstone and checking it got the lease it observed, so a faster reaper cannot delete a fresh lease.
 
 One wake delivers, and the others stand down. A wake killed mid-session delays the retry by one grace window. It cannot strand the run, because the sweep reaps the dead holder's lease.
 

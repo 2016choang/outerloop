@@ -49,7 +49,7 @@ budgets:
   gpu_hours_per_run: 8
   runs_per_week: 10
 scope:
-  allowed: [src/]        # the only paths an agent may change
+  allowed: [src/mypkg/solver/]   # the only paths an agent may change
 roadmap: docs/roadmap.md # what the agents read for direction; never written
 ```
 
@@ -73,10 +73,13 @@ decisions the contract asks you to make.
 5. **Record.** Every attempt gets a short report: hypothesis, change,
    outcome, next step. Negative results included.
 
-Agents cannot touch the benchmark, the budgets, or your CI. Your branch
-protection and required checks apply to them as to any contributor. By
-default a pull request waits for a human, and a repo can also let clean
-ones merge themselves. The full picture is in
+Agents write only the paths the contract allows, and the contract, your
+roadmap, and `.github/` are never writable by an agent. Keep the
+benchmark's own eval code outside those allowed paths, so the agent cannot
+edit the ruler it is judged by. Your branch protection and required checks
+apply to them as to any contributor. By default a pull request waits for a
+human, and a repo can also let clean ones merge themselves. The full
+picture is in
 [how it works](https://docs.outerloop.science/how-it-works/), and the
 [operate guide](https://docs.outerloop.science/operate/) covers running
 and steering runs.
@@ -93,10 +96,12 @@ build. See [the reviewer guide](https://docs.outerloop.science/reviewer/).
 - **Opt-in and contract-bound.** A repo takes part by granting the bot
   access and committing a contract. The contract, your roadmap, and
   `.github/` are never writable by an agent.
-- **Nothing on trust.** Outerloop measures every claim itself, on committed
-  trees, and re-verifies before a pull request exists.
+- **Nothing on trust.** In the default gate mode, Outerloop measures every
+  claim itself, on committed trees, and re-verifies before a pull request
+  exists. A repo can instead opt into labelled self-reported numbers.
 - **Untrusted input.** Pull request text, diffs, issues, web pages, and job
-  output are data, never instructions. Agents run without credentials.
+  output are data, never instructions. Agents hold no GitHub credential,
+  only their own model key.
 - **Budgets in code.** Launches, GPU-hours, and runs per week are enforced
   by the kernel, not left to the agent.
 - **No model lock-in.** Claude Code, Codex, and hermes-agent are wired

@@ -109,7 +109,7 @@ Outerloop keeps its whole state in plain files and git branches, with no databas
 
 <rect x="1080" y="220" width="490" height="470" rx="10" class="box k2"/>
 <text x="1098" y="250" class="bt" text-anchor="start">Git on GitHub</text>
-<text x="1098" y="272" class="pz" text-anchor="start">the target repository · via the App only</text>
+<text x="1098" y="272" class="pz" text-anchor="start">the target repository · kernel identity</text>
 <line x1="1094" y1="290" x2="1556" y2="290" class="rule"/>
 <text x="1098" y="318" class="mono" text-anchor="start">main</text>
 <text x="1098" y="340" class="bl" text-anchor="start">merged code · next runs start here</text>
@@ -143,7 +143,7 @@ Outerloop keeps its whole state in plain files and git branches, with no databas
 <polyline points="800,156 800,220" class="flow" marker-end="url(#s-flow)"/>
 <text x="812" y="196" class="al" text-anchor="start">atomic file writes</text>
 <polyline points="1000,156 1000,186 1300,186 1300,220" class="flow" marker-end="url(#s-flow)"/>
-<text x="1150" y="180" class="al" text-anchor="middle">GitHub App</text>
+<text x="1150" y="180" class="al" text-anchor="middle">bot identity</text>
 <polyline points="620,156 620,186 420,186 420,220" class="flow" marker-start="url(#s-flow)" marker-end="url(#s-flow)"/>
 <text x="520" y="180" class="al" text-anchor="middle">syscall.json in · messages, results out</text>
 
@@ -187,11 +187,11 @@ The `.outerloop/` directory inside the workspace is the kernel's channel. It hol
 
 A run's record is one JSON file, `runs/<run-id>/state.json`, written by atomic rename. A crash mid-write leaves the previous record intact, and the sweep reasons only from these files plus Slurm, never from process memory. The same run directory holds the wake lease, the inbox, the outbox of replies kept before posting, and the redacted transcript of every session. Beside the run directories, a baseline cache holds the measured baseline that a `cached` contract shares among all attempts on one base commit.
 
-Nothing here needs a schema migration step. Unknown fields are ignored on read, and every format change ships a fixture that keeps older files reading across kernel versions. After a run ends, its workspace and run home are removed after a grace period of 24 hours by default; the record, the report, the transcripts and the ledger entries stay.
+Unknown fields are ignored on read, and new formats for run records are migrated as the kernel reads them, so an upgrade needs no migration step. That compatibility runs forward only: an older kernel cannot interpret newer record formats, so a rollback past a format change needs its runs drained or their records translated by hand. After a run ends, its workspace and run home are removed after a grace period of 24 hours by default; the record, the report, the transcripts and the ledger entries stay.
 
 ## The research ledger
 
-Research state lives on the target repository's `research-log` branch, and only the kernel writes to it through the GitHub App. The branch carries `results/leader.json` and `BENCHMARKS.md`, the leaderboard and its rendered view. Each pending submission is one JSON file under `results/submissions/`, and every attempt's report sits under `reports/`. Each ledger write is a compare-and-swap on the branch head, retried when the head moved; the [concurrency page](concurrency.md) covers the mechanism.
+Research state lives on the target repository's `research-log` branch, and only the kernel writes to it, through the configured GitHub identity. The branch carries `results/leader.json` and `BENCHMARKS.md`, the leaderboard and its rendered view. Each pending submission is one JSON file under `results/submissions/`, and every attempt's report sits under `reports/`. Each ledger write is a compare-and-swap on the branch head, retried when the head moved; the [concurrency page](concurrency.md) covers the mechanism.
 
 ## Research-line branches
 

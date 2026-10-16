@@ -11,11 +11,11 @@ The reviewer posts on pull requests opened from branches in your own
 repository. PRs from forks are skipped, because they must not reach your
 API key.
 
-Nothing from a pull request is ever executed. The workflow checks out the PR
-head read-only and the reviewer reads it as data, alongside the diff. Files
-a model backend would auto-load as instructions, such as `CLAUDE.md` or
-`.claude/`, are renamed before the session starts, so PR content can never
-become instructions.
+The session runs on an ephemeral GitHub runner and the reviewer holds a shell,
+so it may run code from the checkout while it investigates. That runner is
+the boundary, not a promise not to execute. Files a model backend would
+auto-load as instructions, such as `CLAUDE.md` or `.claude/`, are renamed
+before the session starts, so PR content never becomes instructions.
 
 Each finding names a file and a line, states its evidence, and carries a
 confidence level and a kind: `change`, `suggestion`, `question` or `note`.
@@ -49,6 +49,7 @@ jobs:
     with:
       reviewer_ref: v0             # keep on the same ref as the line above
       bot_login: my-bot            # PRs by this login are never reviewed
+      model: claude-sonnet-5-5     # required: the claude backend has no default
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
 ```
@@ -60,6 +61,9 @@ jobs:
 
 Open a pull request and a review appears within a minute or two. The same
 file ships as [`examples/review.yml`](https://github.com/outerloop-science/outerloop/blob/main/examples/review.yml).
+The claude backend has no built-in model, so a review workflow needs `model`
+or a repository variable `OUTERLOOP_CLAUDE_MODEL` it inherits; without one,
+every PR gets a could-not-run stub.
 
 ## Re-review and opt-out
 
@@ -153,6 +157,7 @@ jobs:
     uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@v0
     with:
       reviewer_ref: v0
+      model: claude-sonnet-5-5   # required: the claude backend has no default
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
 ```
@@ -167,13 +172,14 @@ given to an agent as work orders.
 
 Every review runs through a least-token split, whatever the backend:
 
-- The session job holds read-only permissions. Only the chosen backend's
-  model key enters it, so even a backend that can read other processes finds
-  nothing worth stealing.
+- The session job runs on an ephemeral runner with read-only permissions.
+  Only the chosen backend's model key enters it, so even a backend that can
+  read other processes finds nothing worth stealing.
 - A separate posting job holds the write token and runs no model. It
   re-validates the findings and renders them with sanitization.
-- Both jobs treat PR content as untrusted data, never as instructions, and
-  neither executes the PR's code.
+- Both jobs treat PR content as untrusted data, never as instructions.
 
-A crafted PR can at most elicit a misleading advisory comment, which you
-read with the same skepticism as any review.
+A crafted PR can spend the reviewer's model key and some runner minutes.
+The ephemeral runner is discarded after the session, and the write token
+never enters it. The worst a crafted PR can post is a misleading advisory
+comment, which you read with the same skepticism as any review.
