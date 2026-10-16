@@ -292,10 +292,11 @@ def read_request(workspace: Path) -> SyscallRequest | None:
         raise SyscallError(f"syscall.json is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise SyscallError("syscall.json must be a JSON object")
-    # Author requests cannot carry a judge verdict.
-    if data.get("type") not in ("sleep", "message", "end"):
+    # Author requests cannot carry a judge verdict. `"end"` is the legacy
+    # spelling of `"stop"` (an older kernel's CLI wrote it; upgraded mid-run).
+    if data.get("type") not in ("sleep", "message", "stop", "end"):
         raise SyscallError(
-            f"expected a sleep, message or end syscall, got type {data.get('type')!r}"
+            f"expected a sleep, message or stop syscall, got type {data.get('type')!r}"
         )
     unknown = set(data) - {
         "type",
@@ -329,17 +330,20 @@ def read_request(workspace: Path) -> SyscallRequest | None:
         raise SyscallError("message syscall only accepts messages")
     withdraw = data.get("withdraw", "")
     if "withdraw" in data:
-        if data["type"] != "end":
-            raise SyscallError("withdraw only applies to end")
+        if data["type"] not in ("stop", "end"):
+            raise SyscallError("withdraw only applies to stop")
         if not isinstance(withdraw, str) or not withdraw.strip() or len(withdraw) > MAX_REPLY_CHARS:
             raise SyscallError(f"withdrawal reason must contain 1 to {MAX_REPLY_CHARS} chars")
     problem = ""
-    if data["type"] == "end":
-        # a conflicting end is refused and told, never a dead run
+    if data["type"] in ("stop", "end"):
+        # a conflicting stop is refused and told, never a dead run
         if data.get("submit"):
-            problem = "submit first, end after the verdict"
+            problem = "A submit is staged; `sleep` to have it measured. `stop` after the verdict."
         elif set(data) - {"type", "report", "messages", "withdraw"}:
-            problem = "end is final for the leg; it cannot accompany launch or sleep"
+            problem = (
+                "A launch is staged; `sleep` to run it. To stop the run instead, "
+                "run `cancel`, then `stop`."
+            )
     submit = data.get("submit", False)
     if not isinstance(submit, bool):
         raise SyscallError("submit must be a boolean")
@@ -435,7 +439,7 @@ def read_request(workspace: Path) -> SyscallRequest | None:
         launches=tuple(launches),
         messages=tuple(messages),
         sleep=data["type"] == "sleep",
-        end=data["type"] == "end",
+        end=data["type"] in ("stop", "end"),
         problem=problem,
         submit=submit,
         **claims,
@@ -683,9 +687,10 @@ def tool_update_note(
         "for a sibling, or --show <n> for a chain. Once a public message is staged the "
         "final message is not posted, "
         "and a code change is published only by `submit`. "
-        "`end [--report <file>]` ends without a PR, or posts the report and parks "
+        "The `end` verb is now `stop`. "
+        "`stop [--report <file>]` ends without a PR, or posts the report and parks "
         "with an open PR, at turn end. "
-        'Use `end --withdraw "<reason>"` to withdraw a superseded open PR. '
+        'Use `stop --withdraw "<reason>"` to withdraw a superseded open PR. '
         "Submit works in review and publishes a credited tree by fast-forward. "
         "It needs no prior launch. `--report <file>` is optional. The "
         "report explains your hypothesis, what you ran and measured, why this should "

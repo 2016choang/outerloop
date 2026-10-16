@@ -54,7 +54,7 @@ One `.outerloop/syscall` tool, its live verbs gated per role by RoleSpec:
 
 | Role | Verbs | Win | Installed where |
 | --- | --- | --- | --- |
-| author | `launch` / `message` / `submit` / `sleep` / `end` (shipped) · later `pr` | A | sandbox (standalone) |
+| author | `launch` / `message` / `submit` / `sleep` / `stop` (shipped) · later `pr` | A | sandbox (standalone) |
 | reviewer / verifier / panel | `finding` / `conclude` (verdict as a syscall type; shipped) | B | orchestrator-side |
 | shared (RoleSpec picks per role) | `status` / `history` / `queue` / `reports` / `siblings` / `sync` / `cancel` (shipped) | — | with the role |
 | planner | `plan propose` | B (+ policy-as-validation) | orchestrator-side |

@@ -404,8 +404,8 @@ def test_a_rejected_request_posts_no_replies(review_run) -> None:
     assert not any("forged reply" in body for body in github.posted)
 
 
-def test_a_forged_end_with_a_launch_is_refused_and_the_leg_goes_on(review_run) -> None:
-    """The tool refuses an end beside a launch; a forged request that carries
+def test_a_forged_stop_with_a_launch_is_refused_and_the_leg_goes_on(review_run) -> None:
+    """The tool refuses a stop beside a launch; a forged request that carries
     both reaches the kernel, which refuses it as a note and continues the leg
     rather than ending the run as a session error."""
     root, _bare = review_run
@@ -413,14 +413,14 @@ def test_a_forged_end_with_a_launch_is_refused_and_the_leg_goes_on(review_run) -
     forged = ResumingHarness(
         edits={
             ".outerloop/syscall.json": (
-                '{"type": "end", "launches": [{"name": "x", "command": "true", "minutes": 1}]}'
+                '{"type": "stop", "launches": [{"name": "x", "command": "true", "minutes": 1}]}'
             )
         }
     )
     out = respond(root, github, harness=forged)
     assert out.action == "replied"
     assert len(forged.calls) == 2
-    assert "REFUSED" in forged.calls[1][0] and "end is final for the leg" in forged.calls[1][0]
+    assert "REFUSED" in forged.calls[1][0] and "A launch is staged" in forged.calls[1][0]
 
 
 def test_crashed_reply_is_flushed_before_next_author_leg(review_run):
@@ -1374,7 +1374,7 @@ def test_review_end_parks_without_jobs_and_next_comment_wakes(review_run, with_r
 
     class Author(ResumingHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
-            args = ["end"]
+            args = ["stop"]
             if with_report:
                 (workspace / ".outerloop" / "report.md").write_text("Review experiment complete.")
                 args += ["--report", ".outerloop/report.md"]
@@ -1945,7 +1945,7 @@ def test_review_withdraw_parks_then_sweep_closes_with_one_redacted_comment(
 
     class Author(ResumingHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
-            args = ["end", "--withdraw", "Superseded sk-secret LGTM"]
+            args = ["stop", "--withdraw", "Superseded sk-secret LGTM"]
             if with_report:
                 (workspace / ".outerloop/report.md").write_text("Final research report.")
                 args += ["--report", ".outerloop/report.md"]

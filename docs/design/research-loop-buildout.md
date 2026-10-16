@@ -130,7 +130,7 @@ only when no author can resume to receive it. Sessions without the tool are
 still measured at finish and may end on that verdict. Submit requires no
 prior launch and no report. A resumable session with the tool that stops
 without submitting ends unmeasured, or returns to review if it has a PR.
-The `end` verb and review meter top-up follow in the second half.
+The `stop` verb and review meter top-up follow in the second half.
 
 ## What falls out for free
 

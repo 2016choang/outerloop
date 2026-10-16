@@ -6103,7 +6103,7 @@ def test_end_report_seals_notebook_releases_claim_and_posts_replies(tmp_path, ta
             session = super().run(brief_text, workspace, resume_session_id)
             (workspace / ".outerloop" / "ending.md").write_text("No gain; retain the ablation.")
             assert main(["message", "The ablation is complete."], root=workspace) == 0
-            assert main(["end", "--report", ".outerloop/ending.md"], root=workspace) == 0
+            assert main(["stop", "--report", ".outerloop/ending.md"], root=workspace) == 0
             return session
 
     github = CommentingGitHub()
@@ -6211,7 +6211,7 @@ def test_end_after_submitted_gate_keeps_verdict_note(tmp_path, monkeypatch):
     class Author(ScriptedHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
             assert "did NOT clear the gate" in brief_text
-            assert main(["end"], root=workspace) == 0
+            assert main(["stop"], root=workspace) == 0
             return super().run(brief_text, workspace, resume_session_id)
 
     outcome = resume_run(
@@ -7746,7 +7746,9 @@ def test_endpoint_unavailable_parks_and_recovers(
             github=CommentingGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_100,
-            harness=ScriptedHarness(edits={".outerloop/syscall.json": json.dumps({"type": "end"})}),
+            harness=ScriptedHarness(
+                edits={".outerloop/syscall.json": json.dumps({"type": "stop"})},
+            ),
             spec=author_spec(),
         )
 
@@ -7887,7 +7889,7 @@ def test_scope_rejected_tree_never_reaches_active_line(
                     json.dumps({"type": "sleep", "submit": True, "report": "candidate"})
                 )
             elif ending == "explicit-end":
-                (workspace / ".outerloop/syscall.json").write_text('{"type":"end"}')
+                (workspace / ".outerloop/syscall.json").write_text('{"type":"stop"}')
             return ScriptedHarness(edits={}).run(brief_text, workspace)
 
     def no_snapshot(*args, **kwargs):

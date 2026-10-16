@@ -195,10 +195,10 @@ def test_read_request_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
     # a sleep is one syscall TYPE; a file with no type (a target-committed
     # booby-trap) or another type (a verdict) is not a sleep and is refused.
     write_req(tmp_path, {"launches": []}, typed=False)
-    with pytest.raises(SyscallError, match="expected a sleep, message or end syscall"):
+    with pytest.raises(SyscallError, match="expected a sleep, message or stop syscall"):
         read_request(tmp_path)
     write_req(tmp_path, {"type": "verdict", "findings": []}, typed=False)
-    with pytest.raises(SyscallError, match="expected a sleep, message or end syscall"):
+    with pytest.raises(SyscallError, match="expected a sleep, message or stop syscall"):
         read_request(tmp_path)
 
 
@@ -1198,10 +1198,11 @@ def test_budget_is_never_written_into_a_channel_the_target_tracks(tmp_path, capl
     "payload",
     [
         {"type": "sleep", "withdraw": "reason"},
-        {"type": "end", "withdraw": ""},
-        {"type": "end", "withdraw": " "},
-        {"type": "end", "withdraw": 1},
-        {"type": "end", "withdraw": "x" * 20001},
+        {"type": "stop", "withdraw": ""},
+        {"type": "stop", "withdraw": " "},
+        {"type": "end", "withdraw": ""},  # the legacy spelling is checked too
+        {"type": "stop", "withdraw": 1},
+        {"type": "stop", "withdraw": "x" * 20001},
     ],
 )
 def test_invalid_withdraw_request(tmp_path, payload):
@@ -1211,7 +1212,8 @@ def test_invalid_withdraw_request(tmp_path, payload):
 
 
 def test_legacy_end_request_remains_valid(tmp_path):
-    # Pre-withdrawal ABI fixture; absent optional fields retain their meaning.
+    # A staged request an older kernel's CLI wrote before the verb was renamed
+    # `stop`; the kernel honours the legacy `"end"` spelling of the type.
     for _ in range(2):
         write_req(tmp_path, {"type": "end", "report": "done", "messages": []}, typed=False)
         request = read_request(tmp_path)
