@@ -26,8 +26,7 @@ Facts from one real deployment, kept generic.
 - **Credentials.** One service account per node class. The controller may
   call the model API; CPU nodes (sessions) may; GPU nodes (agent experiment
   code) get no project roles, so agent code cannot reach the model API with
-  the cloud credential. This is the node-class half of the gateway's role
-  isolation.
+  the cloud credential. This complements the gateway's role-scoped keys.
 - **Spot.** Spot GPU nodes are preempted: jobs end NODE_FAIL or get
   requeued. A measurement must not read a previous attempt's files. Runs
   lost to infrastructure were replaced, not counted.
@@ -45,7 +44,8 @@ Facts from one real deployment, kept generic.
   hand-written config (gateway config, hooks, units, timers) to the
   operator's private ops repo when it is created: at teardown we lost the
   gateway config because only results were archived.
-- **Operator time.** Cloud logins expire after roughly twelve hours;
+- **Operator time.** The operator's cloud login expired after about twelve
+  hours on that provider;
   anything that needs the operator's credential waits for the next login.
   Infrastructure apply (Terraform) is the operator's step, outside the
   kernel.
@@ -53,19 +53,21 @@ Facts from one real deployment, kept generic.
 ### Kernel gaps the run exposed (0.4 work)
 
 - **Spot preemption and requeue-safe measurement.** Already in
-  [Unreleased]: an eval that ends with no result is an infrastructure
-  failure, retried twice uncharged, then parked (#474). Remaining: a
-  requeued job must not read files a previous attempt left, which matters
-  once one eval spans several nodes. The accelerators note makes the same
-  call for spot TPUs ([accelerators.md](accelerators.md), "Preemption").
+  [Unreleased]: a baseline, or an eval that completes cleanly without a
+  result, is an infrastructure failure, retried twice uncharged, then parked
+  (#474). A candidate eval killed by preemption (`NODE_FAIL`, `PREEMPTED`)
+  still fails as the measure's own error. The policy for spot is set in
+  [accelerators.md](accelerators.md) ("Preemption"): fail and report on
+  wake, charge the time, and add automatic retries only with cumulative
+  accounting; Slurm on a cloud follows it. Any requeue must not read files
+  a previous attempt left.
 - **Cost capture for every backend.** Per-token model spend is priced from
-  the operator table (`OUTERLOOP_TOKEN_PRICES`, [Unreleased]); what remains
-  is capturing node cost per backend and measuring what is not metered yet —
-  NAT egress above all.
+  the operator table (`OUTERLOOP_TOKEN_PRICES`, [Unreleased]). Node cost and
+  NAT egress stay operational reporting, outside the kernel's budgets, as
+  [accelerators.md](accelerators.md) decides ("Money in the kernel: no").
 - **The model gateway.** Merged design ([model-gateway.md](model-gateway.md),
-  #464); build planned for 0.4, with this deployment as its first host. The
-  run exposed exactly the gap that note records: role isolation and
-  accounting move into the gateway.
+  #464); build planned for 0.4, with this deployment as its first host. Role
+  isolation and per-key metering move into the gateway.
 
 ## Part 2 — Long term: clouds without Slurm
 
@@ -74,11 +76,13 @@ TPU backend in [accelerators.md](accelerators.md)), Kubernetes, serverless
 GPUs — or when capacity is spread over regions and jobs should chase
 wherever it is cheapest. Slurm on a cloud stays supported; the Slurm backend
 is never retired. [external.md](external.md) names the `compute` interface
-and the storage interface this part builds on, and the seam is already the
-right shape: a backend is five operations — submit, poll, fetch, cancel,
-report capacity — that Slurm and LocalCompute implement today, and the
-kernel's loop only submits then polls, never reaching into a running job,
-so a new backend drops in with no kernel change.
+and the storage interface this part builds on. The kernel's loop only
+submits then polls, never reaching into a running job, but today's `Compute`
+protocol is Slurm-shaped (`compute.py`): queue and lane queries beside
+submit and cancel, a `JobSpec` with account, partition, dependencies and
+arrays, and results read over the shared filesystem. A backend without
+Slurm needs a narrower spec and an explicit result fetch; the per-job TPU
+backend in accelerators.md faces the same work.
 
 ### git in, artifact out
 
@@ -111,18 +115,18 @@ and dies with it.
 The resident is a cheap CPU orchestrator — wake on cadence, read run records,
 submit, poll, publish the board. It needs outbound network and no GPU, and
 it does not need to sit where experiments run. Cloud does not move the
-resident; it moves the experiments, and the backend is a per-run choice
-carried by the contract, so one resident runs cheap jobs on Slurm and bursts
-GPU-heavy ones to cloud at the same time. The resident-chain hardening is
-unchanged.
+resident; it moves the experiments. Today the backend is chosen per
+deployment. Choosing it per run, so one resident runs cheap jobs on Slurm
+and bursts GPU-heavy ones to cloud, is proposed here and would revisit
+[multi-cluster.md](multi-cluster.md)'s tier-3 non-goal (open decision 6).
 
 For a cloud-only adopter the same loop lives as a small always-on CPU VM (a
 cloud VM has no walltime, so the Slurm handover chain is unnecessary) or a
 serverless cron tick (near-zero idle cost; the tick is stateless per
 invocation). `outerloop start` provisions the resident once ("job zero") and
 the laptop goes away. Where the tick lives is already a deployment choice
-(`OUTERLOOP_TICK_HOST`, [multi-cluster.md](multi-cluster.md)); a cloud
-controller VM is one more host of that shape.
+(`OUTERLOOP_TICK_HOST`: `resident` or `login` today); a cloud controller VM
+runs the `login` shape.
 
 ### Durable state without a database
 
@@ -178,7 +182,8 @@ code; public sees the report, never the raw trace, and only through the
 existing sanitizer chain. Bench-shaped (hermes' `save_sample`) so one store
 feeds the reviewer bench and the lessons distiller. Retention: merged-win
 traces forever, the rest aged out or downsampled. A trace streams to a local
-file and flushes at checkpoints, so a preempted job still leaves what it got.
+file and is uploaded at checkpoints, so a preempted job still leaves what it
+got; a spot node's local disk dies with it.
 
 Richer measurement: standardize the emission, do not parse stdout — one
 format the eval harness writes (a `metrics.jsonl` trajectory plus a final
@@ -195,3 +200,5 @@ optional live view.
 4. **Retention** for traces, curves and checkpoints.
 5. **Sequencing** — traces-as-artifacts and richer measurement are useful on
    Slurm independent of cloud; decide whether they ship earlier on their own.
+6. **Backend per run** — one resident driving Slurm and a cloud at once, or
+   one deployment per backend (multi-cluster.md's tier 2).
