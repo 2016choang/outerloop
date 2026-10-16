@@ -2,10 +2,11 @@
 # .github/workflows/review.yml to get an AI code review on every pull request.
 #
 # It posts advisory findings as a PR review. It NEVER approves, never blocks
-# your CI, and never runs your PR's code — it only reads the diff. It reviews
-# pull requests from branches in THIS repository; PRs from forks are skipped
-# (fork-PR review is a planned addition). The model key lives only in a
-# read-only, write-tokenless job.
+# your CI, and never fails your build. The session runs on an ephemeral
+# runner: it may run code while investigating, but its only secret is the
+# reviewer's model key, and the write token lives in a separate posting job.
+# It reviews pull requests from branches in THIS repository; PRs from forks
+# are skipped. The model key lives only in the read-only session job.
 #
 # Setup (see docs/reviewer.md): (1) have a bot account whose PRs are skipped,
 # (2) add this file, (3) set the ANTHROPIC_REVIEWER_KEY repo secret.
@@ -34,6 +35,6 @@ jobs:
       # reviews its own PRs). Use your own bot/app login.
       bot_login: your-bot-login
       backend: claude          # claude | hermes | codex
-      # model: claude-opus-5   # optional; the backend default is used if unset
+      model: claude-sonnet-5-5   # required for claude: it has no default model
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}

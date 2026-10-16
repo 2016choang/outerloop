@@ -6,6 +6,12 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Documentation
+
+- The docs site is now a manual: getting started, task guides, concept pages
+  with figures, and reference pages for contract fields, the operator CLI,
+  agent syscalls, inbox messages and environment variables.
+
 ### Changed
 
 - The author verb `end` is renamed `stop` (`stop --report FILE`,
@@ -480,7 +486,7 @@ Operator actions (everything else needs no action; details in each entry):
   selections without changing legacy routes. New endpoint authors save
   `model[endpoint=profile]` selectors; keep those profiles until runs finish, and finish
   endpoint runs before rolling back. Hermes source/runtime must be upgraded
-  with the harness. See [compatibility and rollback](docs/endpoints.md#upgrade-and-rollback).
+  with the harness. See [compatibility and rollback](docs/endpoints.md#changing-a-profile).
 
 ### Fixed
 

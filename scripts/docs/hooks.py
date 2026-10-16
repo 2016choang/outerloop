@@ -154,7 +154,9 @@ def on_page_markdown(markdown, page, config, files):
         if source is None and repo_path.startswith("docs/"):
             source = repo_path[5:]
         found = files.get_file_from_path(source) if source else None
-        return (source, found.url) if found else None
+        if found is None or found.inclusion.is_excluded():
+            return None  # off the site: the link goes to GitHub
+        return source, found.url
 
     # The page renders right after this hook; the link extension reads it then.
     _page = Page(repo, site, page.url, lookup)
