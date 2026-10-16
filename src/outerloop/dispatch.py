@@ -421,7 +421,7 @@ def write_eval_job(
         # artifact — including a leftover extracted tree — goes before submission
         for stale in ("exit-code", "stdout", "stderr", "setup.log", "submitted", "artifacts.log"):
             (task_dir / stale).unlink(missing_ok=True)
-        for stale_node in task_dir.glob("node-*"):  # a multi-node eval's per-node results
+        for stale_node in task_dir.glob("node-[0-9]*"):  # a multi-node eval's per-node results
             stale_node.unlink(missing_ok=True)
         shutil.rmtree(task_dir / "tree", ignore_errors=True)
         shutil.rmtree(task_dir / "artifacts", ignore_errors=True)
@@ -662,6 +662,10 @@ def _coordinator_lines(node_script: Path) -> list[str]:
     failure) as the eval's."""
     return [
         "export EV REPO",
+        # Slurm may requeue the job: nothing an earlier attempt left (a node's
+        # code, the published result) may read as this attempt's
+        'rm -rf "$EV"/node-[0-9]* "$EV/stdout" "$EV/stderr" "$EV/exit-code" '
+        '"$EV/setup.log" "$EV/artifacts" "$EV/artifacts.log"',
         '[ -s "$EV/command.txt" ] || { echo 96 > "$EV/exit-code"; exit 0; }',
         'OUTERLOOP_NNODES="${SLURM_JOB_NUM_NODES:-1}"',
         'OUTERLOOP_MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)',
@@ -669,10 +673,11 @@ def _coordinator_lines(node_script: Path) -> list[str]:
         "OUTERLOOP_MASTER_PORT=$((29500 + ${SLURM_JOB_ID:-0} % 1000))",
         "export OUTERLOOP_NNODES OUTERLOOP_MASTER_ADDR OUTERLOOP_MASTER_PORT",
         "trap 'echo 143 > \"$EV/exit-code\"; exit 0' TERM INT HUP",
-        # srun no longer inherits the batch job's --cpus-per-task; a step
+        # srun no longer inherits the batch job's --cpus-per-task (unset fails
+        # loudly under set -u rather than giving every node one core); a step
         # otherwise gets every GPU and the memory the job holds on its node
         'srun --nodes="$OUTERLOOP_NNODES" --ntasks="$OUTERLOOP_NNODES" --ntasks-per-node=1 '
-        '--cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" --kill-on-bad-exit=1 '
+        '--cpus-per-task="$SLURM_CPUS_PER_TASK" --kill-on-bad-exit=1 '
         f"sh {shlex.quote(str(node_script))}",
         "SRUN_RC=$?",
         'cp "$EV/node-0.stdout" "$EV/stdout" 2>/dev/null || : > "$EV/stdout"',

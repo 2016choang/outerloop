@@ -95,6 +95,11 @@ PROTECTED_EVAL_ENV = frozenset(
         "PYTHONPATH",
         "PYTHONHOME",
         "PYTHONSTARTUP",
+        # a multi-node eval's place in its rendezvous (dispatch sets these)
+        "NNODES",
+        "NODE_RANK",
+        "MASTER_ADDR",
+        "MASTER_PORT",
     }
 )
 # ...and whole families: any UV_* steers uv's env/cache resolution, and any
@@ -103,9 +108,18 @@ PROTECTED_EVAL_ENV = frozenset(
 # enumerate them.
 # APPTAINER_* configures the HOST-side apptainer CLI (bind paths, home,
 # containment) — same family logic, different side of the boundary.
-# LD_/DYLD_ steer the dynamic loader; GIT_ redirects repo resolution.
+# LD_/DYLD_ steer the dynamic loader; GIT_ redirects repo resolution; PET_*
+# are torchrun's defaults, which a multi-node eval sets for its rendezvous.
 # (PYTHONHASHSEED stays allowed — it IS a seed, and a legitimate seed_env.)
-PROTECTED_ENV_PREFIXES = ("UV_", "APPTAINERENV_", "APPTAINER_", "LD_", "DYLD_", "GIT_")
+PROTECTED_ENV_PREFIXES = (
+    "UV_",
+    "APPTAINERENV_",
+    "APPTAINER_",
+    "LD_",
+    "DYLD_",
+    "GIT_",
+    "PET_",
+)
 
 
 def managed_eval_env(name: str) -> bool:

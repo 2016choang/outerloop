@@ -665,7 +665,7 @@ def _fake_slurm(tmp_path: Path, nodes: int, job_id: int = 12345) -> dict[str, st
     import os
 
     fake = tmp_path / "fake-slurm"
-    fake.mkdir()
+    fake.mkdir(parents=True)
     (fake / "scontrol").write_text(
         "#!/bin/sh\n" + "".join(f"echo node-{chr(97 + k)}\n" for k in range(nodes))
     )
@@ -758,6 +758,34 @@ def test_multi_node_eval_runs_on_every_node_and_reports_node_zero(tmp_path):
 def test_multi_node_eval_reports_the_failing_node(tmp_path, command, expected):
     ev = _multi_node_eval(tmp_path, command)
     assert (ev / "exit-code").read_text().strip() == expected
+
+
+def test_a_requeued_multi_node_eval_never_reads_the_earlier_attempt(tmp_path):
+    """Slurm may requeue a job: node 1 finished (0) in the first attempt, then is
+    killed outright in the second and leaves nothing. Its stale code must not
+    read as this attempt's success."""
+    second = tmp_path / "second-attempt"
+    ev = _multi_node_eval(
+        tmp_path,
+        f'if [ -e {second} ] && [ "$NODE_RANK" = 1 ]; then kill -9 $PPID; fi; echo "{{}}"',
+    )
+    assert (ev / "exit-code").read_text().strip() == "0"
+    assert (ev / "node-1.exit-code").read_text().strip() == "0"
+    second.touch()
+    subprocess.run(["sh", str(ev / "job.sh")], env=_fake_slurm(tmp_path / "again", 2), check=True)
+    assert not (ev / "node-1.exit-code").exists()
+    assert (ev / "exit-code").read_text().strip() == "137"  # srun's code, not node 1's stale 0
+
+
+def test_multi_node_eval_fails_loudly_without_a_cpu_count(tmp_path):
+    """No silent one-core fallback: an unset SLURM_CPUS_PER_TASK stops the job
+    before srun, with no result to read."""
+    ev = _multi_node_eval(tmp_path, 'echo "{}"')
+    env = _fake_slurm(tmp_path / "again", 2)
+    del env["SLURM_CPUS_PER_TASK"]
+    result = subprocess.run(["sh", str(ev / "job.sh")], env=env, capture_output=True, text=True)
+    assert result.returncode != 0 and "SLURM_CPUS_PER_TASK" in result.stderr
+    assert not (ev / "exit-code").exists() and not (ev / "node-0.exit-code").exists()
 
 
 def test_multi_node_artifacts_come_from_node_zero(tmp_path):

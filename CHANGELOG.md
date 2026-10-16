@@ -55,7 +55,9 @@ Versions follow [SemVer](https://semver.org).
   job `srun`s one task per node; each runs the command in its own checkout
   with `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT` and torchrun's
   `PET_*` defaults set, node 0's output is the measurement, and a failing node
-  stops the rest. GPU-hour charges, budget checks, sweep pacing and the
+  stops the rest. A requeued job clears the earlier attempt's per-node results
+  before it starts, and those rendezvous names (and any `PET_*`) are refused as
+  a `seed_env`. GPU-hour charges, budget checks, sweep pacing and the
   operator's GPU ceiling count `nodes x gpus`. Uncontained Slurm deployments
   only: a contained or local deployment refuses to launch attempts on such a
   contract. Upgrading: one-node benchmarks keep their measurement signatures,

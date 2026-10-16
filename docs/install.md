@@ -857,7 +857,10 @@ panel is off unless you set `OUTERLOOP_PANEL_UNCONTAINED=1`, a Codex or Hermes
 author needs the image (`start` refuses one), and a session can read any file
 your account can, the bot's credential and the model key files included. That
 reach also covers the evaluator's tree and the kernel's own state, so the
-measurement integrity containment provides weakens along with key secrecy. Use
+measurement integrity containment provides weakens along with key secrecy: the
+benchmark command can write its own eval directory, and on a multi-node
+benchmark any node can write every node's result files, so a measurement is
+only as trustworthy as the author whose code ran. Use
 it where the site already confines processes, or where that exposure is
 acceptable to you.
 

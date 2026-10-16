@@ -368,6 +368,10 @@ roadmap: docs/roadmap.md
     # a multi-node job only exists dispatched, like a GPU one
     with pytest.raises(ValueError, match=r"2 nodes .*dispatch"):
         bench(", nodes: 2")
+    # the rendezvous variables a multi-node eval sets are never a contract's seed
+    for name in ("NODE_RANK", "NNODES", "MASTER_ADDR", "MASTER_PORT", "PET_NNODES"):
+        with pytest.raises(ValueError, match="managed environment"):
+            bench(f", seed_env: {name}")
 
 
 def test_review_topup_defaults_and_custom_ceilings():
