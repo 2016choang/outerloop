@@ -84,7 +84,7 @@ Outerloop keeps its whole state in plain files and git branches, with no databas
 <text x="978.3" y="406.5" class="ct" text-anchor="middle">O_EXCL · expires</text>
 <line x1="564" y1="422" x2="1046" y2="422" class="rule"/>
 <text x="568" y="450" class="mono" text-anchor="start">runs/[run-id]/inbox/000007.json</text>
-<text x="568" y="472" class="bl" text-anchor="start">messages, delivered once</text>
+<text x="568" y="472" class="bl" text-anchor="start">messages, at least once, in order</text>
 <rect x="899.8" y="457" width="142" height="22" rx="11" class="chip"/>
 <text x="970.9" y="472.5" class="ct" text-anchor="middle">flock · dedupe key</text>
 
@@ -203,7 +203,7 @@ Submitted jobs never run from the agent's live workspace. At each launch or meas
 
 ## Container images
 
-One Apptainer image, `agent-py312.sif`, serves the whole system. It is fetched once from Hugging Face to `~/outerloop-images`, or named explicitly with `OUTERLOOP_IMAGE` (see the [environment reference](reference/environment.md)). Sessions run inside it with the workspace, the run home and the harness's own files bound in. Compute-node jobs run inside it with a clean environment, GPUs exposed, a seeded `uv` cache and a worktree that is deleted at exit. Harness binaries are pinned by version and SHA-256.
+One Apptainer image, `agent-py312.sif`, serves the whole system. It is fetched once from Hugging Face to `~/outerloop-images`, or named explicitly with `OUTERLOOP_IMAGE` (see the [environment reference](reference/environment.md)). Contained sessions run inside it with the workspace, the run home and the harness's own files bound in. Compute-node jobs run inside it with a clean environment, GPUs exposed, a seeded `uv` cache and a worktree that is deleted at exit. Harness binaries are pinned by version and SHA-256. A local Claude run can also go without the image, uncontained, as [Install](install.md) describes.
 
 ## No database by design
 

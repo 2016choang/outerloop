@@ -195,7 +195,9 @@ One resident loop, either a long-lived cluster job or a local process, does all 
 
 ## The trust boundary
 
-Everything inside the sandbox is untrusted. An author session runs in a container with no GitHub credentials, so it cannot push, merge or comment. Its whole workspace is mounted writable, and scope is not a per-path sandbox: the kernel rejects a candidate whose changes fall outside the paths the contract allows. Three places are forbidden everywhere: the contract itself, the roadmap and `.github/`. Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
+Everything inside the sandbox is untrusted. A contained author session runs in the image with no GitHub credentials, so it cannot push, merge or comment. An uncontained local session runs as the operator's user instead (see [Install](install.md)). Its whole workspace is mounted writable, and scope is not a per-path sandbox: the kernel rejects a candidate whose changes fall outside the paths the contract allows. The contract itself, the roadmap and `.github/` are forbidden everywhere, and so is a guidance directory the contract declares.
+
+Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
 
 Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it is the only writer to the target repository, through the configured GitHub identity, an App or a fine-grained PAT. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
 

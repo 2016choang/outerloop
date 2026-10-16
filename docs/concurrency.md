@@ -12,11 +12,11 @@ A job therefore runs exactly the tree that was submitted, whoever edits the work
 
 ## Inbox append and the delivered cursor
 
-Jobs, the kernel, the panel and GitHub all append to one inbox, and a wake must deliver every message exactly once. A wake can be killed mid-session or run twice.
+Jobs, the kernel, the panel and GitHub all append to one inbox, and a wake must never lose a message, even when a crash makes delivery repeat. A wake can be killed mid-session or run twice.
 
 Appends happen under a file lock, and each message carries a dedupe key. Appending a key that already exists returns the stored message unchanged, so a retried job or a repeated sweep keeps the first copy. Each message lands in its own file named by a sequence number. The run record holds a delivered cursor, the sequence number of the last message a completed session leg saw. A wake delivers only files past that cursor, and delivery stops at a damaged entry, so the cursor can never move past a message the session did not see.
 
-Every message is therefore delivered once, in order. A wake killed mid-session delivers its messages again, because the cursor only advances after a completed leg. The session tolerates the repetition, so no message is lost to a crash.
+Every message is therefore delivered at least once, in order. A wake killed mid-session delivers its messages again, because the cursor only advances after a completed leg. The session tolerates the repetition, so no message is lost to a crash.
 
 ## Ledger compare-and-swap
 

@@ -168,7 +168,7 @@ An agent sends to three destinations with [`message`](reference/syscalls.md#mess
 
 The kernel routes every one of them, and the agent never posts to the thread or writes another run's inbox itself.
 
-Routing has limits. The recipient must be a live run on the same target, and the contract can disable inter-agent messages with `channels.messages` on either side. A leg may stage at most eight messages of 20,000 characters each, and one sender may have at most four messages waiting in a recipient's inbox. A message that cannot be routed comes back as a kernel note saying why.
+Routing has limits. The recipient must be a live run on the same target, and the contract can disable inter-agent messages with `channels.messages` on either side. A leg may stage at most eight messages of up to 20,000 characters each, within a 64 KiB request, and one sender may have at most four messages waiting in a recipient's inbox. A message that cannot be routed comes back as a kernel note saying why.
 
 ## An inbox, not a chat
 
