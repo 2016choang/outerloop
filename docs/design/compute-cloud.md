@@ -155,16 +155,16 @@ native per-vendor backends only where a meta-provider does not reach.
 
 Slurm gave lifecycle, cost and security for free; cloud makes them explicit.
 Ephemeral per-job first, a warm pool only if cold-start latency bites.
-Teardown is load-bearing — you pay per second, and a box holding
-credentials should not outlive its job — with a per-run dollar cap.
+Each job's machine is torn down when the job ends: it costs money while it
+runs, and it holds credentials.
 Credentials are the adopter's own on their rented box, but short-lived
 scoped tokens rather than long-lived ones.
 
 ### The run-artifact store
 
-A run produces a bundle of artifacts, not a scalar, and they all fit the
-git+object-store substrate: results, reports, traces and measurement
-trajectories are artifacts a job emits, keyed by run_id. This is better even
+A run produces more than a scalar: results, reports, traces and
+measurement trajectories, each an artifact the job emits, keyed by run_id,
+in the object store. This is better even
 on Slurm, where traces and curves live in run dirs today and get reaped;
 first-class object-store artifacts are durable and linkable. Split by shape:
 
