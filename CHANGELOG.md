@@ -8,6 +8,13 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- The author verb `end` is renamed `stop` (`stop --report FILE`,
+  `stop --withdraw REASON`), with no alias: agents read `end` as "end this
+  turn" and called it when they meant to wait for results, so the refusals
+  it hit now each name the next step (`sleep`, `cancel`, `stop`). Upgrading:
+  a staged request an older kernel's CLI wrote with `"type": "end"` is
+  still honoured; the verb is now `stop`.
+
 - The git safety checks now run once at each hand-off between a session and
   kernel code (session start and return, wake start, panel read) instead
   of on every kernel git call. Kernel git calls after a hand-off reuse its

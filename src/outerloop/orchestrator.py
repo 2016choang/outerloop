@@ -1822,9 +1822,9 @@ def attempt_once(
                         {
                             "text": (
                                 "Your session ended without a syscall: nothing was staged "
-                                "(no launch, sleep, submit or end), so nothing ran and your "
+                                "(no launch, sleep, submit or stop), so nothing ran and your "
                                 "run is still open. Continue the work. If you are done, "
-                                "stage `end --report FILE` and end your turn."
+                                "stage `stop --report FILE` and end your turn."
                             ),
                         },
                         origin=inbox_dir.name,
@@ -1836,7 +1836,7 @@ def attempt_once(
             # Refresh ancestry before deriving the paths admitted below.
             no_backend = (
                 "sleep is not available here: this run has no compute backend for "
-                "launches; end your leg instead"
+                "launches; `stop` instead"
                 if launcher is None
                 and not (
                     (on_stop and request.submit)

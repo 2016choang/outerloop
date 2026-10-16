@@ -1014,7 +1014,7 @@ Use `outerloop rebind <run-id> --cancel` to remove a pending request (it refuses
 when none is pending). A new rebind replaces a failed request.
 The workspace, experiments, notebook, inbox and meter survive. A backend change
 starts a fresh session; a model change on the same backend resumes the session.
-The author's `end` syscall finishes its leg and may end the run; use rebind
+The author's `stop` syscall finishes its leg and may end the run; use rebind
 to continue its work under a different author. Rebind is an operator command,
 never an author syscall.
 
