@@ -141,9 +141,10 @@ def _stopping(payload: dict) -> bool:
 def _check_stop(root: Path, verb: str) -> None:
     abi = root / DIR / ABI
     if abi.exists() and _stopping(json.loads(abi.read_text())):
-        if verb == "submit":
-            raise ToolError("submit first, stop after the verdict")
-        what = "launching" if verb == "launch" else "sleeping"
+        what = {
+            "submit": "submitting",
+            "launch": "launching",
+        }.get(verb, "sleeping")
         raise ToolError(f"A stop is staged; run `cancel` to undo it before {what}.")
 
 
@@ -160,7 +161,11 @@ def cmd_stop(root: Path, args: argparse.Namespace) -> str:
     staged = _load_staged(root)
     abi = _dir(root) / ABI
     payload = json.loads(abi.read_text()) if abi.exists() else {}
-    if staged["submit"] or payload.get("submit"):
+    if payload.get("submit"):
+        raise ToolError(
+            "A submit is committed; end your turn to have it measured. `stop` after the verdict."
+        )
+    if staged["submit"]:
         raise ToolError(
             "A submit is staged; `sleep` to have it measured. `stop` after the verdict."
         )
@@ -568,8 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="syscall",
         description=(
             "research syscall tool. After staging, end your turn; the kernel acts "
-            "on what you staged. To wait for results, `sleep`; to stop the run "
-            "for good, `stop`."
+            "on what you staged. To wait for results, `sleep`; to stop the run, `stop`."
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -647,7 +651,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     st = sub.add_parser(
         "stop",
-        help="stop the run for good; then end your turn. The session ends here.",
+        help="stop the run (an open PR waits for review); then end your turn. "
+        "The session ends here.",
         description="The session ends here.",
     )
     st.add_argument("--withdraw", metavar="REASON", help="close your open PR and stop the run")

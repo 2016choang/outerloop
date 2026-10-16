@@ -183,5 +183,5 @@ against fakes before that.)
 parked run with a PR is the author receiving messages and doing whatever is
 necessary, not hard-coded steps. The lifecycle note carries the design: three
 states, one park-and-wake engine, the inbox and its message kinds, the
-author's moves (launch, sleep, submit, reply, end), what stays rigid, what is
+author's moves (launch, sleep, submit, reply, stop), what stays rigid, what is
 deleted, the open decisions and the four-stage sequencing.

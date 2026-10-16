@@ -420,7 +420,7 @@ def test_a_forged_stop_with_a_launch_is_refused_and_the_leg_goes_on(review_run) 
     out = respond(root, github, harness=forged)
     assert out.action == "replied"
     assert len(forged.calls) == 2
-    assert "REFUSED" in forged.calls[1][0] and "A launch is staged" in forged.calls[1][0]
+    assert "REFUSED" in forged.calls[1][0] and "A stop cannot carry launches" in forged.calls[1][0]
 
 
 def test_crashed_reply_is_flushed_before_next_author_leg(review_run):

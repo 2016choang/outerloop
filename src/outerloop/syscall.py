@@ -338,11 +338,14 @@ def read_request(workspace: Path) -> SyscallRequest | None:
     if data["type"] in ("stop", "end"):
         # a conflicting stop is refused and told, never a dead run
         if data.get("submit"):
-            problem = "A submit is staged; `sleep` to have it measured. `stop` after the verdict."
+            problem = (
+                "A stop cannot carry a submit; nothing was measured. "
+                "Run `submit`, then `sleep`; `stop` after the verdict."
+            )
         elif set(data) - {"type", "report", "messages", "withdraw"}:
             problem = (
-                "A launch is staged; `sleep` to run it. To stop the run instead, "
-                "run `cancel`, then `stop`."
+                "A stop cannot carry launches; nothing was run. "
+                "Stage them again and `sleep`, or `stop` alone."
             )
     submit = data.get("submit", False)
     if not isinstance(submit, bool):

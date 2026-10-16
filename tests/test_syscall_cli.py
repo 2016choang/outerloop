@@ -721,7 +721,7 @@ def test_stop_conflicts_in_both_orders_leave_the_session_usable(tmp_path, capsys
             note = capsys.readouterr().err
             if stop_first:
                 expected = (
-                    "submit first, stop after the verdict"
+                    "A stop is staged; run `cancel` to undo it before submitting."
                     if command == ["submit"]
                     else "A stop is staged; run `cancel` to undo it before "
                     + ("launching." if command[0] == "launch" else "sleeping.")
@@ -748,6 +748,20 @@ def test_stop_conflicts_in_both_orders_leave_the_session_usable(tmp_path, capsys
             assert main(["stop"], root=tmp_path) == 0
             request = read_request(tmp_path)
             assert request is not None and request.end
+    # A COMMITTED submit (sleep already ran) refuses differently: `sleep` again
+    # would replace the committed submit and launch with an empty checkpoint.
+    assert main(["cancel"], root=tmp_path) == 0
+    assert main(["submit"], root=tmp_path) == 0
+    assert main(["sleep"], root=tmp_path) == 0
+    capsys.readouterr()
+    assert main(["stop"], root=tmp_path) == 2
+    assert (
+        "A submit is committed; end your turn to have it measured. `stop` after the verdict."
+    ) in capsys.readouterr().err
+    assert main(["cancel"], root=tmp_path) == 0
+    assert main(["stop"], root=tmp_path) == 0
+    request = read_request(tmp_path)
+    assert request is not None and request.end
 
 
 def test_session_end_help(tmp_path, capsys):
@@ -756,7 +770,7 @@ def test_session_end_help(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         run(tmp_path, "--help")
     assert exc.value.code == 0
-    assert "To wait for results, `sleep`; to stop the run for good, `stop`." in " ".join(
+    assert "To wait for results, `sleep`; to stop the run, `stop`." in " ".join(
         capsys.readouterr().out.split()
     )
     for verb in ("sleep", "submit", "stop"):

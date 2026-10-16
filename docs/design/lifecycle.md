@@ -54,7 +54,7 @@ records; operators must confirm zero across every fleet before deployment.
 
 | State | Meaning | Leaves it |
 | --- | --- | --- |
-| `running` | a session is live in a job | the session ends: it slept (park), or it stopped (end) |
+| `running` | a session is live in a job | the session ends: it slept (park), or it stopped (stop) |
 | `parked` | no session; the run waits for jobs it launched, for messages, or both | a wake (the same session resumes), or a PR or operator ending |
 | `ended` | terminal, with a report | never |
 
