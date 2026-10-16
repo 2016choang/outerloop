@@ -1,252 +1,197 @@
 # Cloud compute and the run-artifact store
 
-**Status: design sketch, post-0.1 (2026-09-08). Nothing here ships in v0.1 —
-v0.1 runs on the two battle-tested compute backends, Slurm and LocalCompute.
-This note captures the shape a third-party/cloud compute backend would take and
-the storage substrate it forces, so the picture is ready when that version comes
-up. It is a deeper dive on two seams [external.md](external.md) already names —
-the `compute` interface and the storage interface — plus the metric schema
-sketched in the metric-taxonomy work.**
+**Status: two parts. Part 1 — Slurm on a cloud — is the 0.4 deployment ("the
+cloud release"). Part 2 — clouds without Slurm — is a direction, not
+scheduled. The Slurm backend is never retired.**
 
-The whole design turns on one observation: Slurm gave us a shared filesystem for
-free, and that shared filesystem was quietly doing three separate jobs — holding
-the kernel's own state, carrying the channel between the resident and its jobs,
-and storing every run's output. Cloud has no cheap fleet-wide shared filesystem,
-so the design is really just: give each of those three jobs a home that does not
-depend on a shared disk.
+## Part 1 — Now: Slurm on a cloud (0.4)
 
-## The seam is already the right shape
+The kernel's Slurm backend runs unchanged on a cloud-hosted Slurm cluster:
+the provider's Slurm blueprint tool builds it, and queues, accounts,
+partitions and the container runtime carry over. This is 0.4's answer to
+cloud compute: the easiest path, but not one every cloud offers — Part 2.
 
-A `compute` backend is about five operations: **submit** a job (resource spec +
-image + command), **poll** its state, **fetch** its output, **cancel**, and
-report **capacity/placement** (map a contract's `gpus:` to a machine). Slurm and
-LocalCompute already implement exactly this. The kernel's fire-and-wake loop only
-ever *submits then polls* — it never reaches into a running job — which is what
-lets a new backend drop in with no kernel change. Backends are peers; adding a
-cloud one never retires the Slurm one.
+### What the deployment needed
 
-## No shared filesystem: git in, artifact out
+Facts from one real deployment, kept generic.
 
-The central move. A cloud experiment job runs self-contained on its own local
-disk. Code crosses the boundary as **git** (the job clones the target + `pip
-install outerloop`, runs the session, seals the candidate, and `git push`es the
-branch — this is already how code flows). Results cross as **one artifact to an
-object store** (S3/GCS/R2), keyed by run_id, which the kernel pulls on wake. The
-syscall channel stays local to the box for the session's duration; only the
-terminal result leaves. Both sides reach the object store outbound, so the
+- **Topology.** One always-on controller VM runs the Slurm controller, an NFS
+  home, the kernel's instances, a watchdog and the model gateway
+  ([model-gateway.md](model-gateway.md)). Everything else autoscales from
+  zero: a CPU partition on on-demand nodes, and a spot GPU partition spread
+  over several zones. Nodes suspend after a few idle minutes.
+- **Network.** No external IPs (org policy). Egress goes through NAT; the
+  operator reaches the controller through the provider's IAP-style tunnel.
+  NAT egress was about 5% of the bill and was not metered.
+- **Credentials.** One service account per node class. The controller may
+  call the model API; CPU nodes (sessions) may; GPU nodes (agent experiment
+  code) get no project roles, so agent code cannot reach the model API with
+  the cloud credential. This is the node-class half of the gateway's role
+  isolation.
+- **Spot.** Spot GPU nodes are preempted: jobs end NODE_FAIL or get
+  requeued. A measurement must not read a previous attempt's files. Runs
+  lost to infrastructure were replaced, not counted.
+- **Images.** Node boot installed tools (apptainer, gh, uv) through the
+  package manager, which made boots slow: bake an image instead. The GPU
+  driver was too old for the default PyTorch CUDA wheels: pin a CUDA build
+  that matches the driver.
+- **Broken nodes.** A failed first boot leaves the node marked configured:
+  replace the VM, do not reboot it.
+- **Cost.** Per-hour nodes plus per-token model spend. A spend watchdog (a
+  systemd timer) and a cache reaper ran on the controller. The idle
+  controller costs money, so teardown is part of the plan.
+- **Teardown.** Archive results to a bucket first — excluding workspaces,
+  caches and credentials, and scanning for tokens. And commit every
+  hand-written config (gateway config, hooks, units, timers) to the
+  operator's private ops repo when it is created: at teardown we lost the
+  gateway config because only results were archived.
+- **Operator time.** Cloud logins expire after roughly twelve hours;
+  anything that needs the operator's credential waits for the next login.
+  Infrastructure apply (Terraform) is the operator's step, outside the
+  kernel.
+
+### Kernel gaps the run exposed (0.4 work)
+
+- **Spot preemption and requeue-safe measurement.** Already in
+  [Unreleased]: an eval that ends with no result is an infrastructure
+  failure, retried twice uncharged, then parked (#474). Remaining: a
+  requeued job must not read files a previous attempt left, which matters
+  once one eval spans several nodes. The accelerators note makes the same
+  call for spot TPUs ([accelerators.md](accelerators.md), "Preemption").
+- **Cost capture for every backend.** Per-token model spend is priced from
+  the operator table (`OUTERLOOP_TOKEN_PRICES`, [Unreleased]); what remains
+  is capturing node cost per backend and measuring what is not metered yet —
+  NAT egress above all.
+- **The model gateway.** Merged design ([model-gateway.md](model-gateway.md),
+  #464); build planned for 0.4, with this deployment as its first host. The
+  run exposed exactly the gap that note records: role isolation and
+  accounting move into the gateway.
+
+## Part 2 — Long term: clouds without Slurm
+
+Needed when a cloud or accelerator offers no Slurm — per-job VMs (the per-job
+TPU backend in [accelerators.md](accelerators.md)), Kubernetes, serverless
+GPUs — or when capacity is spread over regions and jobs should chase
+wherever it is cheapest. Slurm on a cloud stays supported; the Slurm backend
+is never retired. [external.md](external.md) names the `compute` interface
+and the storage interface this part builds on, and the seam is already the
+right shape: a backend is five operations — submit, poll, fetch, cancel,
+report capacity — that Slurm and LocalCompute implement today, and the
+kernel's loop only submits then polls, never reaching into a running job,
+so a new backend drops in with no kernel change.
+
+### git in, artifact out
+
+A cloud experiment job runs self-contained on its own local disk. Code
+crosses the boundary as **git** (the job clones the target, runs the
+session, seals the candidate, pushes the branch — already how code flows).
+Results cross as **one artifact to an object store**, keyed by run_id, which
+the kernel pulls on wake. The syscall channel stays local to the box; only
+the terminal result leaves. Both sides reach the store outbound, so the
 kernel keeps its no-inbound posture.
 
-This is deliberately *not* a shared filesystem, because a cloud shared FS
-(EFS/FSx/Filestore) is region-pinned: the compute that mounts it must sit in the
-same region, often the same AZ. That would forfeit the main reason to be on
-cloud — chasing cheap GPU capacity, which varies by region and is cheapest on
-spot. git is global and the object store is touched only at a job's start and
-end (never in the hot loop), so the substrate is **region-agnostic** and the
-resident can scatter jobs at whatever region is cheapest. (Given we already run
-Cloudflare, R2 is attractive here — no egress fees, unlike cross-region S3/GCS.)
-
-A shared or parallel filesystem earns its keep in exactly one place: **inside a
-single multi-node training job** (data-parallel GPUs reading the same shards,
-checkpoint sharing — FSx Lustre for that node group). But that node group is
-same-AZ by physical necessity anyway, and provisioning it is that one job's
-concern, torn down with the job — never a fleet-wide substrate the resident
-mounts. Big shared datasets are the same story: a per-region read cache (object
-store → local NVMe), not a global FS.
+This is deliberately not a shared filesystem: a cloud shared FS is
+region-pinned, and the compute that mounts it must sit in the same region,
+often the same zone — forfeiting the main reason to be on cloud, cheap
+capacity that varies by region and is cheapest on spot. git is global and
+the store is touched only at a job's start and end, so the substrate is
+region-agnostic. (R2 is attractive: no egress fees, unlike cross-region
+S3/GCS.) A shared or parallel filesystem earns its keep in one place only:
+inside a single multi-node training job, same-zone by physical necessity,
+provisioned by that job and torn down with it — never a fleet-wide
+substrate. Big shared datasets are the same story: a per-region read cache,
+not a global FS.
 
 **Rule:** the fleet substrate is region-agnostic (git + object store); a
-shared/parallel FS, if it appears at all, is scoped inside a single multi-node
-job in one AZ and dies with it.
+shared/parallel FS, if it appears at all, is scoped inside one multi-node job
+and dies with it.
 
-## Where the resident lives
+### The resident decoupled from the experiments
 
-The resident and the compute backend are **orthogonal**. The resident is a cheap
-CPU orchestrator — wake on cadence, read run records, submit, poll, wake parked
-runs, publish the board. It needs outbound network to GitHub, the backend's API,
-and the result store; it needs no GPU and no co-location with the experiments.
-Today the two coincide (resident on Torch, experiments on Torch) only because it
-is convenient and free.
+The resident is a cheap CPU orchestrator — wake on cadence, read run records,
+submit, poll, publish the board. It needs outbound network and no GPU, and
+it does not need to sit where experiments run. Cloud does not move the
+resident; it moves the experiments, and the backend is a per-run choice
+carried by the contract, so one resident runs cheap jobs on Slurm and bursts
+GPU-heavy ones to cloud at the same time. The resident-chain hardening is
+unchanged.
 
-So cloud does not move the resident — it moves the *experiments*, and the
-resident just calls a different backend's submit/poll. The backend is a **per-run
-choice** carried by the contract, so one resident can run cheap jobs on Slurm and
-burst GPU-heavy ones to cloud at the same time. None of the resident-chain
-hardening (handover, admission, sweep arrays, coalescing) is wasted.
+For a cloud-only adopter the same loop lives as a small always-on CPU VM (a
+cloud VM has no walltime, so the Slurm handover chain is unnecessary) or a
+serverless cron tick (near-zero idle cost; the tick is stateless per
+invocation). `outerloop start` provisions the resident once ("job zero") and
+the laptop goes away. Where the tick lives is already a deployment choice
+(`OUTERLOOP_TICK_HOST`, [multi-cluster.md](multi-cluster.md)); a cloud
+controller VM is one more host of that shape.
 
-For a cloud-only adopter with no cluster, the same loop lives either as:
+### Durable state without a database
 
-- **A small always-on CPU VM.** Simplest. A cloud VM has no walltime, so the
-  Slurm handover chain is unnecessary — just keep the box up. On a cheaper
-  spot/preemptible instance you regain the need for preemption survival, which
-  the tick already has (idempotent, reads state fresh).
-- **A serverless cron tick.** A scheduled function fires the tick each cadence,
-  submits, exits. Near-zero idle cost, viable because the tick is
-  stateless-per-invocation. Since the kernel is cadence-driven anyway, this is
-  the cost-optimal cloud-only form; the VM only wins for continuous
-  responsiveness between cadences.
+An ephemeral or spot resident cannot lean on a shared disk for its own state
+— run records, markers, job handles. The reflex is a database; resist it.
+The kernel's state is single-writer, small, blob-shaped and scanned fresh
+each tick — a filesystem workload, not a database workload, and a database
+would add a standing service every adopter must provision. Durability is a
+**storage-backend choice**, in increasing weight: a persistent volume (the
+default; the state root is a mounted POSIX directory, zero kernel change) or
+an object-store state root for the diskless serverless shape, reusing the
+same store the results already need. Much of the durable state already
+lives in git (the research-log branch); what needs a home off-disk is the
+volatile in-flight state. **Rule:** state stays blob-shaped and
+single-writer; disk → volume → bucket, never a database.
 
-**Bootstrap:** `outerloop start` from the adopter's laptop provisions the
-resident once ("job zero"), then the resident lives entirely in the cloud and the
-laptop can go away — the same backend that launches experiments launches the
-resident, with the one outside push being job zero. It stays outbound-only:
-nothing reaches into the resident. The backend's lifecycle now covers
-provisioning and tearing down the resident itself, not only experiment jobs.
+### Providers, and not writing N of them
 
-The one honest coupling: the **Slurm** backend ties the resident to the cluster
-(local `sbatch`/`squeue` + the shared FS). That is real and fine — for Slurm,
-resident-on-cluster is the natural home. Cloud backends have no such coupling.
+Three shapes: managed batch/queue (AWS Batch, GCP Batch, a second Slurm), raw
+GPU rental (RunPod, Lambda, vast.ai), serverless GPU (Modal, Replicate). The
+first cloud backend should be a **meta-provider**, not a specific cloud:
+[SkyPilot](https://skypilot.readthedocs.io) abstracts the majors behind one
+submit-job API with spot and auto-teardown built in — one backend buys most
+of the clouds. Modal is the strong second (serverless plus native volumes);
+native per-vendor backends only where a meta-provider does not reach.
 
-## Durable state without a database
+Slurm gave lifecycle, cost and security for free; cloud makes them explicit.
+Ephemeral per-job first, a warm pool only if cold-start latency bites.
+Teardown is load-bearing — you pay per second, and a box holding
+credentials should not outlive its job — with a per-run dollar cap.
+Credentials are the adopter's own on their rented box, but short-lived
+scoped tokens rather than long-lived ones.
 
-An ephemeral or spot resident cannot lean on a shared disk for its own `state/`
-— run records, markers, job handles, logs. The reflex is a database; resist it.
-The kernel's state is **single-writer** (one resident writes), **small and
-blob-shaped** (a handful of JSON files, not rows/relations), and **scanned fresh
-each tick** (a directory walk, not a query). That is a filesystem/bucket
-workload, not a database workload — a database would buy concurrency, queries,
-and joins the kernel deliberately does not have, at the cost of a standing
-service to run, back up, secure, and make every adopter provision (against the
-lean-kernel and adoption-simplicity principles).
+### The run-artifact store
 
-Durability is a **storage-backend choice**, in increasing weight:
+A run produces a bundle of artifacts, not a scalar, and they all fit the
+git+object-store substrate: results, reports, traces and measurement
+trajectories are artifacts a job emits, keyed by run_id. This is better even
+on Slurm, where traces and curves live in run dirs today and get reaped;
+first-class object-store artifacts are durable and linkable. Split by shape:
 
-- **Persistent volume (the default).** A cheap VM with an attached disk; the
-  state root (`OUTERLOOP_HOME`) is a mounted POSIX directory, exactly as on
-  Torch's shared FS. The VM restarts, re-attaches, state is there. Zero kernel
-  change. "A small box with a disk" is not more complex than what we run today.
-- **Object-store state root (only for the diskless serverless shape).** A small
-  storage seam behind the state accessors (get/put keyed JSON), mapping almost
-  1:1 onto the current file-per-record shape — and reusing the *same* object
-  store the experiment results already need, so it is not a new dependency.
-
-A lot of durable state already lives in git (the research-log branch holds the
-board, curves, ledger); what needs a home off-disk is the volatile in-flight
-state (parked runs, job handles, sweep markers). The rule: **state stays
-blob-shaped and single-writer; durability is disk → volume → bucket, never a
-database.**
-
-## Providers, and not writing N of them
-
-Three shapes:
-
-- **Managed batch/queue** — AWS Batch, GCP Batch, a second Slurm, EmpireAI.
-  Closest to today: submit + poll, they own scheduling.
-- **Raw GPU rental** — RunPod, Lambda, vast.ai, Crusoe. You own provision +
-  teardown + cost-per-second.
-- **Serverless GPU** — Modal, Replicate. Function-shaped; they own the box and
-  volumes.
-
-Recommendation: **the first cloud backend is a meta-provider, not a specific
-cloud.** [SkyPilot](https://skypilot.readthedocs.io) is OSS and abstracts
-AWS/GCP/Azure/RunPod/Lambda/K8s behind one submit-job API, with spot and
-auto-teardown built in — one backend buys most of the clouds (the unify move
-rather than a backend per vendor). **Modal** is the strong second: elegant
-serverless plus its own volumes solve the FS problem natively. Native
-RunPod/Lambda only for a cloud SkyPilot does not cover.
-
-## Lifecycle, cost, security
-
-Slurm gave these to us for free; cloud makes them explicit.
-
-- **Ephemeral per-job first** (spin up → run → tear down); a warm pool later if
-  cold-start latency bites — the same resident-vs-per-cadence choice we already
-  made on Slurm.
-- **Teardown is load-bearing** for two reasons at once: you pay per second, and a
-  box holding credentials should not outlive its job. Aggressive teardown + a
-  per-run dollar cap (teardown-on-overrun). GPU-hours are already tracked; add a
-  cost column.
-- **Credentials:** the adopter's own creds on the adopter's rented box — same
-  trust as their workstation — but ship **short-lived scoped tokens**, not
-  long-lived ones, and reuse the existing container image for containment.
-
-## The run-artifact store
-
-The final scalar was always an impoverishment. A run produces a **bundle of
-artifacts**, and they all fit the git+object-store substrate with no new
-mechanism — results, reports, traces, and measurement trajectories are one thing:
-artifacts a job emits, keyed by run_id. This is better even on Slurm, where
-traces and curves live in run dirs today and get reaped (the inode-pressure
-problem); making them first-class object-store artifacts makes them durable and
-linkable.
-
-Split by **shape**, onto the two tiers we already have:
-
-- **Small, structured → the measurement record** (durable state, published to the
-  board). The final scalar becomes a **metric map**: the climbed metric plus the
-  diagnostic and gate metrics (the metric-taxonomy schema), each carrying its
-  provenance — baseline pair, seed, tree_sha, image. `measure.py` already keys
-  measurements by image+command+metric+seed+tree_sha; this widens the stored
-  *value* from a scalar to a map + provenance.
+- **Small, structured → the measurement record** (durable state, published
+  to the board). The final scalar becomes a metric map — the climbed metric
+  plus diagnostic and gate metrics, each with provenance (baseline pair,
+  seed, tree_sha, image).
 - **Time-series and large → object-store artifacts** keyed by run_id, with a
-  pointer in the record — the loss/throughput trajectory (`metrics.jsonl`),
-  checkpoints, sample outputs, and the trace. The board pulls a downsampled
-  curve; the raw stays in the bucket. Not in git (churn, public history), not in
-  the small state (bloat).
+  pointer in the record: the loss trajectory, checkpoints, sample outputs,
+  the trace. Not in git (churn), not in the small state (bloat).
 
-### Traces
+Traces: store them in the object store beside the result, pointer in the
+record. Private by default — a trace holds prompts, tool outputs and target
+code; public sees the report, never the raw trace, and only through the
+existing sanitizer chain. Bench-shaped (hermes' `save_sample`) so one store
+feeds the reviewer bench and the lessons distiller. Retention: merged-win
+traces forever, the rest aged out or downsampled. A trace streams to a local
+file and flushes at checkpoints, so a preempted job still leaves what it got.
 
-Store them, in the object store, keyed by run_id, next to the result. The small
-run record carries only a pointer, so kernel state stays tiny and git stays free
-of multi-MB blobs. Three deliberate choices:
+Richer measurement: standardize the emission, do not parse stdout — one
+format the eval harness writes (a `metrics.jsonl` trajectory plus a final
+`measurement.json` metric map), optional and graceful. The board
+(per-attempt curves), compute-normalized metrics, the agent's depth loop and
+verification all need the trajectory. No metrics database; W&B stays an
+optional live view.
 
-- **Private by default.** A trace holds prompts, tool outputs, target code, and
-  possibly secrets-in-context. Public sees the *report*, never the raw trace;
-  run it through the existing sanitizer chain before any sharing. The honesty
-  ledger is public; the underlying traces are access-gated.
-- **Bench-shaped format.** Align with hermes' `save_sample` (`conversations`) so
-  one store feeds the reviewer-bench (recorded rounds already do this), the
-  lessons distiller, and the self-improvement-from-memory direction. One format,
-  many consumers.
-- **Retention**, because these accumulate: keep merged-win traces forever (the
-  archival-science claim), age out aborted/negative ones after a window or
-  downsample. Same policy class as the run-dir reaper, moved to the bucket.
+### Open decisions (for when this version comes up)
 
-Because a trace streams to a local file and flushes at checkpoints + session end,
-a preempted spot job still leaves the trace it got through — the same crash
-safety the result artifact gets.
-
-### Richer measurement
-
-Beyond the headline number, store the trajectory and the metric vector, because
-four things already need them: the board (per-attempt loss curves, log-y),
-**compute-normalization** of the metric (the anti-gaming lever — normalize by
-wall-clock/FLOPs-to-target, which needs the resource-and-progress trajectory),
-the agent's depth loop (reasoning over its own curve), and **verification** (a
-full trajectory resists gaming a scalar — the recurring failure mode).
-
-Two design calls:
-
-- **Standardize the emission; do not parse stdout.** One measurement format the
-  eval harness *writes* — a `metrics.jsonl` trajectory plus a final
-  `measurement.json` metric map — that the kernel ingests. Uniform across
-  benchmarks and **optional/graceful**: a scalar-only benchmark still works; one
-  that emits a curve gets the richer board and verification for free.
-- **No metrics database, and W&B stays optional.** The system of record stays
-  blob-shaped (metric map + jsonl artifacts), not a TSDB. W&B is an optional live
-  view a job may also log to (config-driven, never hardcoded) — an adopter should
-  not need a W&B account to run. The object store is the durable truth.
-
-## Open decisions (for when this version comes up)
-
-1. **Result/state transport** — object store (R2, provider-agnostic, our
-   recommendation) vs. lean on each provider's native volume (Modal-style).
-2. **First backend** — SkyPilot-as-meta-provider (recommendation) vs. one native
-   cloud to learn the shape on.
-3. **Provisioning model** — ephemeral-per-job (recommendation) vs. a warm cloud
-   resident.
-4. **Retention policy** for traces, curves, and checkpoints (keep wins forever;
-   age out the rest).
+1. **Result/state transport** — object store (R2, recommended) vs. provider-native volumes.
+2. **First backend** — SkyPilot-as-meta-provider (recommended) vs. one native cloud.
+3. **Provisioning model** — ephemeral-per-job (recommended) vs. a warm resident.
+4. **Retention** for traces, curves and checkpoints.
 5. **Sequencing** — traces-as-artifacts and richer measurement are useful on
-   Slurm independent of cloud; decide whether they ship earlier on their own or
-   ride in with the cloud backend.
-
-## Relation to existing notes
-
-- [external.md](external.md) names the `compute` interface (consumer-side
-  runners, verifiable rewards) and the storage interface (notebook-repo →
-  walled store) at a high level; this note is the deeper cloud dive on both.
-- [scaling.md](scaling.md) owns the planning/multi-agent scaling program;
-  unaffected — this is about *where* jobs run and *what* they store, not *which*
-  jobs to run.
-- The metric-taxonomy vocabulary (climbed / diagnostic / gate / composite /
-  group / suite) is the schema for the measurement record above; this note is a
-  place it gets used.
+   Slurm independent of cloud; decide whether they ship earlier on their own.

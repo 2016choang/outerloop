@@ -60,6 +60,10 @@ Versions follow [SemVer](https://semver.org).
   `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
   install guide, and mark the verification-loop and dispatcher design notes
   as built (#337).
+- `docs/design/compute-cloud.md` (#348): Slurm on a cloud as the 0.4
+  deployment, with operator guidance and the kernel gaps it exposed; clouds
+  without Slurm (git in, artifact out; a meta-provider; the run-artifact
+  store) as the long-term direction.
 
 ### Changed
 
@@ -756,12 +760,6 @@ removes them. The full history since the first pre-release follows.
 
 ### Added
 
-- `docs/design/compute-cloud.md`: a design sketch (post-0.1, not a launch item)
-  for a third-party/cloud compute backend and the storage substrate it forces —
-  git-in/artifact-out instead of a region-pinned shared filesystem, the resident
-  decoupled from where experiments run, durable state as a storage-backend choice
-  rather than a database, and a run-artifact store holding traces and full
-  measurement trajectories keyed by run_id.
 - `outerloop upgrade`: one verb for a local install to move to the newest
   release (`--pre` to track pre-releases), the local counterpart of the Slurm
   resident tick's `OUTERLOOP_AUTO_UPDATE` policy. It runs `pip install --upgrade`,

@@ -304,9 +304,10 @@ Roles/flow reference for this whole section: design/roles.md.
       a machine user with a fine-grained PAT stays the fallback
 - [ ] Storage interface: notebook-repo backend → walled multi-tenant store
 - [ ] Experiment-backend interface: consumer-side runners, verifiable rewards
-- [ ] Cloud compute backend + region-agnostic run-artifact store, and the
-      resident decoupled from where experiments run (design:
-      design/compute-cloud.md) — post-0.1, not a launch item
+- [ ] Cloud compute (design: design/compute-cloud.md): Part 1 — Slurm on a
+      cloud, the 0.4 deployment with the model gateway; Part 2 — clouds
+      without Slurm (region-agnostic run-artifact store, the resident
+      decoupled from where experiments run), a direction, not scheduled
 
 ## Manual prerequisites (maintainer)
 
