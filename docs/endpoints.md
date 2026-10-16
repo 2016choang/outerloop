@@ -115,10 +115,12 @@ three-second timeout and the profile key.
 ## Outages
 
 A profile with a `URL_FILE` is probed before every session: a missing address
-file, a bad record or a dead server parks fresh runs and defers parked wakes
-without spending wake retries, and nothing polls in the background. A fixed
-`URL` profile is not probed, so a dead fixed server surfaces as ordinary
-session failures instead.
+file, an oversized or expired record, a served-model mismatch or a dead
+server parks fresh runs and defers parked wakes without spending wake
+retries, and nothing polls in the background. A malformed record is a
+configuration error, not an outage, and fails preflight instead of parking
+the run. A fixed `URL` profile is not probed, so a dead fixed server surfaces
+as ordinary session failures instead.
 Run `outerloop status` to see which endpoint each run waits for and since
 when:
 

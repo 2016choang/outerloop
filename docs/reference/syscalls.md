@@ -39,11 +39,11 @@ workspace. Multiple launches accumulate until `sleep` commits them.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
-| `--name` | required | 1-32 chars of `a-z`, `0-9` and `-`; unique among staged launches |
+| `--name` | required | 1-32 chars of `a-z`, `0-9` and `-`, starting with a letter or digit; unique among staged launches |
 | `--minutes` | 30 | positive integer; clamped to 240 |
 | `--why` | empty | at most 200 chars; shown to every agent in `queue` |
 | `--array` | 1 | positive integer; clamped to 16; each task runs with `SWEEP_INDEX` 0..N-1 |
-| `--concurrency` | 0 | non-negative; only with `--array`; at most K tasks at once; the contract may cap it |
+| `--concurrency` | 0 | non-negative; applies only with `--array`, ignored otherwise; at most K tasks at once; the contract may cap it |
 | `--artifact` | none | repeatable, at most 8; a repo-relative file path, no traversal |
 | `command` | required | after `--`; at most 2000 chars |
 

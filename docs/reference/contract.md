@@ -19,24 +19,28 @@ uv run python -m outerloop.contract_cli .outerloop.yaml
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `benchmarks` | what the agents try to improve | required |
-| `budgets` | the compute an attempt may spend | required |
-| `scope` | the paths the agents may write | required |
-| `roadmap` | the target's roadmap, read as context | required |
-| `channels` | kernel-mediated sharing between agents | all on |
-| `suite` | one aggregate target across benchmarks | none |
-| `steward` | a separate maintenance lane's paths | none |
-| `merge` | manual or automatic PR merging | `manual` |
-| `guidance` | the research-taste text pack | `default` |
+| [`benchmarks`](#benchmarks) | what the agents try to improve | required |
+| [`budgets`](#budgets) | the compute an attempt may spend | required |
+| [`scope`](#scope) | the paths the agents may write | required |
+| [`roadmap`](#roadmap) | the target's roadmap, read as context | required |
+| [`channels`](#channels) | kernel-mediated sharing between agents | all on |
+| [`suite`](#suite) | one aggregate target across benchmarks | none |
+| [`steward`](#steward) | a separate maintenance lane's paths | none |
+| [`merge`](#merge) | manual or automatic PR merging | `manual` |
+| [`guidance`](#guidance) | the research-taste text pack | `default` |
 
 Paths in `scope`, `steward` and `guidance` are repo-relative POSIX paths.
 Globs, absolute paths, `..` components and the git directory are refused.
 Outerloop is never a valid target of itself, whatever the deployment names.
 
 Some write paths are forbidden regardless of the contract: the contract
-file itself, `.github/`, the git directory, the roadmap, the guidance
-directory and the record ledger (`BENCHMARKS.md`, `results/leader.json`).
-An allowed path that overlaps one of these fails validation.
+file itself, `.github/`, the git directory, the roadmap and the guidance
+directory. An allowed path that overlaps one of these fails validation.
+The record ledger (`BENCHMARKS.md`, `results/leader.json`) is protected
+separately: a steward path that overlaps it fails validation, and the kernel
+tells authors to take the base's version during folds. A solver
+`scope.allowed` entry that overlaps the ledger is not refused, so keep the
+ledger out of the agents' scope yourself.
 
 ## Top-level fields
 

@@ -7,7 +7,7 @@ A run's agent sleeps between legs, and nothing reaches it while it sleeps. Every
 Whatever the sender's trust level, the message lands in the same place: one JSON file per message, appended under a file lock, with a dedupe key that keeps a retried write from duplicating it. Seven senders write into one run's inbox.
 
 <figure class="ol-fig">
-<svg viewBox="0 0 1400 730" role="img" aria-label="Messages to an agent. The operator, maintainers on GitHub, other agents, experiment jobs, the gate and panel, and CI and git all append to the run's inbox, one file per message. The resident tick wakes a parked author when an unread message needs attention. At the wake the author reads every unread message once. Its replies go through an outbox to the PR thread, or into another run's inbox.">
+<svg viewBox="0 0 1400 730" role="img" aria-label="Messages to an agent. The operator, maintainers on GitHub, other agents, experiment jobs, the gate and panel, and CI and git all append to the run's inbox, one file per message. The resident tick wakes a parked author when an unread message needs attention. At the wake the author reads the messages past the cursor. Its replies go through an outbox to the PR thread, or into another run's inbox.">
 <defs>
 <marker id="msg-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-flow"/></marker>
 <marker id="msg-thin" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-thin"/></marker>
@@ -26,7 +26,7 @@ Whatever the sender's trust level, the message lands in the same place: one JSON
 <text x="44" y="131" class="bl">outerloop message, on the command line</text>
 <rect x="30" y="154" width="340" height="58" rx="6" class="box x"/>
 <text x="44" y="177" class="bt">Maintainers on GitHub</text>
-<text x="44" y="199" class="bl">comments on the run's PR or issue</text>
+<text x="44" y="199" class="bl">comments on the run's PR</text>
 <rect x="30" y="222" width="340" height="58" rx="6" class="box x"/>
 <text x="44" y="245" class="bt">Other agents</text>
 <text x="44" y="267" class="bl">at most 4 waiting from each sender</text>
@@ -80,8 +80,8 @@ Whatever the sender's trust level, the message lands in the same place: one JSON
 <text x="556" y="372" class="pn">000042.json</text>
 
 <text x="516" y="414" class="bl">the run record keeps the cursor: the last</text>
-<text x="516" y="434" class="bl">message delivered, so each one is read once,</text>
-<text x="516" y="454" class="bl">even across a crash</text>
+<text x="516" y="434" class="bl">message a completed leg saw, so an</text>
+<text x="516" y="454" class="bl">interrupted one reads its messages again</text>
 
 <!-- tick -->
 <rect x="500" y="514" width="410" height="78" rx="6" class="box k"/>
@@ -98,9 +98,9 @@ Whatever the sender's trust level, the message lands in the same place: one JSON
 <!-- author -->
 <rect x="1020" y="86" width="330" height="404" rx="6" class="box sb"/>
 <text x="1036" y="112" class="bt">Author agent (agent-NN)</text>
-<text x="1036" y="140" class="bl">the wake text lists each unread</text>
-<text x="1036" y="160" class="bl">message once; sender text is fenced</text>
-<text x="1036" y="180" class="bl">as quoted data, not instructions</text>
+<text x="1036" y="140" class="bl">the wake text lists the messages</text>
+<text x="1036" y="160" class="bl">past the cursor, and sender</text>
+<text x="1036" y="180" class="bl">text is fenced as quoted data</text>
 <text x="1036" y="214" class="pn">.outerloop/messages.json</text>
 <text x="1036" y="236" class="bl">the last 200 messages, refreshed</text>
 <text x="1036" y="256" class="bl">at every wake</text>
@@ -127,7 +127,7 @@ Whatever the sender's trust level, the message lands in the same place: one JSON
 <path d="M500,655 L370,655" class="flow" marker-end="url(#msg-flow)"/>
 <text x="435" y="648" class="al" text-anchor="middle">posted</text>
 </svg>
-<figcaption>Every sender appends to the run's inbox. The kernel wakes the author and hands it each unread message once. Replies to the thread leave through the outbox.</figcaption>
+<figcaption>Every sender appends to the run's inbox. The kernel wakes the author and hands it the messages past the cursor. Replies to the thread leave through the outbox.</figcaption>
 </figure>
 
 | Sender | What arrives | When the run sees it |
@@ -137,10 +137,10 @@ Whatever the sender's trust level, the message lands in the same place: one JSON
 | The review panel | findings on a submitted head, blocking ones marked | at the wake that returns the verdict |
 | The gate | the measurement verdict on a submit | at the wake that returns the verdict |
 | The run's own jobs | exit code, delivered artifacts and output tails | at the wake that gathers the results |
-| GitHub | comments with standing, and CI check results | at the next wake; a pending one wakes the run |
+| GitHub | comments with standing on the run's PR, and CI check results | at the next wake; a pending one wakes the run |
 | The kernel | notices, refusals, tool updates, base moves | at the wake they belong to |
 
-Not everything on the thread qualifies. A comment reaches the inbox only from an owner, a member or a collaborator of the target repository, and the bot's own comments are skipped. The verifier's review rounds and checks that pass ride along as context-only entries, delivered for context but never able to wake the run.
+Not everything on the thread qualifies. A comment reaches the inbox only from an owner, a member or a collaborator of the target repository, and the bot's own comments are skipped. Comments are gathered from the run's PR only; a comment on the issue a run came from does not arrive. The verifier's review rounds and checks that pass ride along as context-only entries, delivered for context but never able to wake the run.
 
 ## Arrival at a wake
 
@@ -148,13 +148,13 @@ A sleeping run has no live channel, and a waiting session receives no messages. 
 
 Two things wake a parked run. A run sleeping on its jobs wakes when the scheduler reports the last one finished. Otherwise the tick notices any pending message that is not context-only, and wakes the run for it.
 
-Delivery happens exactly once. The run record holds the delivered cursor, the sequence number of the last message a completed leg saw, and a wake delivers only the files past it. A wake killed mid-session delivers its messages again, so a crash loses nothing. The mechanism is on [the concurrency page](concurrency.md).
+Each message is appended once and replayed until a leg completes. The run record holds the delivered cursor, the sequence number of the last message a completed leg saw, and a wake delivers only the files past it. A wake killed mid-session delivers its messages again, so a crash loses nothing, and an agent may act on a message it acted on before. The mechanism is on [the concurrency page](concurrency.md).
 
 ## The wake text
 
-The kernel renders the undelivered messages into one text that opens the resumed session: the remaining budgets, the session clock, the standing protocol line, then each message in delivery order. Each message carries a header naming its number, kind, sender, recipient and arrival time.
+The kernel renders the undelivered messages into one text that opens the resumed session: the remaining budgets, the standing protocol line, then each message in delivery order. Each message carries a header naming its number, kind, sender, recipient and arrival time.
 
-Instructions and data stay apart by construction. Messages from the kernel and from git render as plain text, because the kernel wrote every word. Every other source renders inside a code fence, as does quoted output inside any message, so a job's stdout or a GitHub comment is data the agent reads but never instructions it must follow.
+Messages from the kernel and from git render as plain text, because the kernel wrote every word. Every other source renders inside a code fence, as does quoted output inside any message, so a job's stdout or a GitHub comment arrives as quoted data rather than prompt text. Fencing lowers the risk that the agent follows injected text. It cannot guarantee the model never does.
 
 Between wakes the agent can still look back. The kernel refreshes `.outerloop/messages.json` in the workspace at each wake, holding the last 200 messages with sender, recipient, time and reply chain, and `message --show <n>` prints one conversation thread from it.
 

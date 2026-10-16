@@ -20,73 +20,73 @@ over the inherited environment even when it is empty.
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `OUTERLOOP_COMPUTE` | run the local loop instead of the Slurm chain | unset |
-| `OUTERLOOP_ROOT` | state root | `~/.outerloop` |
-| `OUTERLOOP_HOME` | the kernel source checkout to deploy from | start directory |
-| `OUTERLOOP_ACCOUNT` | Slurm account for the tick | unset |
-| `OUTERLOOP_PARTITION` | Slurm partition for the tick | unset |
-| `OUTERLOOP_QOS` | Slurm QOS for submitted jobs | unset |
-| `OUTERLOOP_TICK_HOST` | resident job or login host for the Slurm tick | `resident` |
-| `OUTERLOOP_RESIDENT_MINUTES` | walltime of the resident tick job | 360 |
-| `OUTERLOOP_CADENCE_MIN` | minutes between ticks | 30 |
-| `OUTERLOOP_AUTO_UPDATE` | how the deploy step moves the checkout | `off` |
-| `OUTERLOOP_ENV_FILE` | path to the operator settings file | `~/.config/outerloop/.env` |
-| `OUTERLOOP_PAT_FILE` | path to the GitHub PAT file | unset |
-| `OUTERLOOP_IMAGE` | Apptainer image for sessions and evals | `~/outerloop-images/agent-py312.sif` |
-| `OUTERLOOP_APPTAINER_BIN` | apptainer binary | `apptainer` on PATH |
-| `OUTERLOOP_CACHE_ROOT` | where downloaded runtimes are cached | `<root>/cache` |
-| `OUTERLOOP_BRIDGE_RUNTIME` | where the bridge runtime is installed | `<cache>/bridge` |
-| `OUTERLOOP_TARGET` | the repo being climbed | unset |
-| `OUTERLOOP_GITHUB_APP_FILE` | the GitHub App config file init writes | unset |
-| `OUTERLOOP_BOT_LOGIN` | the login the kernel acts as | unset |
-| `OUTERLOOP_BOT_ALIASES` | former logins of the same bot | unset |
-| `OUTERLOOP_AUTHOR_BACKEND` | the author's harness | `claude` |
-| `OUTERLOOP_AUTHOR_MODEL` | the author's model | unset |
-| `OUTERLOOP_CLAUDE_MODEL` | model for every Claude role | unset |
-| `OUTERLOOP_AUTHOR_ENDPOINT` | endpoint profile for the author | unset |
-| `OUTERLOOP_AUTHOR_OVERRIDES` | per-target author selection | unset |
-| `OUTERLOOP_PANEL` | the review panel's lenses | `verify,review` |
-| `OUTERLOOP_PANEL_KEY_FILE` | key for a Claude panel lens | `~/.config/outerloop/verifier_key` |
-| `OUTERLOOP_PANEL_CODEX_KEY_FILE` | key for a Codex panel lens | unset |
-| `OUTERLOOP_PANEL_HERMES_KEY_FILE` | key for a Hermes panel lens | unset |
-| `OUTERLOOP_PANEL_UNCONTAINED` | run panel judges outside the container | off |
-| `OUTERLOOP_STEWARD_KEY_FILE` | the steward's key; turns the lane on | unset |
-| `OUTERLOOP_CLAUDE_KEY_FILE` | the author's Claude key file | `~/.config/outerloop/claude_key` |
-| `OUTERLOOP_CODEX_KEY_FILE` | the author's Codex key file | `~/.config/outerloop/codex_key` |
-| `OUTERLOOP_HERMES_KEY_FILE` | the author's Hermes key file | `~/.config/outerloop/hermes_key` |
-| `REVIEW_BACKEND` | backend for the standalone reviewer | `claude` |
-| `REVIEW_MODEL` | model for the standalone reviewer | unset |
-| `REVIEW_ENDPOINT` | endpoint profile for the standalone reviewer | unset |
-| `OUTERLOOP_TOKEN_PRICES` | token prices for session cost accounting | unset |
-| `OUTERLOOP_VERTEX_PROJECT` | GCP project that routes Claude through Vertex | unset |
-| `OUTERLOOP_VERTEX_REGION` | Vertex region | `global` |
-| `OUTERLOOP_VERTEX_ADC` | application default credentials file | the gcloud default |
-| `OUTERLOOP_VERTEX_SMALL_MODEL` | a cheaper model for auxiliary roles | unset |
-| `OUTERLOOP_CLAUDE_VERSION` | Claude CLI version pin override | the packaged pin |
-| `OUTERLOOP_CLAUDE_SHA256` | checksum for the Claude override | required with the version |
-| `OUTERLOOP_CODEX_VERSION` | Codex CLI version pin override | the packaged pin |
-| `OUTERLOOP_CODEX_SHA256` | checksum for the Codex override | required with the version |
-| `OUTERLOOP_CODEX_CODE_MODE_HOST_SHA256` | checksum of the Codex code-mode host | required with the version |
-| `OUTERLOOP_HERMES_REF` | Hermes source ref override | the packaged pin |
-| `OUTERLOOP_HERMES_SHA` | Hermes commit SHA override | required with the ref |
-| `OUTERLOOP_CLAUDE_BIN` | absolute path of the Claude CLI | PATH lookup |
-| `OUTERLOOP_CODEX_BIN` | absolute path of the Codex CLI | PATH lookup |
-| `REVIEW_HERMES_REPO` | Hermes source checkout | `~/hermes-agent` |
-| `REVIEW_HERMES_PROVIDER` | native Hermes provider, `openai` or `openrouter` | unset |
-| `OUTERLOOP_CODEX_WEB_SEARCH` | Codex's built-in web search | `auto` |
-| `OUTERLOOP_HERMES_RESUME_MAX_CHARS` | Hermes resume payload cap | 120000 |
-| `OUTERLOOP_GPU_PARTITION` | the GPU lane for evals and launches | unset |
-| `OUTERLOOP_GPU_ACCOUNT` | account for the GPU lane | unset |
-| `OUTERLOOP_GPU_LANES` | per-target GPU lanes | unset |
-| `OUTERLOOP_EVAL_CPUS_PER_GPU` | CPUs per GPU for dispatched evals | 8 |
-| `OUTERLOOP_EVAL_MEM_GB_PER_GPU` | memory per GPU for dispatched evals | 64 |
-| `OUTERLOOP_LOCAL_GPUS` | GPU count for the local compute pool | auto-detected |
-| `OUTERLOOP_MIN_TICK_MINUTES` | coalesce window for piled-up ticks | 10 minutes or half the cadence |
-| `OUTERLOOP_MAX_JOB_MINUTES` | walltime cap for climb jobs | 360 |
-| `OUTERLOOP_JOB_PARTITION` | partition the walltime cap is sized for | unset |
-| `OUTERLOOP_DISPATCH_WAKE` | `0` disarms dispatched wakes | armed |
-| `OUTERLOOP_HARNESS_TIMEOUT_SECONDS` | deadline for one harness upgrade | 300 |
-| `OUTERLOOP_NATIVE_LOG_MAX_BYTES` | cap on a session's native log kept | 32 MiB |
+| [`OUTERLOOP_COMPUTE`](#outerloop_compute) | run the local loop instead of the Slurm chain | unset |
+| [`OUTERLOOP_ROOT`](#outerloop_root) | state root | `~/.outerloop` |
+| [`OUTERLOOP_HOME`](#outerloop_home) | the kernel source checkout to deploy from | start directory |
+| [`OUTERLOOP_ACCOUNT`](#outerloop_account) | Slurm account for the tick | unset |
+| [`OUTERLOOP_PARTITION`](#outerloop_partition) | Slurm partition for the tick | unset |
+| [`OUTERLOOP_QOS`](#outerloop_qos) | Slurm QOS for submitted jobs | unset |
+| [`OUTERLOOP_TICK_HOST`](#outerloop_tick_host) | resident job or login host for the Slurm tick | `resident` |
+| [`OUTERLOOP_RESIDENT_MINUTES`](#outerloop_resident_minutes) | walltime of the resident tick job | 360 |
+| [`OUTERLOOP_CADENCE_MIN`](#outerloop_cadence_min) | minutes between ticks | 30 |
+| [`OUTERLOOP_AUTO_UPDATE`](#outerloop_auto_update) | how the deploy step moves the checkout | `off` |
+| [`OUTERLOOP_ENV_FILE`](#outerloop_env_file) | path to the operator settings file | `~/.config/outerloop/.env` |
+| [`OUTERLOOP_PAT_FILE`](#outerloop_pat_file) | path to the GitHub PAT file | unset |
+| [`OUTERLOOP_IMAGE`](#outerloop_image) | Apptainer image for sessions and evals | `~/outerloop-images/agent-py312.sif` |
+| [`OUTERLOOP_APPTAINER_BIN`](#outerloop_apptainer_bin) | apptainer binary | `apptainer` on PATH |
+| [`OUTERLOOP_CACHE_ROOT`](#outerloop_cache_root) | where downloaded runtimes are cached | `<root>/cache` |
+| [`OUTERLOOP_BRIDGE_RUNTIME`](#outerloop_bridge_runtime) | where the bridge runtime is installed | `<cache>/bridge` |
+| [`OUTERLOOP_TARGET`](#outerloop_target) | the repo being climbed | unset |
+| [`OUTERLOOP_GITHUB_APP_FILE`](#outerloop_github_app_file) | the GitHub App config file init writes | unset |
+| [`OUTERLOOP_BOT_LOGIN`](#outerloop_bot_login) | the login the kernel acts as | unset |
+| [`OUTERLOOP_BOT_ALIASES`](#outerloop_bot_aliases) | former logins of the same bot | unset |
+| [`OUTERLOOP_AUTHOR_BACKEND`](#outerloop_author_backend) | the author's harness | `claude` |
+| [`OUTERLOOP_AUTHOR_MODEL`](#outerloop_author_model) | the author's model | unset |
+| [`OUTERLOOP_CLAUDE_MODEL`](#outerloop_claude_model) | model for every Claude role | unset |
+| [`OUTERLOOP_AUTHOR_ENDPOINT`](#outerloop_author_endpoint) | endpoint profile for the author | unset |
+| [`OUTERLOOP_AUTHOR_OVERRIDES`](#outerloop_author_overrides) | per-target author selection | unset |
+| [`OUTERLOOP_PANEL`](#outerloop_panel) | the review panel's lenses | `verify,review` |
+| [`OUTERLOOP_PANEL_KEY_FILE`](#outerloop_panel_key_file) | key for a Claude panel lens | `~/.config/outerloop/verifier_key` |
+| [`OUTERLOOP_PANEL_CODEX_KEY_FILE`](#outerloop_panel_codex_key_file) | key for a Codex panel lens | unset |
+| [`OUTERLOOP_PANEL_HERMES_KEY_FILE`](#outerloop_panel_hermes_key_file) | key for a Hermes panel lens | unset |
+| [`OUTERLOOP_PANEL_UNCONTAINED`](#outerloop_panel_uncontained) | run panel judges outside the container | off |
+| [`OUTERLOOP_STEWARD_KEY_FILE`](#outerloop_steward_key_file) | the steward's key; turns the lane on | unset |
+| [`OUTERLOOP_CLAUDE_KEY_FILE`](#outerloop_claude_key_file) | the author's Claude key file | `~/.config/outerloop/claude_key` |
+| [`OUTERLOOP_CODEX_KEY_FILE`](#outerloop_codex_key_file) | the author's Codex key file | `~/.config/outerloop/codex_key` |
+| [`OUTERLOOP_HERMES_KEY_FILE`](#outerloop_hermes_key_file) | the author's Hermes key file | `~/.config/outerloop/hermes_key` |
+| [`REVIEW_BACKEND`](#review_backend) | backend for the standalone reviewer | `claude` |
+| [`REVIEW_MODEL`](#review_model) | model for the standalone reviewer | unset |
+| [`REVIEW_ENDPOINT`](#review_endpoint) | endpoint profile for the standalone reviewer | unset |
+| [`OUTERLOOP_TOKEN_PRICES`](#outerloop_token_prices) | token prices for session cost accounting | unset |
+| [`OUTERLOOP_VERTEX_PROJECT`](#outerloop_vertex_project) | GCP project that routes Claude through Vertex | unset |
+| [`OUTERLOOP_VERTEX_REGION`](#outerloop_vertex_region) | Vertex region | `global` |
+| [`OUTERLOOP_VERTEX_ADC`](#outerloop_vertex_adc) | application default credentials file | the gcloud default |
+| [`OUTERLOOP_VERTEX_SMALL_MODEL`](#outerloop_vertex_small_model) | a cheaper model for auxiliary roles | unset |
+| [`OUTERLOOP_CLAUDE_VERSION`](#outerloop_claude_version-and-outerloop_claude_sha256) | Claude CLI version pin override | the packaged pin |
+| [`OUTERLOOP_CLAUDE_SHA256`](#outerloop_claude_version-and-outerloop_claude_sha256) | checksum for the Claude override | required with the version |
+| [`OUTERLOOP_CODEX_VERSION`](#outerloop_codex_version-outerloop_codex_sha256-and-outerloop_codex_code_mode_host_sha256) | Codex CLI version pin override | the packaged pin |
+| [`OUTERLOOP_CODEX_SHA256`](#outerloop_codex_version-outerloop_codex_sha256-and-outerloop_codex_code_mode_host_sha256) | checksum for the Codex override | required with the version |
+| [`OUTERLOOP_CODEX_CODE_MODE_HOST_SHA256`](#outerloop_codex_version-outerloop_codex_sha256-and-outerloop_codex_code_mode_host_sha256) | checksum of the Codex code-mode host | required with the version |
+| [`OUTERLOOP_HERMES_REF`](#outerloop_hermes_ref-and-outerloop_hermes_sha) | Hermes source ref override | the packaged pin |
+| [`OUTERLOOP_HERMES_SHA`](#outerloop_hermes_ref-and-outerloop_hermes_sha) | Hermes commit SHA override | required with the ref |
+| [`OUTERLOOP_CLAUDE_BIN`](#outerloop_claude_bin) | absolute path of the Claude CLI | PATH lookup |
+| [`OUTERLOOP_CODEX_BIN`](#outerloop_codex_bin) | absolute path of the Codex CLI | PATH lookup |
+| [`REVIEW_HERMES_REPO`](#review_hermes_repo) | Hermes source checkout | `~/hermes-agent` |
+| [`REVIEW_HERMES_PROVIDER`](#review_hermes_provider) | native Hermes provider, `openai` or `openrouter` | unset |
+| [`OUTERLOOP_CODEX_WEB_SEARCH`](#outerloop_codex_web_search) | Codex's built-in web search | `auto` |
+| [`OUTERLOOP_HERMES_RESUME_MAX_CHARS`](#outerloop_hermes_resume_max_chars) | Hermes resume payload cap | 120000 |
+| [`OUTERLOOP_GPU_PARTITION`](#outerloop_gpu_partition) | the GPU lane for evals and launches | unset |
+| [`OUTERLOOP_GPU_ACCOUNT`](#outerloop_gpu_account) | account for the GPU lane | unset |
+| [`OUTERLOOP_GPU_LANES`](#outerloop_gpu_lanes) | per-target GPU lanes | unset |
+| [`OUTERLOOP_EVAL_CPUS_PER_GPU`](#outerloop_eval_cpus_per_gpu) | CPUs per GPU for dispatched evals | 8 |
+| [`OUTERLOOP_EVAL_MEM_GB_PER_GPU`](#outerloop_eval_mem_gb_per_gpu) | memory per GPU for dispatched evals | 64 |
+| [`OUTERLOOP_LOCAL_GPUS`](#outerloop_local_gpus) | GPU count for the local compute pool | auto-detected |
+| [`OUTERLOOP_MIN_TICK_MINUTES`](#outerloop_min_tick_minutes) | coalesce window for piled-up ticks | 10 minutes or half the cadence |
+| [`OUTERLOOP_MAX_JOB_MINUTES`](#outerloop_max_job_minutes) | walltime cap for climb jobs | 360 |
+| [`OUTERLOOP_JOB_PARTITION`](#outerloop_job_partition) | partition the walltime cap is sized for | unset |
+| [`OUTERLOOP_DISPATCH_WAKE`](#outerloop_dispatch_wake) | `0` disarms dispatched wakes | armed |
+| [`OUTERLOOP_HARNESS_TIMEOUT_SECONDS`](#outerloop_harness_timeout_seconds) | deadline for one harness upgrade | 300 |
+| [`OUTERLOOP_NATIVE_LOG_MAX_BYTES`](#outerloop_native_log_max_bytes) | cap on a session's native log kept | 32 MiB |
 
 ## Placement and state
 

@@ -73,10 +73,11 @@ decisions the contract asks you to make.
 5. **Record.** Every attempt gets a short report: hypothesis, change,
    outcome, next step. Negative results included.
 
-Agents write only the paths the contract allows, and the contract, your
-roadmap, and `.github/` are never writable by an agent. Keep the
-benchmark's own eval code outside those allowed paths, so the agent cannot
-edit the ruler it is judged by. Your branch protection and required checks
+An agent's whole workspace is mounted writable, so scope is not a per-path
+sandbox: the kernel rejects a candidate whose changes fall outside the paths
+the contract allows, or touch the contract, your roadmap or `.github/`. Keep
+the benchmark's own eval code outside those allowed paths, so a doctored
+ruler cannot survive into a measured candidate. Your branch protection and required checks
 apply to them as to any contributor. By default a pull request waits for a
 human, and a repo can also let clean ones merge themselves. The full
 picture is in
@@ -94,14 +95,17 @@ build. See [the reviewer guide](https://docs.outerloop.science/reviewer/).
 ## Safety by design
 
 - **Opt-in and contract-bound.** A repo takes part by granting the bot
-  access and committing a contract. The contract, your roadmap, and
-  `.github/` are never writable by an agent.
+  access and committing a contract. The kernel rejects a change that touches
+  the contract, your roadmap, or `.github/`.
 - **Nothing on trust.** In the default gate mode, Outerloop measures every
   claim itself, on committed trees, and re-verifies before a pull request
   exists. A repo can instead opt into labelled self-reported numbers.
 - **Untrusted input.** Pull request text, diffs, issues, web pages, and job
-  output are data, never instructions. Agents hold no GitHub credential,
-  only their own model key.
+  output are rendered to the agent as fenced data, not instructions, which
+  lowers the risk of injected text being followed without guaranteeing it.
+  A contained session gets no GitHub credential in its environment and
+  cannot read the operator's key files; an uncontained local session runs
+  as your user and can read any file you can, key files included.
 - **Budgets in code.** Launches, GPU-hours, and runs per week are enforced
   by the kernel, not left to the agent.
 - **No model lock-in.** Claude Code, Codex, and hermes-agent are wired

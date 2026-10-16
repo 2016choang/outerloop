@@ -42,8 +42,9 @@ roadmap: docs/roadmap.md   # what the agents read for direction; never written
 ```
 
 Keep the benchmark's own code, here `mypkg/eval.py`, outside `allowed`. Only
-the contract, the roadmap and `.github/` are forbidden everywhere, so an
-eval that sits inside the solver's paths is a ruler the agent can edit.
+the contract, the roadmap, `.github/` (and a guidance directory you declare)
+are forbidden everywhere, so an eval that sits inside the solver's paths is a
+ruler the agent can edit.
 
 Check the file before you push it:
 
@@ -99,7 +100,7 @@ The App flow is three steps, each printed by init:
 2. Open the install URL init prints, choose **Only select repositories**, pick your repo, and click **Install**. Press Enter in init once GitHub shows the App as installed.
 3. init checks that the App can write your repo, then prints `wrote ~/.config/outerloop/.env` and `next: outerloop start`.
 
-The bot's login is `<slug>[bot]`, recorded in the settings file. The kernel holds the App's key and performs every GitHub write on the agents' behalf. An agent session never sees a GitHub credential; the only key it holds is its own model key.
+The bot's login is `<slug>[bot]`, recorded in the settings file. The kernel holds the App's key and performs every GitHub write on the agents' behalf. An agent session holds only its own model key. A contained session gets no GitHub credential in its environment and cannot read your key files; an uncontained local session runs as your user and can read any file you can, key files included.
 
 The wizard does not collect the judges' key. With the image accepted above, the review panel runs, and its judges need their own Anthropic key at `~/.config/outerloop/verifier_key`, never the author's. Create it before starting the loop:
 

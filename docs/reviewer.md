@@ -15,7 +15,9 @@ The session runs on an ephemeral GitHub runner and the reviewer holds a shell,
 so it may run code from the checkout while it investigates. That runner is
 the boundary, not a promise not to execute. Files a model backend would
 auto-load as instructions, such as `CLAUDE.md` or `.claude/`, are renamed
-before the session starts, so PR content never becomes instructions.
+before the session starts, and PR text and diffs are rendered inside fences.
+These measures lower the risk of the session following injected text; they
+do not guarantee it.
 
 Each finding names a file and a line, states its evidence, and carries a
 confidence level and a kind: `change`, `suggestion`, `question` or `note`.
@@ -56,8 +58,8 @@ jobs:
 
 3. Add the key as a repository secret. Under
    `Settings → Secrets and variables → Actions`, create
-   `ANTHROPIC_REVIEWER_KEY` with your Anthropic key. A spend-capped key is
-   strongly recommended.
+   `ANTHROPIC_REVIEWER_KEY` with your Anthropic key. A dedicated, spend-capped
+   key is strongly recommended.
 
 Open a pull request and a review appears within a minute or two. The same
 file ships as [`examples/review.yml`](https://github.com/outerloop-science/outerloop/blob/main/examples/review.yml).
@@ -173,11 +175,12 @@ given to an agent as work orders.
 Every review runs through a least-token split, whatever the backend:
 
 - The session job runs on an ephemeral runner with read-only permissions.
-  Only the chosen backend's model key enters it, so even a backend that can
-  read other processes finds nothing worth stealing.
+  Only the chosen backend's model key enters it. The session holds a shell,
+  so a crafted PR can spend that key: give the reviewer a dedicated key with
+  a spend cap at the provider.
 - A separate posting job holds the write token and runs no model. It
   re-validates the findings and renders them with sanitization.
-- Both jobs treat PR content as untrusted data, never as instructions.
+- Both jobs render PR content as fenced data, not as instructions.
 
 A crafted PR can spend the reviewer's model key and some runner minutes.
 The ephemeral runner is discarded after the session, and the write token

@@ -8,9 +8,9 @@ Versions follow [SemVer](https://semver.org).
 
 ### Documentation
 
-- The docs site gains a "How it works" section (kernel figure, storage and
-  concurrency) and a "Reference" section (the syscall verbs and the inbox
-  message format).
+- The docs site is now a manual: getting started, task guides, concept pages
+  with figures, and reference pages for contract fields, the operator CLI,
+  agent syscalls, inbox messages and environment variables.
 
 ### Changed
 

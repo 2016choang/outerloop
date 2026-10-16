@@ -100,9 +100,9 @@ The resident chain checks its successor every tick and before handover, requeues
 On by default. Think hard before changing any of them.
 
 - The bot never merges and is never a code owner, so your branch protection applies to it like any contributor's. `merge: auto` is an explicit per-repo opt-in. In that mode the sweep merges a clean PR only at the head its gate and panel approved, through your required checks, and it never arms GitHub auto-merge.
-- Agent sessions run with no GitHub credential in their environment; each holds only its own model key. Pushes happen after the session ends.
-- Only maintainer-authored issues and comments become tasks. Everything else, including PR descriptions and diffs, is data, never instructions.
-- Launches, sleeps, GPU-hours and runs per week are enforced in code, and so are the session turn and walltime ceilings. Token and dollar spending is not metered, so cap the keys at the provider instead.
+- Agent sessions run with no GitHub credential in their environment; each holds only its own model key. Pushes happen after the session ends. An uncontained local session runs as your user and can read any file you can, key files included.
+- Only maintainer-authored issues and comments become tasks. Everything else, including PR descriptions and diffs, is rendered as fenced data rather than instructions, which lowers the risk of injected text being followed without guaranteeing it.
+- Launches, sleeps, GPU-hours and runs per week are enforced in code, and so is the session walltime ceiling. The turn ceiling applies to the Claude and Hermes backends; a Codex session is bounded by walltime alone. Token and dollar ceilings are not enforced, though each session's usage and cost are recorded, so cap the keys at the provider instead.
 - A pause file in the state root stops the loop from anywhere with write access, with no cluster login needed.
 
 ## Getting help
