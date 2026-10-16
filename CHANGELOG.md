@@ -60,6 +60,10 @@ Versions follow [SemVer](https://semver.org).
   `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
   install guide, and mark the verification-loop and dispatcher design notes
   as built (#337).
+- `docs/design/compute-cloud.md` (#348): Slurm on a cloud as the 0.4
+  deployment, with operator guidance and the kernel gaps it exposed; clouds
+  without Slurm (git in, artifact out; a meta-provider; the run-artifact
+  store) as the long-term direction.
 
 ### Changed
 
