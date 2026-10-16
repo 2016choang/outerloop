@@ -1,6 +1,8 @@
 # One model gateway per deployment
 
-Status: draft for review. Tracking issue: #464.
+Status: accepted direction; build planned for 0.4, the first cloud
+integration, starting with the conformance check (below). Tracking issue:
+#464.
 
 ## Problem
 
@@ -30,6 +32,13 @@ path can still differ from the tested one.
 Each deployment runs **one model gateway**: a single pinned service that
 every author and judge session reaches by URL, whatever the backend.
 
+- **Two kinds of route**: *served* routes reach a model the deployment runs
+  itself (its own GPU servers, or a model it deploys to a cloud provider's
+  dedicated endpoint), where translation and fair sharing matter;
+  *per-token API* routes reach a provider (including a cloud model
+  catalog's hosted models), where metering against the budget cap matters.
+  For both, the gateway holds the credential, including cloud service
+  accounts whose short-lived tokens it refreshes.
 - **First build scope**: one pinned Responses-to-Chat translation, plus
   passthrough for native routes — one translation path, identical across
   sites. The Anthropic Messages surface is deferred (Claude Code stays
@@ -50,6 +59,11 @@ every author and judge session reaches by URL, whatever the backend.
   and keep today's key until the Anthropic surface lands (open question 2).
   Author/judge separation moves from distinct key
   files (today's preflight only checks the two files differ) into this rule.
+  One gateway with role-scoped keys, rather than one gateway per role:
+  separate instances isolate roles only by running separate processes,
+  and every added role or route repeats the setup. It needs a small key
+  store (a key list in the gateway config is enough for the first build),
+  and a restart reaches every role, which the restart rule below covers.
 - **Accounting**: the gateway meters spend per gateway key — per role per
   deployment — against the deployment's budget cap; the cap is
   load-bearing. A session-supplied run header is forgeable, so per-run
@@ -85,6 +99,9 @@ every author and judge session reaches by URL, whatever the backend.
 - Codex keeps Responses over HTTP/SSE; the gateway does the translation the
   bridge did. Claude Code keeps Anthropic Messages, direct. Hermes keeps
   Chat.
+- Experiment code that itself calls a model uses the session's gateway
+  key, so it reaches only its role's models and its use is metered; today,
+  on a direct profile, it can use the upstream key in the session.
 - Containers need network access to the gateway (they already reach the
   model server for direct endpoints). The per-session loopback listeners,
   tokens and read-only bridge runtime go away.
