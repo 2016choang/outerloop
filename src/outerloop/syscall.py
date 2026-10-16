@@ -711,7 +711,7 @@ def tool_update_note(
         note = (
             "Your syscall tool was updated. Self-reported submissions require "
             "--claimed-value and --claimed-baseline. Scope and floors apply; "
-            "no evaluation or panel runs."
+            "no evaluation or panel runs. The `end` verb is now `stop`."
         )
     return note
 

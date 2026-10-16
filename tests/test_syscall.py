@@ -1121,6 +1121,7 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     # The notice names this workspace's channel.
     assert "python .outerloop/syscall <verb> --help" in tool_update_note(".outerloop")
     assert "`--report <file>`" in tool_update_note(".outerloop")
+    assert "`end` verb is now `stop`" in tool_update_note(".outerloop", verification="self_report")
 
 
 @pytest.mark.parametrize(
