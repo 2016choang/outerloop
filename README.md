@@ -12,37 +12,21 @@
 
 **Autoresearch agents that improve your benchmark.**
 
-Outerloop runs AI agents on your own research code. An agent proposes a change,
-runs the experiment on your cluster, and opens a pull request only when your
-benchmark actually improves. Every attempt is written up, including the ones
-that failed.
+Outerloop runs AI agents on your own research code. An agent proposes a
+change, runs the experiment on your cluster, and opens a pull request only
+when your benchmark actually improves. Every attempt ends in a short
+written report, including the attempts that failed.
 
-You run it yourself: your keys, your compute, your repos. Nothing reports back
-to us. It is built and used every day by the
-[Agentic Learning AI Lab](https://agenticlearning.ai) at NYU, where it
-co-develops our research codebases.
-
-## How it works
-
-1. **Propose.** An agent picks a hypothesis and writes the code change.
-2. **Experiment.** It runs the training on your cluster and reads the results.
-3. **Measure.** Outerloop scores the change against the base tree at the same
-   seed. Noise does not count as an improvement.
-4. **Review.** Reviewers read the change and the claim. If both hold up, a
-   pull request opens.
-5. **Record.** Every attempt gets a short report: hypothesis, change, outcome,
-   next step. Negative results included.
-
-Agents cannot touch the benchmark, the budgets, or your CI. Your branch
-protection and required checks apply to them as to any contributor. By default
-a pull request waits for a human; a repo can also let clean ones merge
-themselves.
+You run it yourself, with your own keys, your own compute and your own
+repositories, and nothing reports back to us. It is built and used every
+day by the [Agentic Learning AI Lab](https://agenticlearning.ai) at NYU,
+where it co-develops our research codebases.
 
 ## Get started
 
-Three commands and one file. You need a repo with a benchmark command, an API
-key for the model that will write the code, and a Slurm cluster or one machine
-with a GPU.
+Three commands and one file. You need a repo with a benchmark command, an
+API key for the model that will write the code, and a Slurm cluster or one
+machine with a GPU.
 
 ```bash
 pip install outerloop-science
@@ -50,12 +34,10 @@ outerloop init     # where the loop runs, which repo, which model and its key, y
 ```
 
 The wizard asks for a GitHub identity for the agents to open pull requests
-as. Pick `app` and it walks you through creating a GitHub App, under your
-account or under an organization you name, and installing it on the repo:
-two browser pages and a code pasted back. It then checks that the App can
-write the repo and tells you if it cannot. Pick `pat` if you already have a
-token. It writes the config and the key files; nothing to edit by hand. Then
-add one file, `.outerloop.yaml`, to the repo you want improved:
+as. Pick `app` and it walks you through creating a GitHub App under your
+account and installing it on the repo. Pick `pat` if you already have a
+token, and it writes the config and the key files either way. Then add one
+file, `.outerloop.yaml`, to the repo you want improved:
 
 ```yaml
 benchmarks:
@@ -75,43 +57,52 @@ roadmap: docs/roadmap.md # what the agents read for direction; never written
 outerloop start    # on a Slurm login node this submits the loop; without Slurm it runs in the foreground
 ```
 
-Step by step, other model backends included:
-[docs/install.md](https://github.com/outerloop-science/outerloop/blob/main/docs/install.md).
-Everything the contract can say:
-[docs/contract.md](https://github.com/outerloop-science/outerloop/blob/main/docs/contract.md).
+The [install guide](https://docs.outerloop.science/install/) walks through
+every step, including the other model backends. The
+[contract guide](https://docs.outerloop.science/contract/) explains the
+decisions the contract asks you to make.
 
-## Only want pull request reviews?
+## The loop
 
-The reviewer works on its own. One workflow file and an API key, about five
-minutes, no bot account and no cluster. It comments on pull requests with
-concrete findings and never approves, blocks, or fails your build. See
-[docs/reviewer.md](https://github.com/outerloop-science/outerloop/blob/main/docs/reviewer.md).
+1. **Propose.** An agent picks a hypothesis and writes the code change.
+2. **Experiment.** It runs the training on your cluster and reads the results.
+3. **Measure.** Outerloop scores the change against the base tree at the same
+   seed. Noise does not count as an improvement.
+4. **Review.** Judges read the change and the claim. If both hold up, a pull
+   request opens.
+5. **Record.** Every attempt gets a short report: hypothesis, change,
+   outcome, next step. Negative results included.
 
-## Where it runs
+Agents cannot touch the benchmark, the budgets, or your CI. Your branch
+protection and required checks apply to them as to any contributor. By
+default a pull request waits for a human, and a repo can also let clean
+ones merge themselves. The full picture is in
+[how it works](https://docs.outerloop.science/how-it-works/), and the
+[operate guide](https://docs.outerloop.science/operate/) covers running
+and steering runs.
 
-The first-class home is a Slurm cluster. There is no daemon: the loop is a
-chain of short jobs that resubmit themselves, so nothing listens and no inbound
-SSH is needed. Experiments and evaluations run inside your container image with
-no credentials, and GPU-hours are metered against the contract's budget. A
-single machine with a GPU works too, for cheap benchmarks. Details:
-[docs/compute.md](https://github.com/outerloop-science/outerloop/blob/main/docs/compute.md).
+## Pull request reviews only
+
+The reviewer works on its own, with one workflow file and an API key, about
+five minutes of setup, and no bot account or cluster. It comments on pull
+requests with concrete findings and never approves, blocks, or fails your
+build. See [the reviewer guide](https://docs.outerloop.science/reviewer/).
 
 ## Safety by design
 
-- **Opt-in and contract-bound.** A repo takes part by granting the bot access
-  and committing a contract. The contract, your roadmap, and `.github/` are
-  never writable by an agent.
+- **Opt-in and contract-bound.** A repo takes part by granting the bot
+  access and committing a contract. The contract, your roadmap, and
+  `.github/` are never writable by an agent.
 - **Nothing on trust.** Outerloop measures every claim itself, on committed
   trees, and re-verifies before a pull request exists.
 - **Untrusted input.** Pull request text, diffs, issues, web pages, and job
   output are data, never instructions. Agents run without credentials.
-- **Budgets in code.** Launches, GPU-hours, and runs per week are enforced by
-  the kernel, not left to the agent.
-- **No model lock-in.** Claude Code, Codex, and hermes-agent are wired today;
-  backends are swappable.
+- **Budgets in code.** Launches, GPU-hours, and runs per week are enforced
+  by the kernel, not left to the agent.
+- **No model lock-in.** Claude Code, Codex, and hermes-agent are wired
+  today, including [self-hosted endpoints](https://docs.outerloop.science/endpoints/).
 
-Full design: [docs/design/architecture.md](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md) ·
-Roadmap: [docs/roadmap.md](https://github.com/outerloop-science/outerloop/blob/main/docs/roadmap.md)
+Further reading: the [architecture page](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md) for the full design, the [roadmap](https://github.com/outerloop-science/outerloop/blob/main/docs/roadmap.md) for what is planned, and the [community page](https://docs.outerloop.science/community/) for where to ask questions.
 
 ## Developing
 
@@ -126,7 +117,7 @@ uv run pytest
 | `src/outerloop/` | The kernel: contract, tick (the Slurm chain), attempt/orchestrator (the climb), measure/dispatch (evals as jobs), syscall (the author's tool), panel/verifier/review, github, harness backends |
 | `tests/` | Tiers: unit (default), `slow`, `llm`, `slurm` markers |
 | `scripts/` | Committed operational scripts (the tick chain, provisioning) |
-| `docs/` | Install guide, architecture and design notes, roadmap |
+| `docs/` | The manual (deployed at [docs.outerloop.science](https://docs.outerloop.science/)), architecture and design notes, roadmap |
 
 ## License
 

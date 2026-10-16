@@ -1,11 +1,6 @@
 # Storage
 
-Outerloop keeps its whole state in plain files and git branches, with no
-database anywhere. This page maps what lives where: the agent's workspace, the
-kernel's run records on a shared filesystem, and the research state in git
-branches on GitHub. The companion page on [how the kernel
-works](how-it-works.md) covers the components; [the concurrency
-page](concurrency.md) covers why each write is safe to repeat.
+Outerloop keeps its whole state in plain files and git branches, with no database anywhere. This page maps what lives where: the agent's workspace, the kernel's run records on a shared filesystem, and the research state in git branches on GitHub. The [kernel page](how-it-works.md) covers the components; the [concurrency page](concurrency.md) covers why each write is safe to repeat.
 
 ## The storage map
 
@@ -180,82 +175,40 @@ page](concurrency.md) covers why each write is safe to repeat.
 <figcaption>The diagram shows the three stores and every family of file. Orange chips carry the guarantee each row relies on.</figcaption>
 </figure>
 
+Three stores hold everything. The agent works in its own workspace inside the sandbox. The kernel's state root on the shared filesystem is private to the deployment. The target repository on GitHub holds the merged code, the pull request branches and the research ledger. Slurm's job states are a third source of truth, which the kernel reads but never owns.
+
 ## The agent workspace
 
-Each run owns one workspace, a git clone of the target at
-`runs/<run-id>/ws`, and one run home at `runs/<run-id>/ws-home` for the
-harness's own config and resume state. The agent sees only these two
-directories, plus the model endpoint it talks to.
+Each run owns one workspace, a git clone of the target at `runs/<run-id>/ws`, and one run home at `runs/<run-id>/ws-home` for the harness's own config and resume state. The agent sees only these two directories, plus the model endpoint it talks to.
 
-The `.outerloop/` directory inside the workspace is the kernel's channel. It
-holds the syscall CLI the kernel copies in, the staged and committed requests
-the CLI writes, the message view and fleet snapshot refreshed at each wake,
-and the artifacts brought back from jobs. The kernel excludes this directory
-from the git diff, so requests and delivered results never enter a
-candidate, a scope check or a fingerprint. The kernel also re-creates the
-directory fresh for judges, whose workspaces are author-written and therefore
-untrusted.
+The `.outerloop/` directory inside the workspace is the kernel's channel. It holds the syscall CLI the kernel copies in, the staged and committed requests the CLI writes, the message view and fleet snapshot refreshed at each wake, and the artifacts brought back from jobs. The kernel excludes this directory from the git diff, so requests and delivered results never enter a candidate, a scope check or a fingerprint. Judges work on author-written checkouts, so the kernel rebuilds the channel fresh before they run.
 
 ## Run state and leases
 
-A run's record is one JSON file, `runs/<run-id>/state.json`, written by atomic
-rename: a crash mid-write leaves the previous record intact, and the sweep
-reasoning only from these files never depends on process memory. The same run
-directory holds the wake lease, the inbox, the outbox of replies kept before
-posting, and the redacted transcripts of every session. It also holds the
-baselines cache, which shares one measured baseline among all attempts on the
-same base commit.
+A run's record is one JSON file, `runs/<run-id>/state.json`, written by atomic rename. A crash mid-write leaves the previous record intact, and the sweep reasons only from these files plus Slurm, never from process memory. The same run directory holds the wake lease, the inbox, the outbox of replies kept before posting, and the redacted transcript of every session. Beside the run directories, a baseline cache holds the measured baseline that a `cached` contract shares among all attempts on one base commit.
 
-Nothing here needs a schema migration step. Unknown fields are ignored on
-read, and every format change ships a legacy fixture so older files keep
-reading across kernel versions.
+Nothing here needs a schema migration step. Unknown fields are ignored on read, and every format change ships a fixture that keeps older files reading across kernel versions. After a run ends, its workspace and run home are removed after a grace period of 24 hours by default; the record, the report, the transcripts and the ledger entries stay.
 
 ## The research ledger
 
-Research state lives on the target repository's `research-log` branch, and
-only the kernel writes to it through the GitHub App. The branch carries
-`results/leader.json` and `BENCHMARKS.md` (the leaderboard), one JSON file per
-pending submission under `results/submissions/`, and every attempt's report
-under `reports/`. Each ledger write is a compare-and-swap on the branch head,
-retried when the head moved.
+Research state lives on the target repository's `research-log` branch, and only the kernel writes to it through the GitHub App. The branch carries `results/leader.json` and `BENCHMARKS.md`, the leaderboard and its rendered view. Each pending submission is one JSON file under `results/submissions/`, and every attempt's report sits under `reports/`. Each ledger write is a compare-and-swap on the branch head, retried when the head moved; the [concurrency page](concurrency.md) covers the mechanism.
 
 ## Research-line branches
 
-Each agent slot works on its own branch, `agents/agent-NN`, kept across runs.
-The branch carries the agent's `AGENT_MEMORY.md` notes and its accumulated
-code history, merged from the base branch at run start. A submission publishes
-from a separate branch, `feat/auto/agent-NN/<run>`, one per pull request, and
-only the kernel pushes either kind of branch.
+Research lines are a contract option, off by default. When the contract turns them on, each agent slot works on its own branch, `agents/agent-NN`, kept across runs. The branch carries the agent's `AGENT_MEMORY.md` notes and its accumulated code history, merged from the base branch at run start. A submission publishes from a separate branch, `feat/auto/agent-NN/<run>`, one per pull request. Only the kernel pushes either kind of branch.
 
 ## Frozen snapshots
 
-Submitted jobs never run from the agent's live workspace. At each launch or
-measurement the kernel commits the workspace content as a snapshot, parented
-on the base commit. A temporary ref keeps it reachable, so garbage collection
-cannot prune it while a job is queued. The job materializes the snapshot by
-checkout into a worktree on node-local scratch and runs the contract command
-inside the container. The ref is dropped once the result has been read.
+Submitted jobs never run from the agent's live workspace. At each launch or measurement the kernel commits the workspace content as a snapshot, parented on the base commit. A temporary ref keeps it reachable, so garbage collection cannot prune it while a job is queued. The job materializes the snapshot by checkout into a worktree on node-local scratch and runs the contract command inside the container. The ref is dropped once the result has been read.
 
 ## Container images
 
-One Apptainer image, `agent-py312.sif`, serves the whole system. It is
-fetched once from Hugging Face to `~/outerloop-images`, or named explicitly
-with `OUTERLOOP_IMAGE`. Sessions run inside it with the workspace, the run
-home and the harness's own files bound in. Compute-node jobs run inside it
-with a clean environment, GPUs exposed, a seeded `uv` cache, and a worktree
-that is deleted at exit. Harness binaries are pinned by version and SHA-256
-in `harnesses.toml`.
+One Apptainer image, `agent-py312.sif`, serves the whole system. It is fetched once from Hugging Face to `~/outerloop-images`, or named explicitly with `OUTERLOOP_IMAGE` (see the [environment reference](reference/environment.md)). Sessions run inside it with the workspace, the run home and the harness's own files bound in. Compute-node jobs run inside it with a clean environment, GPUs exposed, a seeded `uv` cache and a worktree that is deleted at exit. Harness binaries are pinned by version and SHA-256.
 
 ## No database by design
 
 Three properties carried more weight than query convenience.
 
-The first is crash safety. Every change is a whole file written by rename, a
-lock-guarded append or a compare-and-swap on a branch head, so no step leaves
-half-written state, and the kernel can be killed at any line and resume from
-what is on disk.
+The first is crash safety. Every change is a whole file written by rename, a lock-guarded append or a compare-and-swap on a branch head, so no step leaves half-written state. The kernel can be killed at any line and resume from what is on disk.
 
-The second is portability. A shared filesystem and git behave the same on a
-university cluster, on cloud Slurm and on one workstation. The third is
-auditability. The record is plain files and git history that a human can read
-without the kernel's help.
+The second is portability. A shared filesystem and git behave the same on a university cluster, on cloud Slurm and on one workstation. The third is auditability. The record is plain files and git history that a human can read without the kernel's help.

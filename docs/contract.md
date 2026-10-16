@@ -1,98 +1,175 @@
-# The contract
+# Writing a contract
 
-One file in the target repo. The minimum:
+A contract is one file, `.outerloop.yaml`, at the root of the repository the
+agents will work on. It defines what "better" means, how much compute an
+agent may spend, and which paths it may write. This page walks through one
+worked contract and the decisions behind it. Every field, default and
+constraint is listed in the [contract reference](reference/contract.md).
+
+## A worked contract
+
+Two benchmarks in one research repo, one CPU and one GPU:
 
 ```yaml
 benchmarks:
-  - name: my-benchmark
-    command: uv run python -m mypkg.eval --json   # prints {"success_rate": 0.42}
+  - name: reach-success
+    command: uv run python -m mypkg.eval --json
     metric: success_rate
-    direction: max
+    direction: max          # higher is better; min means lower is better
+    seed_env: MYPKG_SEED     # the eval reads its run seed from this variable
+    min_delta: 0.02          # a win must clear this many absolute units
+  - name: train-time
+    command: uv run python -m mypkg.eval --timing --json
+    metric: train_seconds
+    direction: min
+    seed_env: MYPKG_SEED
+    min_delta_rel: 0.05      # or this fraction of the recorded level
+    eval_minutes: 45         # evals longer than 5 minutes run as their own jobs
+    gpus: 1                  # on one GPU
+    regression:              # what a shared-code change may cost here
+      free_rel: 0.01
+      max_rel: 0.25
+      requires_gain_rel: 0.05
 budgets:
-  gpu_hours_per_run: 8
-  runs_per_week: 10
+  gpu_hours_per_run: 24
+  runs_per_week: 20
 scope:
-  allowed: [src/]                                # the ONLY paths the agent may write
-roadmap: docs/roadmap.md
+  allowed: [src/, tests/]    # the only paths an agent may write
+  shared: [src/model/]       # shared code: touching it re-measures siblings
+roadmap: docs/roadmap.md     # what the agents read for direction; never written
 ```
 
-The knobs that shape a climb, all optional:
-
-| Knob | What it decides |
-| --- | --- |
-| `seed_env`, `min_delta` / `min_delta_rel` | Paired seeding for resampled evals, and the significance floor a delta must clear — calibrate it from seed variance, the gate enforces it |
-| `regression.free_rel`, `max_rel`, `requires_gain_rel` (or absolute `free`, `max`, `requires_gain`) | Per-benchmark sibling regression allowance, independent of its win floor |
-| `eval_minutes`, `gpus` | Evals that need their own job (and GPUs) are dispatched to the cluster rather than run in the author's job |
-| `baseline: paired \| cached` | Re-measure the base tree beside every candidate, or measure it once per base and run only candidates |
-| `depth_k`, `sleep_k` | How many experiments an author may launch and how many times it may sleep for results |
-| `max_active_attempts`, `attempt_cooldown_minutes` | Width: authors abreast on one target; pacing between attempts (0 for a hot loop) |
-| `max_concurrent_gpus` | The pace ceiling for an author's sweeps, in GPUs: a sweep runs at most this many GPUs' worth of tasks at once (`--array=0-N%K`, K = ceiling / `gpus`). Lenient by design; unset = the author's own pace |
-| `steward.allowed` | Paths a separate stewardship lane may maintain (the ruler, the harness) — never the solver |
-| `merge: manual \| auto` | Whether a gate-and-panel-clean PR waits for a human or merges itself |
-| `guidance: default \| none \| <dir>` | Which research-taste pack the author brief and the panel judges carry, as advisory text: the kernel's default pack, nothing, or a repo-relative directory holding `author.md` and `panel.md` (recommended `.github/outerloop/guidance/`, which agents can never write) |
-| `verification: gate \| self_report` | Per-benchmark verification: kernel measurements by default, or explicitly labelled author claims |
-| `channels.siblings`, `messages`, `shared_reports`, `branches` | Contract-wide switches for kernel-mediated sharing; all default to true |
-
-For GPU benchmarks `gpu_hours_per_run` is a real budget. An author's
-experiment launches and its gate evals (baseline and candidate when paired)
-draw on it, and the author sets how long its final eval may run
-(`submit --minutes`). Compute is charged to the author that spends it; it
-is never the metric. CPU benchmarks are not metered.
-
-`guidance` selects the research-taste pack: the kernel's agent-facing text
-carries only mechanics, and taste (how to pick directions, how much
-landscape a claim needs) arrives as a labelled advisory section at the end
-of the author brief and in the panel judges' prompt — never inside the
-claim body, which the judges fence as untrusted data. `default` ships the
-kernel's pack, `none` ships nothing, and a directory is read via git
-objects from the same ref as the contract — `author.md` and `panel.md`,
-each capped at 8,000 characters, a missing file meaning empty guidance
-(a symlink blob is refused). The panel never blocks on guidance; it
-blocks only on validity (harness exploitation, ruler/seed fishing, data
-leakage, a confirmed claim-vs-evidence contradiction, and scope and
-measurement facts).
+Validate the file before you push it:
 
 ```bash
-uv run python -m outerloop.contract_cli .outerloop.yaml   # validate before you push
+uv run python -m outerloop.contract_cli .outerloop.yaml
 ```
 
-Each benchmark can set `verification: gate | self_report`. The default,
-`gate`, retains kernel measurement, suite checks and the configured panel.
-Verification belongs to the benchmark because it changes the meaning of that
-metric's claims, just as its baseline protocol does.
+The command prints what the agent would be allowed to do, or exactly what is
+wrong. Run it from any environment with `outerloop-science` installed.
 
-With `self_report`, submit requires `--claimed-value <number>` and
-`--claimed-baseline <number>`. Both must be finite numbers. The comparison
-baseline is explicitly an author claim too, rather than an implicit selection
-from another run's ledger. The kernel checks scope, seals the candidate, and
-applies its usual relative improvement threshold (0.5% by default) and the benchmark's
-`min_delta` and `min_delta_rel` to the claimed pair. Both floors must be met;
-an unchanged tree or a failing claim receives no credit. A valid passing
-claim follows the usual PR publication path. Neither value is re-measured,
-no suite evaluations run, and no panel runs. Submit spends one sleep and no
-evaluation GPU-hours; separately requested experiments retain their normal
-budgets. As with an inline gate, launches staged alongside a submit do not run
-and must be staged separately. Trust submissions also work without a compute
-backend; launches and checkpoint sleeps still require one.
+## Choosing a benchmark
 
-Reports, PRs, submission ledger rows and board status identify these results
-as self-reported (`provenance: self_reported`). Run records carry
-nondefault `verification` and `channels` fields, and any published
-`claimed_value` and `claimed_baseline`. The submission ledger records the claim
-when the PR opens; the main leader still advances only after an observed merge.
-A self-reported solver claim cannot replace an existing measured leader series
-without a ruler reset. The author gets no permission to edit the contract,
-roadmap, `.github/`, steward files or any other path outside solver scope.
+The `command` must be deterministic and re-runnable, and must print the
+metric as JSON on one line. That is what lets the kernel re-measure a change
+itself, and lets your own CI re-verify any improvement an agent claims.
 
-A run keeps the verification mode it started with; a contract change applies
-to runs that start after it. Channel switches take effect at a running attempt's
-next wake.
-Self-reported PRs never arm automatic merging, including under `merge: auto`:
-they have no clean panel blessing. With `merge: manual`, nothing merges
-without the existing human process.
+One benchmark usually measures one artifact well. If a change should be
+judged across the whole suite at once, add an aggregate and every benchmark
+is measured per change, with no cherry-picking:
 
-Sharing is controlled at contract level, with all four channels enabled by
-default:
+```yaml
+suite:
+  metric: mean_success_rate
+  direction: max
+```
+
+## Seeding and the significance floor
+
+Noise must not count as an improvement, and a floor is what stops it. Two
+decisions set that up.
+
+- `seed_env` names the environment variable your eval reads its run seed
+  from. The kernel draws one fresh seed per measurement pass and pins both
+  sides of a comparison to it, so the comparison shares its luck. Your eval
+  must read the seed from that variable, print it to stdout, and never write
+  it into the tree.
+- `min_delta` is an absolute floor in metric units, right for a bounded
+  metric such as a success rate. `min_delta_rel` is a fraction of the
+  recorded level, right for an unbounded metric such as a wall time. Set
+  either or both. When both are set, the more conservative one applies.
+
+Calibrate the floor from seed variance: run the base tree several times at
+different seeds and measure the spread. A floor inside the spread lets noise
+through. A floor far above it freezes real progress. On top of any floor, a
+relative improvement smaller than 0.5% never counts as progress on its own.
+
+By default the gate re-measures the base tree beside every candidate, both
+under one fresh seed, at two evals per attempt. Set `baseline: cached` to
+measure the base tree once per base commit instead, which halves eval spend.
+That comparison is unpaired, so the contract must then declare a positive
+floor, and you should calibrate it across seeds.
+
+## Budgets
+
+`runs_per_week` caps how many attempts may start per week. For a GPU
+benchmark, `gpu_hours_per_run` is a real meter: every experiment an author
+launches and both gate evals of a submission draw on it, and an over-budget
+request is refused with the numbers. The author states how long its final
+eval may run when it submits, so a slower eval is paid for out of the budget
+rather than killed. CPU benchmarks are not metered.
+
+A run that opens a pull request gets a one-time top-up on top of these
+budgets, 2 launches, 4 sleeps and 0.5 GPU-hours by default.
+
+## Scope
+
+`scope.allowed` lists the only paths an agent may write. Keep it as narrow as
+the work requires. The validator refuses the repository root, glob patterns
+and any path outside the repo. Four paths are never writable whatever the
+contract says: the contract itself, your roadmap, `.github/`, and a guidance
+directory if you declare one.
+
+`scope.shared` lists code every benchmark exercises, such as a shared model
+or training loop. A change that touches a shared path is measured on every
+benchmark, and a sibling regression past its floor refuses the credit.
+
+## Regressions on sibling benchmarks
+
+By default a sibling benchmark may not regress beyond the larger of its own
+absolute and relative floors. A `regression` block softens that for one
+benchmark when shared code changes. In the worked contract above:
+
+- A win on `train-time` still needs its 5% floor.
+- As a sibling, a regression up to 1% (`free_rel`) is free.
+- A regression between 1% and 25% (`max_rel`) needs at least 5% measured
+  gain on the climbed benchmark (`requires_gain_rel`).
+- A regression of 25% or more is refused regardless of gain.
+
+Relative values are fractions of the sibling's baseline. Absolute twins
+(`free`, `max`, `requires_gain`) exist for metrics where units read better
+than percentages. Use one family per block, never both.
+
+## Depth and pacing
+
+An attempt is metered on actions, not on a loop the kernel drives.
+`depth_k` caps how many experiment jobs an author may launch (default 10),
+and `sleep_k` caps how many times it may sleep waiting for results (default
+20). Batching many launches under one sleep costs one sleep.
+
+Pacing between attempts defaults to a 6-hour cooldown. Set
+`attempt_cooldown_minutes: 0` to run attempts back-to-back. Width defaults
+to one author at a time. Raise `max_active_attempts` to run several abreast,
+each with its own agent identity. `max_concurrent_gpus` caps how many GPUs
+one author's sweep may hold at once. `runs_per_week` remains the spend guard
+in every shape.
+
+## Publication and verification
+
+The remaining decisions are what happens to a clean pull request, who
+vouches for the measurement, and what taste the agents carry.
+
+- `merge` controls the end of a clean pull request. The default, `manual`,
+  waits for a human. `merge: auto` lets the kernel merge a clean pull request
+  at the blessed head. Set branch protection with your repo's own required
+  checks under strict up-to-date enforcement and no required review.
+- `verification` controls who measures. The default, `gate`, is the kernel's
+  own measurement, suite checks and panel. `self_report` accepts an
+  explicitly labelled author claim instead: submit requires two claimed
+  numbers, the kernel applies the usual floors to the claimed pair, nothing
+  is re-measured and no panel runs. Reports, ledger rows and the board label
+  these results as self-reported, and they never arm automatic merging.
+
+A third optional switch, `guidance`, selects the research-taste pack the
+author brief and the panel carry: the kernel's default pack, none, or a
+repo-relative directory with `author.md` and `panel.md`. Guidance is
+advisory text and agents can never write it.
+
+## Sharing and isolation
+
+All kernel-mediated sharing is on by default: sibling snapshots, inter-agent
+messages, shared reports and sibling branches. Turn any of them off under
+`channels` when a repo should work more privately.
 
 ```yaml
 channels:
@@ -102,88 +179,15 @@ channels:
   branches: true
 ```
 
-`siblings: false` removes the sibling syscall example and direction-selection
-nudge from the brief, delivers an empty sibling snapshot at startup and wake,
-and limits the queue view to this run's jobs. Tool-update wake text no longer
-advertises other agents' jobs. `messages: false` removes messaging from the
-brief and wake protocol, and refuses inter-agent delivery in both the CLI and kernel, with a clear
-reason. Operator thread posts and self reminders remain available; incoming
-messages are refused when the recipient disables messaging too.
+These switches control what the kernel delivers, not repository access. An
+author with its own credentials can still fetch remote refs and read pull
+requests, and objects fetched before a switch was turned off cannot be
+erased. Use fresh runs and independent private repositories when isolation
+matters.
 
-`shared_reports: false` removes recent reports, distilled lessons, archive
-advertising and the research-log pointer from the brief. No shared report
-archive is fetched for the author. `branches: false` removes the sibling-branch
-suggestion and excludes other agents' `agents/agent-NN` refs from kernel fetches
-at startup, wake, mid-session `sync`, preflight and publication. The author's own
-line continues to work. Startup reads policy in a temporary kernel checkout. Defaults reuse that
-checkout without an additional fetch; restricted authors receive a fresh
-base-only clone before filtered refs are fetched. Steward startup uses the same
-policy and filtering.
-When either sibling or shared-report visibility is disabled, the kernel reads
-any enabled research-log view in a temporary repository, delivering only that
-view instead of making the entire research-log branch available locally.
+## Changing a running contract
 
-These settings control kernel-mediated sharing, not repository authorization.
-Other PR branches and shared base history remain available. These switches
-cannot stop an author with its own credentials from fetching remote refs,
-reading PRs or using external communication. Already fetched Git objects,
-previous session context, merged code and content copied through another enabled
-channel cannot be erased by changing a switch. Use fresh runs and independent
-private repositories when isolation matters. Disabling shared reports withholds
-the whole report archive, including earlier reports from the same slot; the
-slot's own line memory remains available.
-
-Judges can already be pinned independently of authors in operator settings.
-Set every lens explicitly, for example
-`OUTERLOOP_PANEL=verify:claude:fixed-judge,review:claude:fixed-judge`, or pass the
-same value to `uv run python -m outerloop.attempt --panel`. Each entry is
-`kind:backend:model`; specifying both backend and model prevents inheritance
-from either the fleet author or a rebound author. Supported judge backends are
-`claude`, `codex` and `hermes`. Endpoint-backed judges use
-`kind:backend:model[endpoint=judge-profile]` with their own judge credential.
-Omitted models retain today's author-model inheritance. This existing setting
-needs no additional contract pin; self-report verification bypasses the panel.
-
-### Conditional sibling regressions
-
-When shared code changes, a sibling can opt into a separate regression policy:
-
-```yaml
-- name: rollout-mem
-  command: ./bench --memory --json
-  metric: rollout_mem_bytes_f16
-  direction: min
-  min_delta_rel: 0.05
-  regression:
-    free_rel: 0.005
-    max_rel: 0.5
-    requires_gain_rel: 0.05
-```
-
-A win on this benchmark still requires at least 5% saved. As a sibling,
-regressions up to and including 0.5% are free; larger regressions below 50%
-require at least 5% measured gain on the climbed benchmark. A regression of
-50% or more is refused regardless of gain. Reports and suite verdict rows
-record the applied rule, such as `free-allowance`, `gain-unlocked`,
-`insufficient-gain`, or `hard-cap`.
-
-Use one unit family per block. Relative values are fractions of the absolute
-baseline; `free_rel` defaults to this sibling's `min_delta_rel`, or zero.
-The absolute twins `free`, `max`, and `requires_gain` use sibling metric units
-for losses and climbed metric units for gains; `free` defaults to `min_delta`,
-or zero. An empty block selects relative units when `min_delta_rel` is set,
-otherwise absolute units. The default free allowance must also be at most max.
-
-All values must be finite and nonnegative. `requires_gain_rel` needs `max_rel`
-(and `requires_gain` needs `max`). Without a cap, the free allowance is the
-entire tolerance. With a cap but no gain requirement, every regression below
-the cap is allowed. The cap is exclusive and takes precedence when free equals
-max. Non-regressing siblings pass, including when max is zero. Non-finite
-measurements fail closed. A zero sibling baseline scales relative allowances
-to zero; a zero climbed baseline cannot unlock a relative gain requirement.
-Negative baselines use their absolute magnitude as the scale.
-
-Omitting `regression` preserves the existing gate exactly: a regression is
-refused only when it exceeds the larger of the sibling's absolute and scaled
-relative significance floors. This block changes only sibling checks, not
-whether this benchmark qualifies as the climbed benchmark's improvement.
+A run keeps the verification mode it started with, and other changes apply to
+runs that start after the contract changes. Channel switches take effect at
+a running attempt's next wake. Agents can never edit the contract, the
+roadmap or anything under `.github/`.

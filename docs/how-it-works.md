@@ -1,10 +1,6 @@
 # The kernel and its agents
 
-Outerloop runs untrusted research agents against a small trusted kernel, and
-only the kernel's own measurement can grant credit for a change. This page
-explains the parts of that split everyone meets: where trust sits, how agents
-talk to the kernel, how runs wait for experiments, and how a change earns
-credit. The full design lives in [the architecture page](design/architecture.md).
+Outerloop runs untrusted research agents against a small trusted kernel, and only the kernel's own measurement can grant credit for a change. This page explains the parts of that split: where trust sits, how agents reach the kernel, how a run waits out its experiments, and how a change earns credit.
 
 ## The kernel at a glance
 
@@ -102,8 +98,8 @@ credit. The full design lives in [the architecture page](design/architecture.md)
 <text x="688" y="366" class="bl" text-anchor="start">delivers them</text>
 <rect x="1002" y="280" width="252" height="112" rx="6" class="box k"/>
 <text x="1014" y="304" class="bt" text-anchor="start">Session watcher</text>
-<text x="1014" y="326" class="bl" text-anchor="start">answers queue, history and</text>
-<text x="1014" y="346" class="bl" text-anchor="start">sync in seconds, while</text>
+<text x="1014" y="326" class="bl" text-anchor="start">answers queue and history</text>
+<text x="1014" y="346" class="bl" text-anchor="start">in seconds, while</text>
 <text x="1014" y="366" class="bl" text-anchor="start">the session waits</text>
 
 <rect x="676" y="410" width="260" height="120" rx="6" class="box kc"/>
@@ -195,77 +191,38 @@ credit. The full design lives in [the architecture page](design/architecture.md)
 <figcaption>The diagram shows one run's path through the system. Orange arrows trace the credit path.</figcaption>
 </figure>
 
-The kernel's parts are few. A resident tick, either a long-lived Slurm job or
-a local loop, does all the acting. A meter guards budgets, a dispatcher turns
-launches into cluster jobs, an inbox holds what a woken agent should see, and
-a session watcher answers live questions while a session waits. The gate
-measures, the panel rules judge, publish opens pull requests, and the ledger
-records every confirmed gain.
+One resident loop, either a long-lived cluster job or a local process, does all of the kernel's acting. A meter guards the run's compute budget, and a dispatcher turns each launch into a cluster job. An inbox collects what a woken agent should see, and a session watcher answers live questions while a session waits. The gate measures submissions, the panel rules on judged work, publish opens pull requests, and the ledger records every confirmed gain. The [syscall reference](reference/syscalls.md) lists the verbs agents use to reach all of it.
 
 ## The trust boundary
 
-Everything inside the sandbox is untrusted. Author agents work in a container
-with no repository credentials, so they cannot push, merge or comment on
-GitHub. Their edits are confined to the paths the contract allows, and three
-paths are forbidden everywhere: the contract itself, the roadmap and
-`.github/`. Judge agents are read-only by design, and the kernel decides when
-they run. Maintenance agents work in their own lane and never touch solver
-credit.
+Everything inside the sandbox is untrusted. An author session runs in a container with no GitHub credentials, so it cannot push, merge or comment. Its edits stay within the paths the contract allows, and three places are forbidden everywhere: the contract itself, the roadmap and `.github/`. Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
 
-Everything outside the sandbox is trusted kernel code. It meters compute,
-dispatches jobs, measures submissions and publishes results, and it is the
-only writer to the target repository, through a GitHub App. Because judges
-work on author-written checkouts, the kernel re-creates the `.outerloop/`
-channel they speak through and validates every field they commit. The full
-threat model lives in [the architecture page](design/architecture.md).
+Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it is the only writer to the target repository, through a GitHub App. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
 
 ## The syscall surface
 
-Agents reach the kernel only through one command-line tool, installed at
-`.outerloop/syscall` in the workspace. The tool is a single standalone Python
-file with no dependencies, so any harness can call it: Claude Code, Codex and
-Hermes all use the same verbs. Which verbs a role may call is set by its role
-specification, so a new role or harness needs no kernel change.
+Agents reach the kernel only through one command-line tool, installed at `.outerloop/syscall` in the workspace. The tool is a single Python file with no dependencies, so any harness can call it. Which verbs a role may call comes from its role specification, so a new role or harness needs no kernel change.
 
-The tool checks arguments and gives fast feedback, but it is not the trust
-boundary. It stages requests into `.outerloop/request.json`, and the
-committing verbs write a typed request to `.outerloop/syscall.json`, which the
-kernel reads after the session ends. The kernel re-validates every field
-authoritatively. The [syscall reference](syscalls.md) lists each verb, its
-arguments and its refusals.
+The tool checks arguments and gives fast feedback, but it is not the trust boundary. It stages every request into `.outerloop/request.json`; the committing verbs also write a typed request to `.outerloop/syscall.json`, which the kernel reads after the session ends. The kernel then re-validates every field. The [syscall reference](reference/syscalls.md) lists each verb, its arguments and its refusals.
 
 ## Sleep and wake
 
-A run is one hypothesis, and no single agent session spans a multi-hour GPU
-experiment. The author stages the jobs it wants, then calls `sleep` and ends
-its turn. The session ends, so no model tokens are spent waiting, and the
-kernel submits each launch as a cluster job on a frozen snapshot of the code.
+A run is one hypothesis, and no agent session spans a multi-hour experiment. The author stages the jobs it wants, calls `sleep` and ends its turn. The session ends, so no model tokens are spent waiting, and the kernel submits each launch as a cluster job on a frozen snapshot of the code.
 
-When every job has finished, the kernel wakes the same session. The author
-resumes with its plan, notes and prior context intact, and finds each job's
-exit code, output tails and delivered artifacts in its inbox. The cycle
-repeats, launch by launch, until the author submits or stops the run. How the
-kernel parks and resumes a run safely is the subject of [the concurrency
-page](concurrency.md), and the message format is covered in [the inbox
-reference](inbox.md).
+When every job has finished, the kernel wakes the same session. The author resumes with its plan, notes and prior context intact, and finds each job's exit code, output tails and delivered artifacts in its inbox. The cycle repeats, launch by launch, until the author submits or stops the run. [The concurrency page](concurrency.md) covers how the kernel parks and resumes a run safely, and the [inbox reference](reference/inbox.md) covers the message format.
 
-## The credit path
+## The gate
 
-Only the kernel's own measurement grants credit, and nothing else can. A
-`submit` seals the author's tree. The gate then measures the candidate
-against the base, either as a paired comparison or against a cached baseline
-measurement, under a seed the kernel draws at measurement time. The candidate
-is credited only when its gain beats the calibrated floor in the contract
-(`min_delta`), so seed luck cannot pose as progress.
+A `submit` seals the author's tree, and only the kernel's measurement can credit it. The gate measures the candidate against the base, either as a paired comparison under one fresh seed or against a cached baseline for that base commit. The kernel draws the seed at measurement time, so the author cannot tune to it. The candidate is credited only when its gain beats the floor the contract sets (`min_delta`), so seed luck cannot pose as progress. The contract's `baseline` field chooses between the two protocols, and [writing a contract](contract.md) walks through that choice.
 
-Judges come after credit, not before. On a credited submission the kernel
-spawns judge agents, and their verdicts are combined by fixed rules. A judge
-can withhold credit with a blocking finding, which goes to the author's
-inbox for a revision, but no judge can grant credit or publish code.
+## The meter
 
-Publishing is also the kernel's alone. A credited, cleared submission
-becomes a pull request carrying the measured numbers and the author's report,
-held as a draft until the panel clears it. A human merges it, or the contract
-opts into `merge: auto`. Only when the kernel sees the merge does it record
-the gain as confirmed in the ledger, and the merged code becomes the next
-runs' base.
+Every run carries a compute budget from the contract. Launches and a submit's gate evals draw GPU-hours from it, and a request that would cross the budget is refused with the numbers. Launch walltime the jobs did not use is refunded once they finish. Weekly fleet spend is capped separately by the contract's runs-per-week budget.
+
+## The panel
+
+Judges come after credit, not before. On a credited submission the kernel spawns judge agents, and their verdicts are combined by fixed rules. A blocking finding wakes the author with the findings for a revision. A submission that cannot be revised opens as a draft pull request with the findings open for a human. No judge can grant credit or publish code.
+
+## Publishing and the ledger
+
+Publishing is the kernel's alone. A credited submission becomes a pull request carrying the measured numbers and the author's report, pushed to its own branch. It opens ready for review when the panel is clean, and as a draft while blocking findings remain or the panel could not run. A human merges it, or the contract opts into automatic merge. Only when the kernel sees the merge does it record the gain as confirmed in the ledger, and the merged code becomes the next runs' base.

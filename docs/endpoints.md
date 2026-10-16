@@ -1,8 +1,15 @@
 # Self-hosted model endpoints
 
-Authors, panel judges, and the standalone reviewer use the same named endpoint
-profile. Put coordinates and a **key-file path**, never a bearer key, in the
-operator `.env`:
+Outerloop can run its authors, panel judges and the standalone reviewer
+against models you host yourself, such as a vLLM server or an internal
+gateway. This page covers defining an endpoint profile in the operator
+environment, selecting a profile for each role, and what happens when a
+server's address changes. It assumes the [install guide](install.md) setup.
+
+## An endpoint profile
+
+A profile is a name plus five settings in the operator `.env`. Put
+coordinates and a key-file path in the file, never a bearer key:
 
 ```dotenv
 OUTERLOOP_ENDPOINT_AUTHOR_URL=https://llm.example.internal/v1
@@ -17,236 +24,113 @@ OUTERLOOP_ENDPOINT_JUDGE_API=chat,anthropic
 OUTERLOOP_AUTHOR_BACKEND=hermes
 OUTERLOOP_AUTHOR_ENDPOINT=author
 OUTERLOOP_PANEL=verify:hermes:[endpoint=judge],review:claude:open-model[endpoint=judge]
-REVIEW_HERMES_REPO=/opt/hermes-agent
-OUTERLOOP_IMAGE=/opt/agent.sif
 ```
 
-The files must be readable, nonempty, and private (`chmod 600`). Paths must be
-absolute (`~` is expanded). Profile names start with a letter and contain only
-letters, digits, and underscores; references are case-insensitive and their env
-keys are uppercase. The profile allowlist forwards `_URL`, `_URL_FILE`,
-`_KEY_FILE`, `_MODEL`, and `_API`. URLs cannot contain credentials, a query, or a
-fragment.
+For each profile, `OUTERLOOP_ENDPOINT_<NAME>_<KEY>` takes these values:
 
-A profile owns its model. `OUTERLOOP_AUTHOR_MODEL` may be omitted; if set, it must
-match the profile's served model. Panel syntax is
-`kind[:backend[:model[endpoint=profile]]]`, where kind is `verify` or `review`. Omitting the
-model before `[endpoint=...]` takes the profile model. Native model IDs containing `@`, `/`, and `:` retain their
-meaning. An endpoint author does not lend its profile or credential to an
-implicit judge: select a judge profile or an explicit conventional model. Author
-and judge credentials must differ, including when two files contain the same key.
-Judges can share a judge profile.
+- `URL` or `URL_FILE`: the server's base address. Exactly one of the two is
+  required. `URL_FILE` is for servers whose address changes; see
+  [addresses that change](#server-addresses-that-change).
+- `KEY_FILE`: the path to a file holding the API key. The path must be
+  absolute, and the file readable, nonempty and private (`chmod 600`).
+- `MODEL`: the model the server actually serves.
+- `API`: a comma-separated list of the APIs the server speaks.
 
-For the standalone reviewer/summarizer contract, set `REVIEW_BACKEND`,
-`REVIEW_ENDPOINT`, and optionally `REVIEW_MODEL`. The same profile keys apply;
-`REVIEW_HERMES_REPO` is still required for Hermes. Endpoint selection replaces the
-conventional reviewer key-variable and Hermes provider settings. Library callers
-can pass `endpoint="judge"` to `build_harness` for any role specification.
+Profile names start with a letter and contain only letters, digits and
+underscores. References are case-insensitive and the environment keys are
+uppercase. A profile owns its model: any model you select through the
+profile must match the served `MODEL`, and Outerloop refuses a mismatch
+before a session starts.
 
-## Backend wiring
+The key is read by the orchestrator and passed to the session through its
+environment. It never appears in command lines or in generated provider
+configuration.
 
-The required `_API` declares a comma-separated list of supported APIs: `anthropic`,
-`responses`, and/or `chat`. Preflight requires `anthropic` for Claude, `responses`
-for Codex, and `chat` for Hermes. This declaration validates configuration; it does
-not probe server support.
-Use the base URL accepted by that backend's client. A server may expose all three
-APIs, but if its API prefixes differ, define profiles with the appropriate URLs.
-For example, an Anthropic-compatible client may need
+## The API list
+
+`API` declares which wire protocols the server speaks, out of `anthropic`,
+`responses` and `chat`. The `claude` backend needs `anthropic`, `codex`
+needs `responses` (or `chat` through the bridge below), and `hermes` needs
+`chat`.
+
+Use the base URL accepted by that backend's client. One server can expose
+several APIs under different prefixes, in which case define one profile per
+prefix: an Anthropic-compatible client may need
 `https://llm.example.internal` while OpenAI-compatible clients need
 `https://llm.example.internal/v1`.
 
-- **Claude Code:** `ANTHROPIC_BASE_URL` (the profile URL without a trailing `/v1`,
-  since Claude Code appends `/v1/messages`) and `ANTHROPIC_AUTH_TOKEN`; the profile
-  model also sets the default Opus, Sonnet, Haiku, and small-fast model variables.
-  Nonessential traffic is disabled. Vertex, Bedrock, and Foundry are disabled;
-  API keys, ADC, and ambient authentication are excluded from the session env.
-- **Codex:** the per-run `.codex/config.toml` selects a named provider with
-  `base_url`, `env_key`, `wire_api = "responses"`, and
-  `requires_openai_auth = false`. Custom-provider sessions skip OpenAI login.
-  This follows the [official configuration reference](https://developers.openai.com/codex/config-reference).
-  In a live test against a self-hosted vLLM server, requests reached the local
-  Responses endpoint and succeeded, but the session filed no verdict: the served
-  model's tool calls did not come back through that server's Responses API. Use
-  Claude Code or Hermes for self-hosted endpoints until this is resolved.
-- **Hermes:** the per-run `.hermes/config.yaml` selects a named
-  `custom_providers` list entry with `base_url`, `key_env`, and
-  `api_mode: chat_completions`. **`reasoning_echo: true` belongs under `model`,
-  not inside the custom-provider entry.** No `--base_url` override is passed.
-  `TERMINAL_CWD` selects the workspace while sample files stay in the private
-  session home.
+## Codex on a chat endpoint
 
-Keys are read by the orchestrator and placed only in the session environment.
-Contained sessions receive them through `APPTAINERENV_*`; keys are never put in
-argv or generated provider config files. Existing role budgets and containment
-requirements still apply. Hermes authors require an endpoint profile and the
-pinned source/runtime installation. Configure Hermes author settings directly in
-`.env`; the interactive init wizard still provisions native Claude/Codex authors.
+A Codex author or judge may select a profile whose `API` lists only `chat`.
+Install the bridge first, which pins a translation proxy alongside the
+session:
 
-Start/tick/climb and reviewer resolution reject unknown profiles, invalid or
-missing key files, unsupported backends, and model/profile mismatches before a
-model session. Tick also checks judge credential separation and Hermes runtime
-readiness before claiming work. These are local configuration checks, not probes
-of a server's authentication, API support, or model availability.
+```bash
+outerloop harness upgrade --used
+```
 
-## Hermes v2026.9.24 interface audit
+A profile that also lists `responses` uses the direct endpoint instead. The
+bridge supports text, reasoning, function tools and freeform tools such as
+`apply_patch`. It rejects hosted tools, images, WebSockets, server-side
+response references and remote compaction.
 
-Read both tags from a clone outside the worktree. The new tag resolves to
-`f97608f178d1ffeca59860195ab7da295f7c8e5f`; the previous v2026.8.13 pin was
-`f80f453ae0679347e38abc917c7f94f717bf96c5`.
+## Selecting a profile for each role
 
-- `run_agent.py` now delegates to
-  [`agent/legacy_cli.py`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/legacy_cli.py).
-  **argparse replaced Fire.** The underscore flag spellings remain accepted
-  (`query`, `model`, `max_turns`, `save_sample`, enabled/disabled toolsets).
-  Embedded Fire quotes must be removed from comma-separated toolsets. The
-  harness argv was exercised against the new source's actual parser function.
-- [`run_agent.py::_save_sample_trajectory`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/run_agent.py#L1485)
-  still writes `sample_<id>.json` in cwd, with `conversations`, timestamp, model,
-  completed, and query. The ShareGPT turns still use `from`/`value`; assistant
-  turns use `gpt`. The implementation moved into helpers; the envelope remains
-  compatible. The new fixture was generated with the actual converter and
-  sample writer on synthetic input (no inference).
-- [`agent/reasoning_params.py`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/reasoning_params.py)
-  reads `model.reasoning_echo`, an opt-in absent at the old pin. It preserves
-  reasoning on earlier turns within the native conversation. The kernel's
-  existing resume-by-brief mechanism is unchanged; it is not a native replay of
-  the full tool/reasoning history across separate harness invocations.
-- [`hermes_cli/runtime_provider_custom.py`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/hermes_cli/runtime_provider_custom.py)
-  still resolves named `custom_providers` and their `key_env` credential pointers.
-  The newer `providers` mapping coexists with the supported legacy list form.
-  `model.provider` and `model.default` in `config.yaml` remain the seed contract.
-- [`toolsets.py`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/toolsets.py)
-  still defines every toolset the harness uses: file, terminal, web, search,
-  browser, computer_use, code_execution, delegation, cronjob, skills, memory.
-- [`agent/prompt_builder.py`](https://github.com/NousResearch/hermes-agent/blob/f97608f178d1ffeca59860195ab7da295f7c8e5f/agent/prompt_builder.py)
-  now recognizes `AGENTS.override.md` before `AGENTS.md`/`agents.md`, walks the
-  git-root-to-cwd chain, and avoids accidental install-tree fallback. Its
-  `.hermes.md`/`HERMES.md`, lowercase Claude/agents files, and cursor rules are
-  also auto-load surfaces (several already existed at the old pin). Judge
-  sanitization now covers all these names.
+Each role selects its own profile and credential.
 
-## Upgrade and rollback
+- The author runs on a backend plus profile:
+  `OUTERLOOP_AUTHOR_BACKEND=hermes` and `OUTERLOOP_AUTHOR_ENDPOINT=author`.
+- Panel judges are configured per lens in `OUTERLOOP_PANEL`. An entry is
+  `kind:backend:model[endpoint=profile]` where kind is `verify` or `review`,
+  and the model may be omitted to take the profile's served model. A lens
+  that names no model and no profile runs the author's model when it runs
+  the author's backend, and a lens on any other backend must name its model.
+- The standalone reviewer uses `REVIEW_BACKEND`, `REVIEW_ENDPOINT` and
+  optionally `REVIEW_MODEL`.
 
-The run-record schema is unchanged. New endpoint authors persist
-`<served-model>[endpoint=<profile>]` in `author_model` and the resolved key-file path in
-`author_key_file`. Resuming uses the saved selector, never the fleet's current
-`OUTERLOOP_AUTHOR_ENDPOINT`. Retain referenced profile definitions until those
-runs finish; changing a profile's URL/key changes that profile's routing, while
-changing its served model makes old runs fail validation rather than silently
-switch models.
-
-Legacy records (including records missing backend/model fields), ended runs,
-inbox messages, PR branches, and Hermes resume files remain readable without a
-backfill. The fixture from kernel `5563c46` exercises the existing record writer's
-output through load, repeat, and save/reload retry paths. Existing older run and
-panel fixtures remain in the suite. The first tick preserves legacy routes and
-validates endpoint settings for new work; it does not migrate parked sessions or
-rewrite PRs/messages. Sanitization runs on disposable judge checkouts.
-
-Rollback is safe for conventional runs. Finish endpoint-backed runs and remove
-endpoint selections before rolling back to a kernel that does not understand
-`[endpoint=profile]`; that kernel cannot safely resume their model selectors. Reinstall the
-Hermes version required by the chosen kernel. The Hermes pin and argparse harness
-change must ship together; overriding only the pin to the older Fire version is
-not supported.
-
-## Offline client validation limits
-
-`test_exact_client_configuration_at_process_boundary` checks the exact argv,
-environment, and provider config passed to all three clients, in contained and
-uncontained sessions, including client failure. It checks that ambient vendor
-credentials/routes are excluded and Codex endpoint sessions never invoke login.
-This is configuration coverage, not evidence of the clients' network behavior.
-The pinned Linux clients/runtime are not available in the offline test environment
-(the installed Claude/Codex binaries have different versions, and Hermes lacks
-its pinned runtime). No test claims to prove absence of client-internal vendor
-fallback. That requires the pinned clients under network observation.
-
-Legacy records with no model use native model defaults only. A missing native
-Codex model fails preflight; it never adopts an endpoint. No backfill is needed.
+Author and judge credentials must differ, including when two files contain
+the same key. Judges may share one judge profile.
 
 ## Server addresses that change
 
-Instead of `OUTERLOOP_ENDPOINT_ONPREM_URL`, set
-`OUTERLOOP_ENDPOINT_ONPREM_URL_FILE=/absolute/path/server-address`.
-Exactly one of `URL` and `URL_FILE` must be configured for a profile. The file
-contains either a bare URL (a trailing newline is fine) or a JSON object:
+Set `OUTERLOOP_ENDPOINT_<NAME>_URL_FILE` to the absolute path of a file the
+address publisher rewrites by atomic rename. The file contains either a bare
+URL or a JSON record:
 
 ```json
 {"url": "http://localhost:8000/v1"}
 ```
 
-Both forms use the same HTTP(S) base URL validation as `URL`: no credentials,
-query string or fragment. Publish updates by atomic rename. The kernel reads
-this file outside the session sandbox each time a session starts, including
-resumes and wakes; an already constructed harness does not cache its value.
+The record may also carry `model`, which must match the profile, and
+`expires_at`, a Unix time in seconds that must still be in the future. A
+mismatched model, an expired or invalid expiry, or a record over 64 KiB
+makes the endpoint unavailable. A malformed file is a configuration error.
 
-A missing or unreadable address defers intake and parked wakes without spending
-wake retries. At session time the file is read once, then a single models-list
-request checks the server with a three-second timeout and the profile key in an
-Authorization header. Missing files, dead servers, and interrupted checks park
-fresh runs and defer wakes without consuming a wake retry. There is no polling. Malformed contents are configuration errors. Profile names, served model,
-API capabilities and credential paths retain their existing semantics.
+The kernel reads the file outside the session sandbox each time a session
+starts, including resumes and wakes, so publishing a new address reroutes
+the next session without a restart. When a session starts, one
+models-list request checks the server
+with a three-second timeout and the profile key.
 
-### Codex on a chat-completions endpoint
+## Outages
 
-A Codex author or panel lens may select a profile with `API=chat`. Install its
-bridge with `outerloop harness upgrade --used` (or `outerloop harness upgrade
-bridge`); the command records `OUTERLOOP_BRIDGE_RUNTIME`. A profile advertising
-`responses` continues to use the direct endpoint, even if it also lists `chat`.
-Authors, overrides, and judges use their own selected profiles and credentials.
+A missing address file or a dead server parks fresh runs and defers parked
+wakes without spending wake retries, and nothing polls in the background.
+Run `outerloop status` to see which endpoint each run waits for and since
+when:
 
-The bridge runs pinned LiteLLM and a streaming shim inside the session container,
-with a frozen dependency lock and a managed Python runtime mounted read-only.
-Both listeners bind loopback sockets before launching children and require
-independent ephemeral tokens. Only the shim receives the endpoint credential.
-Configuration uses environment references; sidecar payload/debug logs are disabled.
-Exiting or interrupting the session also stops and reaps the bridge processes.
+```text
+my-run target=owner/repo ... waiting for endpoint judge since 2026-10-16T09:00:00+00:00
+```
 
-Codex continues to use Responses over HTTP/SSE and replays full history on resume.
-The bridge supports text, reasoning, function tools, and freeform tools such as
-`apply_patch`. Freeform input travels in a function's `content` string; its grammar
-is described to the model, not enforced by the chat endpoint. Hosted tools,
-images, WebSockets, server-side response references, remote compaction, and
-structured text formats are rejected. Reasoning effort and output token limits
-use LiteLLM's chat translation; model-specific unsupported parameters follow
-LiteLLM's `drop_params` behavior. Codex's ordinary local compaction remains the
-context-management path.
+A successful session probe ends the outage for that run. Other waiting runs
+keep their own wait times until they resume. Endpoint waits never appear on
+the GitHub board.
 
-Offline compatibility tests use a fake chat upstream. To include the real pinned
-proxy and CLI in the test gate, set `OUTERLOOP_BRIDGE_TEST_PYTHON` to the installed
-runtime's `venv/bin/python` and `OUTERLOOP_BRIDGE_TEST_CODEX` to the pinned Codex
-binary before running `uv run pytest -q`. These tests never install packages or
-contact a model endpoint; without these artifacts, the real-binary tests skip.
+## Changing a profile
 
-## Endpoint wait visibility
-
-When a run defers, `stage.endpoint_wait` records the canonical (lowercase)
-profile name as `endpoint` and its first unavailable time as `since` (Unix
-seconds). `outerloop status` shows the endpoint and start time locally.
-Endpoint infrastructure state is excluded from the GitHub board and status strip
-and never triggers a research-log commit. A successful session probe clears that
-run's wait. Other waiting runs retain their own start times until they resume.
-
-The kernel logs one outage-start line for the first waiting run and one recovery
-line with the duration and all run IDs that waited. A locked, atomically written
-`endpoint-waits/<profile>.json` journal shares the outage latch across processes
-and ticks. There are no notifications or extra health probes.
-
-JSON address records may also contain `model` and `expires_at` (finite Unix
-seconds, at most the end of year 9999). When present, the model must match the
-profile and expiry must be in the future. Mismatched models, expired/invalid
-expiry, and records larger than 64 KiB are unavailable. Bare URLs and JSON without these optional fields retain
-their existing behavior. Reads are bounded to 64 KiB plus one byte; the
-existing health request retains its three-second timeout.
-
-## Local operator status
-
-Run `outerloop status` or `outerloop status --root /path/to/state --json` to
-read active runs and current endpoint outages without GitHub, scheduler calls,
-health probes, or state writes. Each run includes its author route and override
-flag, phase, recorded GPU-hours used/budget, and any endpoint wait. Text times
-are UTC; JSON times are Unix seconds. Outage waiting-run IDs come from the shared
-journal; after recovery, individual runs can still retain waits until they resume.
-GPU budgets use the local workspace contract (including review top-ups); missing
-or unreadable contracts show `unknown` (`null` in JSON).
+A run persists the profile it started with, so it does not follow a later
+change to `OUTERLOOP_AUTHOR_ENDPOINT`. Keep the profiles old runs reference
+until they finish. Changing a profile's URL or key reroutes everything that
+selects it, while changing its served model makes old runs fail validation
+rather than silently switch models.

@@ -1,15 +1,17 @@
-# Syscalls
+# Agent syscalls
 
-The syscall tool is the one command-line surface an agent uses to talk to the
-kernel. It is a single standalone Python file the kernel installs at
-`.outerloop/syscall` in the workspace, so any harness can call it. This page
-lists every verb, who may call it, its arguments and what it refuses. [How
-Outerloop works](how-it-works.md) explains the design behind the surface.
+The syscall tool is the one command-line surface an agent uses to talk to
+the kernel. The kernel installs it at `.outerloop/syscall` in the workspace,
+so any harness can call it from any directory. This page lists every verb,
+who may call it, its arguments and what it refuses. The design behind the
+surface is on [the how-it-works page](../how-it-works.md).
 
-A verb is invoked as `python .outerloop/syscall <verb>` from any directory. A
-bad invocation prints the reason to stderr and exits with code 2, staging
-nothing. Most verbs stage a request that the kernel acts on after the session
-ends. The committing verbs are noted below.
+A verb is invoked as `python .outerloop/syscall <verb>`. A bad invocation
+prints the reason to stderr, exits with code 2 and stages nothing. Which
+verbs a role may call is set by its role specification, and the brief names
+them. The tool's checks are fast in-session feedback only. The kernel
+re-validates every field after the session ends, so a role that writes its
+request file by hand is still fully checked.
 
 | Verb | Who | What it does |
 | --- | --- | --- |
@@ -28,11 +30,6 @@ ends. The committing verbs are noted below.
 | [`reports`](#reports) | any | past attempts' research reports |
 | [`sync`](#sync) | any | refresh origin refs now, inside this session |
 
-Which verbs a role may call is set by its role specification, and the brief
-tells the role which verbs it has. The tool's checks are fast in-session feedback
-only. The kernel re-validates every field after the session ends, so a role
-that writes its request file by hand is still fully checked.
-
 ## Author verbs
 
 ### launch
@@ -45,51 +42,46 @@ workspace. Multiple launches accumulate until `sleep` commits them.
 | `--name` | required | 1-32 chars of `a-z`, `0-9` and `-`; unique among staged launches |
 | `--minutes` | 30 | positive integer; clamped to 240 |
 | `--why` | empty | at most 200 chars; shown to every agent in `queue` |
-| `--array` | 1 | positive integer; clamped to 16; one job per task with `SWEEP_INDEX` 0..N-1 |
+| `--array` | 1 | positive integer; clamped to 16; each task runs with `SWEEP_INDEX` 0..N-1 |
 | `--concurrency` | 0 | non-negative; only with `--array`; at most K tasks at once; the contract may cap it |
 | `--artifact` | none | repeatable, at most 8; a repo-relative file path, no traversal |
 | `command` | required | after `--`; at most 2000 chars |
 
-Refused when:
-
-- a stop is staged
-- there is no command after `--`
-- a staged launch already uses the name
-- more than 8 launches would be staged per sleep
+Refused when a stop is staged, when there is no command after `--`, when a
+staged launch already uses the name, or when more than 8 launches would be
+staged per sleep.
 
 ### sleep
 
-Commits the staged launches and any staged submit, then ends the session. The
-kernel submits each launch as a cluster job and wakes the same session with
-the results. Takes no arguments. A sleep with no launches is a checkpoint, and
-it still spends one sleep from the budget. Refused: a stop is staged.
+Commits the staged launches and any staged submit, then ends the session.
+The kernel submits each launch as a cluster job and wakes the same session
+with the results. Takes no arguments. A sleep with no launches is a
+checkpoint, and it still spends one sleep from the budget. Refused when a
+stop is staged.
 
 ### message
 
-Sends a message to the run's PR or issue thread (the default), to yourself, or
-to a sibling agent. The message is committed immediately and posted or
+Sends a message to the run's PR or issue thread (the default), to yourself,
+or to a sibling agent. The message is committed immediately and posted or
 delivered by the kernel.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
-| `text` | none | the message text, or read from `--file`; 1 to 20000 chars |
+| `text` | none | the message text, or read it from `--file`; 1 to 20000 chars |
 | `--file` | none | a file the text is read from |
 | `--to` | `thread` | `thread`, `self` or `agent-NN` |
 | `--reply-to` | none | the sequence number of an inbox message |
 | `--show` | none | print a message chain instead of sending |
 
-Refused when:
-
-- `--show` is combined with a message
-- the destination is not `thread`, `self` or `agent-NN`
-- inter-agent messages are disabled by the contract
-- `--reply-to` names no message in the inbox
-- more than 8 messages would be staged, or the request exceeds 65536 bytes
+Refused when `--show` is combined with a message, or when the destination is
+not `thread`, `self` or `agent-NN`. Inter-agent messages disabled by the
+contract refuse a sibling destination, and `--reply-to` must name a message
+in the inbox. At most 8 messages may be staged, within 65536 bytes.
 
 ### submit
 
-Stages a submit. On the next `sleep` the author's tree is sealed, measured by
-the gate and read by the review panel. A credited verdict publishes it.
+Stages a submit. On the next `sleep` the author's tree is sealed, measured
+by the gate and read by the review panel. A credited verdict publishes it.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
@@ -98,25 +90,24 @@ the gate and read by the review panel. A credited verdict publishes it.
 | `--claimed-value` | none | a finite number; required for self-reported verification |
 | `--claimed-baseline` | none | a finite number; required for self-reported verification |
 
-Refused when a stop is staged, or the report is empty or over the limit.
-Self-reported verification additionally requires the two claimed values.
+Refused when a stop is staged, or when the report is empty or over the
+limit. Self-reported verification additionally requires the two claimed
+values.
 
 ### stop
 
-Ends the run. With `--report`, the report is posted and the run parks
-with an open PR. Without one, the run ends without a PR. Committed
-immediately.
+Ends the run. Without `--report`, the run ends without a PR. With
+`--report`, the report is posted and the run parks with its open PR.
+Committed immediately.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
 | `--report` | empty | a file containing the final report, 1 to 8000 chars |
 | `--withdraw` | none | a reason of 1 to 20000 chars; closes the open PR |
 
-Refused when:
-
-- a submit is already staged or committed
-- a sleep is staged, or a launch is staged
-- `--withdraw` is used with no open PR
+Refused when a submit is staged or committed, when a sleep or launch is
+staged (those already end the turn), or when `--withdraw` is used with no
+open PR.
 
 ## Judge verbs
 
@@ -142,7 +133,7 @@ invalid, or when more than 200 findings would be staged.
 ### conclude
 
 Commits the verdict with all staged findings and ends the session. This is
-the judge's final answer. A judge that concludes nothing fails its round.
+the judge's final answer.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
@@ -177,8 +168,8 @@ runs, the queue is visible again at the next wake.
 
 ### history
 
-Prints this run's launches so far, grouped by sleep, with each job's end state
-and exit code. Answered by the session watcher like `queue`.
+Prints this run's launches so far, grouped by sleep, with each job's end
+state and exit code. Answered by the session watcher like `queue`.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
@@ -194,14 +185,14 @@ in full, several at once.
 | --- | --- | --- |
 | `names` | none | report file names from the summary list |
 
-Refused when shared reports are disabled by the contract's channels, or a
-name is not in the summary list.
+Refused when shared reports are disabled by the contract's channels, or
+when a name is not in the summary list.
 
 ### sync
 
-Asks the kernel to fetch fresh `origin/*` refs and waits inside this session's
-own clock. A timeout is not an error, and the refs refresh free at the next wake
-regardless.
+Asks the kernel to fetch fresh `origin/*` refs and waits inside this
+session's own clock. A timeout is not an error; the refs refresh free at
+the next wake regardless.
 
 | Argument | Default | Constraint |
 | --- | --- | --- |
@@ -213,6 +204,6 @@ The verbs differ in how they reach the kernel. `launch`, `submit` and
 `finding` stage into `.outerloop/request.json`, a file the agent may rewrite
 until it commits. `message`, `sleep`, `stop` and `conclude` write the typed
 request to `.outerloop/syscall.json`, the file the kernel reads after the
-session ends. `sleep` and `conclude` also discard the staged file, so nothing
-is committed twice. Building a request and committing it are separate acts:
-`status` shows what is staged, and `cancel` discards it.
+session ends. `sleep` and `conclude` also discard the staged file, so
+nothing is committed twice. Building a request and committing it are
+separate acts: `status` shows what is staged, and `cancel` discards it.

@@ -1,118 +1,81 @@
 # Session capture
 
-Each harness invocation, including a resume, retains evidence beside the existing
-stdout capture in the run directory (`state/runs/<run-id>/`). The files are outside
-`ws/` and `ws-home/`, are not mounted writable in the author's container, and
-survive the default 24-hour workspace cleanup. They follow the run record's
-retention policy; capture adds no separate expiry. Uncontained sessions still
-have the same-user filesystem access described in the threat model. Advisory
-callers without a run record retain files beside their supplied workspace; their
-caller controls that directory's lifetime.
+Every model session Outerloop runs leaves private evidence in that run's
+directory: the delivered prompt, the captured output, the model's own
+transcript, and a record of tokens and cost. This page covers where the
+evidence lives, what is redacted, how to price tokens yourself, and how the
+cost totals in `outerloop status` are computed.
 
-These private artifacts must never be committed, attached to PRs, or published
-(SECURITY.md). Capture applies the same **known-secret redaction** as stdout,
-including issued application tokens and pre-launch snapshots of provisioned credential
-files (Vertex ADC, Codex auth, and mounted key contents). JSON string values,
-escaped forms, and PEM key lines are included; deleting a credential during the
-session does not remove it from the redaction set. This is not a general secret scanner.
-Artifacts use owner-only permissions. Native reads refuse symlinks and special
-files. Capture failures are logged and never change the author's outcome.
+## Session files
 
-A unique `<workspace>-<backend>-<invocation-id>.session.json` records backend,
-configured model, backend session ID, resume ID, start/end timestamps, turns when
-known, token counters, cost, and the SHA-256 of the delivered prompt before redaction, including rehydrated Hermes
-context on resume.
-The invocation ID distinguishes wakes sharing a backend session ID. Artifact
-entries record paths and SHA-256 hashes of the **stored, redacted bytes** for the
-stdout capture, delivered prompt, and native log. Missing native logs have
-`status: "missing"`; failed writes have `status: "write-error"`. Hermes also
-retains the exact query pointing to its brief file, and its delivered prompt
-includes the rehydrated conversation on resume.
+Each harness invocation, including every resume or wake, writes its files
+under the run's directory, `<root>/runs/<run-id>/`, where `<root>` is the
+state root. A
+`<workspace>-<backend>-<invocation>.session.json` record holds the backend
+and model, the session and resume identifiers, start and end times, stop
+reason, turns, the reported token counters, and the session's cost. Beside
+it sit the delivered prompt and the stored native log, with the SHA-256
+hash of each stored file.
 
-Native log lookup uses identifiers, never newest-file selection:
+These files sit outside the author's writable workspace and survive the
+24-hour workspace cleanup, following the run record's own retention. The
+standalone reviewer keeps the same files beside the workspace it was given.
+A capture failure is logged and never changes the run's outcome.
 
-| Backend | Native evidence | Usage |
-| --- | --- | --- |
-| Claude Code | `$HOME/.claude/projects/*/<session-id>.jsonl`; fresh invocations supply a UUID with `--session-id`, allowing lookup after timeout | Final JSON `usage.input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`; reported `total_cost_usd` (cumulative across a resumed session since Claude Code 2.1.277, per invocation on older CLIs) |
-| Codex | `$HOME/.codex/sessions/**/rollout-*-<thread-id>.jsonl`, using `thread.started.thread_id` | Sum `turn.completed.usage.input_tokens`, `cached_input_tokens`, `output_tokens` across this invocation; a resumed thread reports the whole thread's cumulative usage per leg (#479) |
-| Hermes | `$HOME/evidence-<session-id>-<invocation-id>.json`, an explicit transcript export from the existing `run_conversation` result | Reported agent `session_prompt_tokens`, `session_completion_tokens`, `session_cache_read_tokens`, `session_cache_write_tokens`; absent usage remains unknown |
+## Secret redaction
 
-Hermes's pinned legacy CLI omits usage from its sample. A small wrapper invokes
-that same CLI, retaining all returned messages (including tools), the native
-Hermes session ID, and the counters before returning the original result.
-It does not estimate tokens. The existing sample remains the author-result parsing channel,
-not an identifier for evidence. Interrupted sessions may have no native transcript
-or only partial usage; timeouts retain unknown dollars. Claude and codex
-resumed native logs can contain prior turns. Codex reports the whole
-thread's cumulative usage as each leg's usage (#479), so a thread is
-priced once, at its newest leg — see the totals below. Claude Code reports
-the session's saved cost and usage totals on resume only since 2.1.277,
-and the CLI version that ran a session is not recorded (an author override
-can pin an older CLI), so each claude leg keeps its own reported cost and
-the legs are summed; that can overstate a resumed session on a current
-CLI but never undercounts one on an older CLI.
+Stored evidence is redacted against every secret the kernel knows: the
+session key, application tokens it issued, and a snapshot of each
+credential file it provisioned before the session started. Deleting a
+credential during the session does not remove it from the redaction set.
+This is not a general secret scanner, so treat the files as private
+anyway. Never commit them, attach them to pull requests, or publish them.
 
-`OUTERLOOP_NATIVE_LOG_MAX_BYTES` caps the stored native log (default 33554432,
-32 MiB). A cutoff sets `truncated: true` and records `cap_bytes`; truncated logs
-may no longer be valid JSON/JSONL. Redaction looks beyond the cutoff to avoid
-leaking a secret split by the boundary. An invalid setting uses the default;
-zero retains an empty file marked truncated when the source is nonempty.
-Unresolved secret prefixes at the lookahead boundary are withheld after replacing complete secrets.
-Native discovery refuses directory symlinks and stops at 8 directory levels,
-10,000 entries, or 0.25 seconds of elapsed time (checked between filesystem
-operations). Reaching a limit records `status: "unavailable"` with
-`reason: "discovery-limit"`.
+The files use owner-only permissions.
 
-`SessionResult.tokens` is a mapping of reported counters; missing keys mean
-unknown. Normalized `input_tokens` includes cache reads and cache writes.
-`cost_usd` retains its existing name and numeric values, with `None`/JSON null
-for unknown cost. Claude reports dollars directly. For Codex/Hermes, operators
-can supply a JSON model price table through `OUTERLOOP_TOKEN_PRICES`. Rates are
-USD per million tokens, keyed by the exact configured model:
+## Token pricing
+
+Claude reports dollars directly. For Codex and Hermes, set
+`OUTERLOOP_TOKEN_PRICES` to a JSON table of rates in USD per million
+tokens, keyed by the exact configured model:
 
 ```sh
-export OUTERLOOP_TOKEN_PRICES='{"example-model":{"input_tokens":2,"cached_input_tokens":0.5,"output_tokens":10,"cache_creation_input_tokens":2.5}}'
+export OUTERLOOP_TOKEN_PRICES='{"open-model":{"input_tokens":2,"cached_input_tokens":0.5,"output_tokens":10,"cache_creation_input_tokens":2.5}}'
 ```
 
-Uncached input is total input minus cache reads and cache writes. Each nonzero
-bucket needs a finite, nonnegative rate. Missing model/rates, malformed prices,
-or absent input/output usage leave dollars unknown. Codex also leaves invocation
-usage and dollars unknown if any completed turn lacks required counters or
-reports a different set of counters from the other turns, or the invocation fails. Explicit zero rates support
-free/self-hosted models. This is recorded usage pricing, not invoice reconciliation;
-existing budget enforcement is unchanged.
+Input and output rates are required, and every nonzero bucket needs a
+finite, nonnegative rate. Missing models or rates, malformed prices, or
+absent usage leave that session's cost unknown, and an unknown cost makes
+the run's total unknown. Explicit zero rates price a free or self-hosted
+model at zero. This prices recorded usage, not invoices.
 
-Parked records retain tokens and their session record path. Legacy numeric costs
-remain readable; absent usage stays unknown and is not backfilled. Status totals
-come exclusively from the fixed `session-index.json` in the run directory under
-the state root, never from a glob or files in the workspace or session HOME.
-Only the kernel writes this index, serializing updates and atomically replacing
-it after retaining each session record. Separate status processes and restarted
-kernels read the same persisted totals. Containment keeps this directory outside
-the author's mounts; owner-only permissions alone are not the trust boundary.
-Each record and index entry carries `verified`, true for contained invocations.
-If any indexed invocation ran uncontained, totals carry `verified: false` and
-text status labels them `unverified`. Local mode shares the operator's filesystem
-authority, so those persisted totals can be altered by the author.
+## Native log size
 
-`known_session_cost_usd` sums priced sessions, `unpriced_sessions` counts unknown
-costs, and `session_cost_usd` is null if any captured session is unpriced or no
-indexed records exist. A resumed codex thread reports cumulative
-usage per leg, so totals count only the newest leg of each indexed codex
-`session_id` — earlier legs of the same thread are never summed over
-the same tokens (#479). Claude Code is cumulative on resume only since
-2.1.277 and the CLI version that ran a session is not recorded (an author
-override can pin an older CLI), so claude legs are summed as they were
-before; that can overstate a resumed session on a current CLI but never
-undercounts one on an older CLI. Hermes usage is per invocation and is
-summed as before. Entries written before session ids were indexed carry no
-grouping and contribute their recorded cost as before. Missing or unreadable
-indexes report unknown totals and `verified: false`; status never reconstructs
-them from sidecars. Pre-upgrade
-sidecars are not imported, so history before the index has unknown coverage.
-Do not interpret the known subtotal as total historical spend.
+The stored native log is capped by `OUTERLOOP_NATIVE_LOG_MAX_BYTES`,
+default 32 MiB. A cutoff marks the record `truncated` and stores the cap,
+and a truncated log is not guaranteed to be valid JSON. Redaction still looks
+across the cutoff so a secret straddling it cannot leak. An invalid value
+falls back to the default.
 
-Validate fresh and resumed sessions with each pinned CLI on a real deployment,
-including timeout, native paths, actual usage fields, Hermes wrapper imports and
-container read-only bind, model aliases in the price table, and post-cleanup
-artifact access. Synthetic tests do not establish provider invoice parity.
+## Cost totals in status
+
+`outerloop status` reports each run's session cost from the run directory's
+persisted index, never from files the author could touch:
+
+```text
+my-run target=owner/repo ... session-cost=$1.2345 unpriced-sessions=0
+```
+
+A run shows `unknown` cost while any captured session is unpriced, and
+counts those sessions separately. Totals carry a `verified` flag, true when
+every indexed session ran inside the session container. An uncontained
+session labels the totals `unverified`, and in local mode the author shares
+the operator's filesystem, so persisted totals are informational there.
+
+Two backends resume differently, and the totals account for it. A resumed
+Codex thread is priced once, at its newest leg, so the same tokens are never
+counted twice. Claude session legs are summed, which can overstate a
+resumed session on a current CLI but never undercounts one on an older CLI.
+
+Sessions that ran before capture was added have no index entry. Do not
+read the known subtotal as total historical spend.
