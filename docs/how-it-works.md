@@ -199,7 +199,7 @@ Everything inside the sandbox is untrusted. A contained author session runs in t
 
 Judge sessions run over checkouts the kernel prepares, hold read-only credentials, and run only when the kernel decides. Maintenance agents work in their own lane and never touch solver credit.
 
-Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it is the only writer to the target repository, through the configured GitHub identity, an App or a fine-grained PAT. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
+Everything outside the sandbox is trusted kernel code. It meters compute, dispatches jobs, measures submissions and publishes results, and it writes to the target repository through the configured GitHub identity, an App or a fine-grained PAT. With contained sessions it is the only writer. An uncontained local session can read the operator's key files, so in that mode the kernel is not the only possible writer. Because judges work on author-written checkouts, the kernel rebuilds the `.outerloop/` channel they speak through and validates every field they commit. The full threat model is in [the architecture design note](https://github.com/outerloop-science/outerloop/blob/main/docs/design/architecture.md).
 
 ## The syscall surface
 
