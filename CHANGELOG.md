@@ -71,6 +71,9 @@ Versions follow [SemVer](https://semver.org).
   deployment, with operator guidance and the kernel gaps it exposed; clouds
   without Slurm (git in, artifact out; a meta-provider; the run-artifact
   store) as the long-term direction.
+- The pages in `docs/` build into a MkDocs Material site (`mkdocs.yml`,
+  `scripts/docs/build.sh`), with the README and project pages as site pages
+  and `noindex` staging until the public launch (#523).
 
 ### Changed
 
