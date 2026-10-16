@@ -6,10 +6,14 @@ request when the kernel's own measurement shows the benchmark improved. Every
 attempt ends in a written report, including the ones that failed. You run
 Outerloop yourself, with your own keys, compute and repositories.
 
-The site has three sections.
+The site has five sections.
 
 - [Get started](install.md) covers installing Outerloop, writing the
   contract, connecting compute and models, and adding the reviewer to a repo.
+- [How it works](how-it-works.md) explains the trust boundary, the syscall
+  surface, sleep and wake, the credit path, storage and concurrency.
+- [Reference](syscalls.md) lists every syscall verb and the inbox message
+  format.
 - [Design](design/architecture.md) explains how the kernel, its agents and
   its compute work.
 - [Project](roadmap.md) holds the roadmap, the changelog, and the guides for

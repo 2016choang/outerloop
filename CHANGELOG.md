@@ -6,6 +6,12 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Documentation
+
+- The docs site gains a "How it works" section (kernel figure, storage and
+  concurrency) and a "Reference" section (the syscall verbs and the inbox
+  message format).
+
 ### Changed
 
 - The author verb `end` is renamed `stop` (`stop --report FILE`,

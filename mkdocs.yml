@@ -30,7 +30,7 @@ theme:
   name: material
   custom_dir: overrides
   font: false
-  favicon: assets/icon.svg
+  favicon: assets/outerloop-favicon.svg
   features:
     - navigation.sections
     - navigation.top
@@ -68,8 +68,12 @@ theme:
 extra_css:
   - https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap
   - https://agenticlearning.ai/css/lab-tokens.css
-  - stylesheets/lab.css
+  - https://agenticlearning.ai/css/lab-mkdocs.css
   - stylesheets/site.css
+  - stylesheets/figures.css
+
+extra_javascript:
+  - javascripts/figures.js
 
 extra:
   generator: false
@@ -111,6 +115,13 @@ nav:
     - Add the Outerloop reviewer to your repo: reviewer.md
     - Session capture: session-capture.md
     - Community channels: community.md
+  - How it works:
+    - How it works: how-it-works.md
+    - Storage: storage.md
+    - Concurrency: concurrency.md
+  - Reference:
+    - Syscalls: syscalls.md
+    - Inbox and messages: inbox.md
   - Design:
     - Architecture: design/architecture.md
     - Roles and flow: design/roles.md
