@@ -256,6 +256,9 @@ the code and against Empire AI, NERSC and ALCF, and plans the Empire AI try-out.
       PR-quality bar is met
 - [ ] egolearn as second research target; second harness backend if volume warrants
 - [ ] API model tiering informed by pilot data; cloud burst if queues block
+- [ ] Model gateway (design/model-gateway.md), with the first cloud
+      integration (0.4): conformance check first, then the gateway as an
+      optional service; the per-session bridge goes once it is the default
 
 ## Meta: benchmarking autoresearch itself (maintainer direction 2026-08-08)
 
@@ -301,6 +304,10 @@ Roles/flow reference for this whole section: design/roles.md.
       a machine user with a fine-grained PAT stays the fallback
 - [ ] Storage interface: notebook-repo backend → walled multi-tenant store
 - [ ] Experiment-backend interface: consumer-side runners, verifiable rewards
+- [ ] Clouds without Slurm (design/compute-cloud.md, Part 2): region-agnostic
+      run-artifact store, the resident decoupled from where experiments run;
+      a direction, not scheduled. Part 1, Slurm on a cloud, is the 0.4
+      deployment
 
 ## Manual prerequisites (maintainer)
 

@@ -5877,6 +5877,52 @@ def test_is_git_tamper_classifies_object_store_damage_not_ordinary_failures() ->
     assert not _is_git_tamper(GitError("git fetch failed: could not resolve host"))
 
 
+def test_one_handoff_check_covers_a_leg_of_kernel_git_calls(tmp_path, monkeypatch) -> None:
+    """The tamper check runs at each hand-off, not on every git call. An
+    agent-made worktree and research branch pass it (agent freedom), and the
+    kernel git calls after one check reuse its single filter listing."""
+    import shutil
+
+    import outerloop.github as github_mod
+    from outerloop.github import GitError, Workspace, forget_filter_overrides, handoff_git_dir
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "train.py").write_text("v1\n")
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    # the session's own research branch and worktree: freedom, not tampering
+    _git(root, "branch", "agents/agent-01/research")
+    _git(root, "worktree", "add", "--detach", str(tmp_path / "wt"), "agents/agent-01/research")
+    _git(root, "gc", "-q")  # packed refs are the session's to make too
+
+    listings: list[list[str]] = []
+    real_run = subprocess.run
+
+    def counting_run(argv, *args, **kwargs):
+        if "--get-regexp" in argv:
+            listings.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(github_mod.subprocess, "run", counting_run)
+    ws = Workspace(root=root)
+    handoff_git_dir(root)  # the hand-off: one check, one listing
+    for _ in range(3):
+        ws.git("status", "--porcelain")
+        ws.git("rev-parse", "HEAD")
+        ws.git("log", "--oneline", "-1")
+    assert len(listings) == 1
+
+    # untrusted code launches: the mark goes, so a reshaped .git is refused again
+    forget_filter_overrides(root)
+    pack = root / ".git" / "objects" / "pack"
+    shutil.rmtree(pack)
+    pack.symlink_to(tmp_path)
+    with pytest.raises(GitError, match="symlink"):
+        ws.git("rev-parse", "HEAD")
+
+
 def test_with_seed_fills_the_seed_from_the_records_target(tmp_path) -> None:
     """Wake and follow-up jobs carry the run id, not the target: the seed cache
     comes from the record, and an explicit setting is left alone."""
@@ -6057,7 +6103,7 @@ def test_end_report_seals_notebook_releases_claim_and_posts_replies(tmp_path, ta
             session = super().run(brief_text, workspace, resume_session_id)
             (workspace / ".outerloop" / "ending.md").write_text("No gain; retain the ablation.")
             assert main(["message", "The ablation is complete."], root=workspace) == 0
-            assert main(["end", "--report", ".outerloop/ending.md"], root=workspace) == 0
+            assert main(["stop", "--report", ".outerloop/ending.md"], root=workspace) == 0
             return session
 
     github = CommentingGitHub()
@@ -6165,7 +6211,7 @@ def test_end_after_submitted_gate_keeps_verdict_note(tmp_path, monkeypatch):
     class Author(ScriptedHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
             assert "did NOT clear the gate" in brief_text
-            assert main(["end"], root=workspace) == 0
+            assert main(["stop"], root=workspace) == 0
             return super().run(brief_text, workspace, resume_session_id)
 
     outcome = resume_run(
@@ -7700,7 +7746,9 @@ def test_endpoint_unavailable_parks_and_recovers(
             github=CommentingGitHub(),  # type: ignore[arg-type]
             bot_auth=NoAuth(),
             now=1_000_100,
-            harness=ScriptedHarness(edits={".outerloop/syscall.json": json.dumps({"type": "end"})}),
+            harness=ScriptedHarness(
+                edits={".outerloop/syscall.json": json.dumps({"type": "stop"})},
+            ),
             spec=author_spec(),
         )
 
@@ -7841,7 +7889,7 @@ def test_scope_rejected_tree_never_reaches_active_line(
                     json.dumps({"type": "sleep", "submit": True, "report": "candidate"})
                 )
             elif ending == "explicit-end":
-                (workspace / ".outerloop/syscall.json").write_text('{"type":"end"}')
+                (workspace / ".outerloop/syscall.json").write_text('{"type":"stop"}')
             return ScriptedHarness(edits={}).run(brief_text, workspace)
 
     def no_snapshot(*args, **kwargs):

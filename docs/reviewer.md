@@ -1,54 +1,188 @@
-# Add the Outerloop reviewer to your repo
+# The Outerloop reviewer
 
-An advisory AI code reviewer for your pull requests. It posts findings as a PR
-review — it **never approves, never blocks your CI, and never runs your PR's
-code** (it reads the diff as data). It reviews pull requests from branches in
-**your own repository**; PRs from forks are skipped for now (fork-PR review is a
-planned addition). The model key lives only in a read-only, write-tokenless job.
+The reviewer reads a pull request and posts its findings as a PR review. It
+is advisory: it never approves, never blocks a merge, and never fails your
+build. This page covers adding it to a repository, steering its rounds, and
+the optional weekly maintenance digest that uses the same machinery.
 
-## Three steps
+## Review scope
 
-1. **Pick the bot identity and get a model key.** Choose the account whose PRs
-   should be skipped (so the reviewer never reviews its own bot's PRs) — that's
-   the `bot_login`. Get an API key for your chosen backend (an Anthropic key for
-   `claude`).
+The reviewer posts on pull requests opened from branches in your own
+repository. PRs from forks are skipped, because they must not reach your
+API key.
 
-2. **Add the workflow.** Copy [`examples/review.yml`](../examples/review.yml) to
-   `.github/workflows/review.yml` in your repo and set `bot_login` to your bot's
-   login. It calls the public reviewer with `uses:` — you never vendor the
-   reviewer code.
+The session runs on an ephemeral GitHub runner and the reviewer holds a shell,
+so it may run code from the checkout while it investigates. That runner is
+the boundary, not a promise not to execute. Files a model backend would
+auto-load as instructions, such as `CLAUDE.md` or `.claude/`, are renamed
+before the session starts, and PR text and diffs are rendered inside fences.
+These measures lower the risk of the session following injected text; they
+do not guarantee it.
 
-3. **Set the secret.** Add a repository secret `ANTHROPIC_REVIEWER_KEY` with your
-   Anthropic key (`Settings → Secrets and variables → Actions`). For other
-   backends set the matching key instead: `codex` and `hermes` with
-   `hermes_provider: openai` use `OPENAI_REVIEWER_KEY`; `hermes` on its default
-   OpenRouter provider uses `OPENROUTER_API_KEY`.
+Each finding names a file and a line, states its evidence, and carries a
+confidence level and a kind: `change`, `suggestion`, `question` or `note`.
+Approval-like language in findings is redacted, so a crafted PR cannot elicit
+an endorsement. The code owner decides what happens next.
 
-That's it. Open a PR and the reviewer posts a round.
+## Adding the reviewer
 
-## Using it
+You need an API key for the reviewer's model, and about five minutes.
 
-- **First round** runs automatically when a PR opens.
-- **Re-review** after you push fixes by (re)applying the `outerloop:review` label
-  — the round stamp increments so you can follow the fix→review→fix loop.
-- Findings are **advisory**: the code owner decides. The `outerloop:no-review`
-  label opts a PR out entirely.
+1. Pick the bot identity. `bot_login` names the account whose PRs are never
+   reviewed, so the reviewer never comments on its own work. If you have no
+   bot yet, any placeholder login works. If you run the climber with a GitHub
+   App, use the App's login.
 
-## Backends
+2. Add this file to the repository as `.github/workflows/review.yml`:
 
-`backend: claude` (default) uses Anthropic; `hermes` and `codex` are also
-supported — set the matching key and, for `hermes`, the provider. See the inputs
-in
-[`advisory-review-agent.yml`](../.github/workflows/advisory-review-agent.yml).
+```yaml
+name: advisory-review
+on:
+  pull_request_target:
+    types: [opened, reopened, labeled]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  advisory:
+    # a labeled event only runs for the outerloop:review label (re-review)
+    if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
+    with:
+      reviewer_ref: v0             # keep on the same ref as the line above
+      bot_login: my-bot            # PRs by this login are never reviewed
+      model: claude-sonnet-5-5     # required: the claude backend has no default
+    secrets:
+      anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
+```
 
-## Safety
+3. Add the key as a repository secret. Under
+   `Settings → Secrets and variables → Actions`, create
+   `ANTHROPIC_REVIEWER_KEY` with your Anthropic key. A dedicated, spend-capped
+   key is strongly recommended.
 
-- Fork PRs are skipped, so today the reviewer only runs on branches a
-  collaborator pushed to your repo. When it does run, it checks out the PR head
-  **read-only and never executes it** — no build, no test, no install of your
-  PR tree. It only reads the diff.
-- The job holding the model key has **no write permission**; a separate job with
-  `pull-requests: write` runs no model and only posts the review.
-- The reviewer is **advisory** — it cannot approve, merge, or fail your CI. The
-  most a crafted PR can do is elicit a misleading advisory comment, which you
-  read with the same skepticism as any review.
+Open a pull request and a review appears within a minute or two. The same
+file ships as [`examples/review.yml`](https://github.com/outerloop-science/outerloop/blob/main/examples/review.yml).
+The claude backend has no built-in model, so a review workflow needs `model`
+or a repository variable `OUTERLOOP_CLAUDE_MODEL` it inherits; without one,
+every PR gets a could-not-run stub.
+
+## Re-review and opt-out
+
+The first round runs when a PR opens. Apply the `outerloop:review` label to
+run another round after you push fixes. The round stamp increments with each
+review, so you can follow the fix-review-fix loop. The `outerloop:no-review`
+label opts a PR out entirely.
+
+## Backends and second opinions
+
+`backend: claude` is the default. Two other backends work with the same
+workflow and their own key:
+
+- `backend: hermes` uses `hermes_provider: openrouter` by default with the
+  `OPENROUTER_API_KEY` secret and an OpenRouter model id such as
+  `openai/gpt-5.6-terra`. Add `hermes_provider: openai` to run directly
+  against the OpenAI API with the `OPENAI_REVIEWER_KEY` secret and a
+  provider-native id such as `gpt-5.6-terra`.
+- `backend: codex` uses the `OPENAI_REVIEWER_KEY` secret and a Codex model
+  id.
+
+Every input of the reusable workflow is documented in
+[`advisory-review-agent.yml`](https://github.com/outerloop-science/outerloop/blob/main/.github/workflows/advisory-review-agent.yml).
+
+Add a second job to the same file for an independent opinion. Each opinion
+posts its own labelled round:
+
+```yaml
+  second-opinion:
+    if: github.event.action != 'labeled' || github.event.label.name == 'outerloop:review'
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
+    with:
+      reviewer_ref: v0
+      bot_login: my-bot
+      backend: hermes
+      model: openai/gpt-5.6-terra
+      opinion_label: second opinion — terra
+    secrets:
+      openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+A third opinion is one more block with a distinct `opinion_id`. If a
+backend's key is missing or expires, every triggering PR gets a visible
+could-not-run stub naming that opinion, so a dead key is never silent.
+
+If you forked the Outerloop repository, set `reviewer_repo` to your fork and
+point `uses:` and `reviewer_ref` at a ref your fork has.
+
+## Following releases
+
+Maintainers move the `v0` tag to each final release, never a pre-release or
+a push to `main`. Keep `reviewer_ref` on the same tag as the `uses:` ref, so
+the code that holds your reviewer key changes only when a release is cut.
+
+A tag is a convention, not a lock: it trusts whoever can push tags to the
+Outerloop repository. For code that cannot change under you, pin a full
+commit SHA or an exact release such as `v0.3.0` in both places, and bump it
+by hand.
+
+## Missing reviews
+
+Open the workflow run and read the log. The reviewer logs why it stopped,
+for example a missing key, a skipped PR or a model refusal, and always exits
+successfully so your PR stays green. A skipped round on a bot PR or an
+opted-out PR is normal silence; a could-not-run stub on the PR names the
+opinion that failed.
+
+## The weekly maintenance digest
+
+The same machinery can scan your whole repository once a week: dead code,
+duplicated logic, oversized modules, stale pins, slow tests, repeated work on
+the hot path, and documentation drift. It writes one issue titled
+"Maintainer digest — <date>" and replaces its body on each scan. It changes
+no code and opens no work orders.
+
+Add `.github/workflows/maintenance.yml` with the same secret as the
+reviewer:
+
+```yaml
+name: maintenance
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # weekly; or run it from the Actions tab
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency: maintenance
+jobs:
+  digest:
+    uses: outerloop-science/outerloop/.github/workflows/maintenance-agent.yml@v0
+    with:
+      reviewer_ref: v0
+      model: claude-sonnet-5-5   # required: the claude backend has no default
+    secrets:
+      anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
+```
+
+The `backend`, `model` and `hermes_provider` inputs select the model as they
+do for the reviewer, and `lenses` picks which sections run. Every run scans
+the default branch's head, whatever ref a manual run was started from.
+Items marked **Decision** need your call; the rest are mechanical and can be
+given to an agent as work orders.
+
+## Safety model
+
+Every review runs through a least-token split, whatever the backend:
+
+- The session job runs on an ephemeral runner with read-only permissions.
+  Only the chosen backend's model key enters it. The session holds a shell,
+  so a crafted PR can spend that key: give the reviewer a dedicated key with
+  a spend cap at the provider.
+- A separate posting job holds the write token and runs no model. It
+  re-validates the findings and renders them with sanitization.
+- Both jobs render PR content as fenced data, not as instructions.
+
+A crafted PR can spend the reviewer's model key and some runner minutes.
+The ephemeral runner is discarded after the session, and the write token
+never enters it. The worst a crafted PR can post is a misleading advisory
+comment, which you read with the same skepticism as any review.

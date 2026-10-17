@@ -6,7 +6,32 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Documentation
+
+- The docs site is now a manual: getting started, task guides, concept pages
+  with figures, and reference pages for contract fields, the operator CLI,
+  agent syscalls, inbox messages and environment variables.
+
 ### Changed
+
+- The author verb `end` is renamed `stop` (`stop --report FILE`,
+  `stop --withdraw REASON`), with no alias: agents read `end` as "end this
+  turn" and called it when they meant to wait for results, so the refusals
+  it hit now each name the next step (`sleep`, `cancel`, `stop`). Upgrading:
+  a staged request an older kernel's CLI wrote with `"type": "end"` is
+  still honoured; the verb is now `stop`.
+
+- The git safety checks now run once at each hand-off between a session and
+  kernel code (session start and return, wake start, panel read) instead
+  of on every kernel git call. Kernel git calls after a hand-off reuse its
+  filter-driver listing; launching untrusted code on the workspace drops
+  it. A workspace no hand-off covers keeps the per-call check (#512).
+
+- The advisory-review examples and install guide track the `v0` release tag
+  (`@v0` with `reviewer_ref: v0`) instead of `main` or an exact release. `v0`
+  moves only when a final release is cut (a new `RELEASING.md` step), so
+  callers follow releases without hand bumps and never run the moving branch
+  with their reviewer key (#494).
 
 - Research taste moved out of the kernel and into a configurable GUIDANCE
   layer. Kernel agent-facing text (the author brief, the panel claim, the
@@ -64,6 +89,13 @@ Versions follow [SemVer](https://semver.org).
   `OUTERLOOP_PANEL_CODEX_KEY_FILE`, `OUTERLOOP_PANEL_HERMES_KEY_FILE`) in the
   install guide, and mark the verification-loop and dispatcher design notes
   as built (#337).
+- `docs/design/compute-cloud.md` (#348): Slurm on a cloud as the 0.4
+  deployment, with operator guidance and the kernel gaps it exposed; clouds
+  without Slurm (git in, artifact out; a meta-provider; the run-artifact
+  store) as the long-term direction.
+- The pages in `docs/` build into a MkDocs Material site (`mkdocs.yml`,
+  `scripts/docs/build.sh`), with the README and project pages as site pages
+  and `noindex` staging until the public launch (#523).
 
 ### Changed
 
@@ -84,6 +116,11 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- Reserve infrastructure retries before submission so a crash before recording
+  the job id cannot exceed the two-retry cap; undo the reservation only on a
+  capacity rejection before submission. Upgrading: a measure that was between
+  infrastructure retries when the kernel was upgraded may get one extra retry,
+  once, because older journals counted failures rather than reserved retries.
 - A dispatched baseline or cleanly completed eval that ends with no result is
   now an infrastructure failure: two uncharged retries, then a park naming the
   `infra-retries.json` an operator deletes to resume (#474). Upgrading: a
@@ -468,7 +505,7 @@ Operator actions (everything else needs no action; details in each entry):
   selections without changing legacy routes. New endpoint authors save
   `model[endpoint=profile]` selectors; keep those profiles until runs finish, and finish
   endpoint runs before rolling back. Hermes source/runtime must be upgraded
-  with the harness. See [compatibility and rollback](docs/endpoints.md#upgrade-and-rollback).
+  with the harness. See [compatibility and rollback](docs/endpoints.md#changing-a-profile).
 
 ### Fixed
 

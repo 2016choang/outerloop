@@ -43,6 +43,7 @@ from outerloop.github import (
     GitError,
     Workspace,
     ensure_regular_git_dir,
+    forget_filter_overrides,
     git_identity,
 )
 from outerloop.image import apptainer_from_env
@@ -384,6 +385,9 @@ def write_eval_job(
     """
     ev = run_dir / f"eval-{name}"
     ev.mkdir(parents=True, exist_ok=True)
+    # the job's script runs git in this repo (worktree add/prune) on its own
+    # node: whatever the last hand-off remembered for it is not ours to reuse
+    forget_filter_overrides(repo_root)
     from outerloop.provenance import producing_author
 
     provenance = ev / "provenance.json"

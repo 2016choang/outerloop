@@ -133,15 +133,22 @@ def _budget_line(root: Path) -> str:
 # --- author syscalls: launch / message / sleep --------------------------------
 
 
-def _check_end(root: Path, verb: str) -> None:
+def _stopping(payload: dict) -> bool:
+    """A staged stop, in either spelling — an older tool wrote `"end"`."""
+    return payload.get("type") in ("stop", "end")
+
+
+def _check_stop(root: Path, verb: str) -> None:
     abi = root / DIR / ABI
-    if abi.exists() and json.loads(abi.read_text()).get("type") == "end":
-        if verb == "submit":
-            raise ToolError("submit first, end after the verdict")
-        raise ToolError("end is final for the leg; it cannot accompany launch or sleep")
+    if abi.exists() and _stopping(json.loads(abi.read_text())):
+        what = {
+            "submit": "submitting",
+            "launch": "launching",
+        }.get(verb, "sleeping")
+        raise ToolError(f"A stop is staged; run `cancel` to undo it before {what}.")
 
 
-def cmd_end(root: Path, args: argparse.Namespace) -> str:
+def cmd_stop(root: Path, args: argparse.Namespace) -> str:
     if args.withdraw is not None:
         try:
             open_pr = json.loads((root / DIR / BUDGET).read_text()).get("open_pr") is True
@@ -154,10 +161,24 @@ def cmd_end(root: Path, args: argparse.Namespace) -> str:
     staged = _load_staged(root)
     abi = _dir(root) / ABI
     payload = json.loads(abi.read_text()) if abi.exists() else {}
-    if staged["submit"] or payload.get("submit"):
-        raise ToolError("submit first, end after the verdict")
-    if staged["launches"] or payload.get("type") == "sleep":
-        raise ToolError("end is final for the leg; it cannot accompany launch or sleep")
+    if payload.get("submit"):
+        raise ToolError(
+            "A submit is committed; end your turn to have it measured. `stop` after the verdict."
+        )
+    if staged["submit"]:
+        raise ToolError(
+            "A submit is staged; `sleep` to have it measured. `stop` after the verdict."
+        )
+    if payload.get("type") == "sleep":
+        raise ToolError(
+            "A sleep is staged, so this turn already ends in a wait. To stop "
+            "the run instead, run `cancel`, then `stop`."
+        )
+    if staged["launches"]:
+        raise ToolError(
+            "A launch is staged; `sleep` to run it. To stop the run instead, "
+            "run `cancel`, then `stop`."
+        )
     report = ""
     if args.report:
         path = Path(args.report)
@@ -170,7 +191,7 @@ def cmd_end(root: Path, args: argparse.Namespace) -> str:
             raise ToolError(f"report file could not be read: {exc}") from exc
         if not report.strip() or len(report) > MAX_REPORT_CHARS:
             raise ToolError(f"report must contain 1 to {MAX_REPORT_CHARS} chars")
-    ending = {"type": "end", "report": report, "messages": payload.get("messages", [])}
+    ending = {"type": "stop", "report": report, "messages": payload.get("messages", [])}
     if args.withdraw is not None:
         ending["withdraw"] = args.withdraw.strip()
     encoded = json.dumps(ending)
@@ -179,11 +200,11 @@ def cmd_end(root: Path, args: argparse.Namespace) -> str:
     abi.write_text(encoded)
     if args.withdraw is not None:
         return "withdrawal staged; END YOUR TURN. The PR closes on the kernel's next pass."
-    return "end staged; END YOUR TURN to end the run or park its open PR."
+    return "stop staged; END YOUR TURN to end the run or park its open PR."
 
 
 def cmd_launch(root: Path, args: argparse.Namespace) -> str:
-    _check_end(root, "launch")
+    _check_stop(root, "launch")
     # shlex.join, NOT " ".join: the shell that invoked this CLI already split
     # `-- python train.py --label "a b"` into tokens, so re-quote them so the
     # eventual `sh -c "$(cat command.txt)"` re-parses the SAME tokens (a plain
@@ -282,7 +303,7 @@ def cmd_message(root: Path, args: argparse.Namespace) -> str:
     payload: dict = json.loads(path.read_text()) if path.exists() else {"type": "message"}
     messages = payload.setdefault("messages", [])
     if len(messages) >= 8:
-        raise ToolError("at most 8 messages per leg")
+        raise ToolError("at most 8 messages")
     messages.append({"to": args.to, "text": text, "reply_to": args.reply_to})
     encoded = json.dumps(payload)
     if len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES:
@@ -346,7 +367,7 @@ def _policy(root: Path) -> dict:
 
 
 def cmd_submit(root: Path, args: argparse.Namespace) -> str:
-    _check_end(root, "submit")
+    _check_stop(root, "submit")
     report = ""
     if args.report:
         path = Path(args.report)
@@ -410,7 +431,7 @@ def cmd_submit(root: Path, args: argparse.Namespace) -> str:
 
 
 def cmd_sleep(root: Path, _args: argparse.Namespace) -> str:
-    _check_end(root, "sleep")
+    _check_stop(root, "sleep")
     staged = _load_staged(root)
     # commit the SLEEP syscall -> the ABI the kernel reads; then END THE TURN.
     payload = {
@@ -511,8 +532,8 @@ def cmd_status(root: Path, _args: argparse.Namespace) -> str:
     abi = root / DIR / ABI
     if abi.exists():
         payload = json.loads(abi.read_text())
-        if payload.get("type") == "end":
-            lines.append("end staged (applies when this turn ends)")
+        if _stopping(payload):
+            lines.append("stop staged (applies when this turn ends)")
         for message in payload.get("messages", []):
             lines.append(f"message staged to {message['to']}: {message['text']}")
     if staged["launches"] or staged["submit"] or (root / DIR / BUDGET).exists():
@@ -548,7 +569,13 @@ def cmd_cancel(root: Path, _args: argparse.Namespace) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="syscall", description="research syscall tool")
+    p = argparse.ArgumentParser(
+        prog="syscall",
+        description=(
+            "research syscall tool. After staging, end your turn; the kernel acts "
+            "on what you staged. To wait for results, `sleep`; to stop the run, `stop`."
+        ),
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     # author verbs
     la = sub.add_parser("launch", help="stage a job to run outside the sandbox")
@@ -622,13 +649,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="commit staged launches/submit; then end your turn. The session ends here.",
         description="The session ends here.",
     )
-    end = sub.add_parser(
-        "end",
-        help="stage an end; then end your turn. The session ends here.",
+    st = sub.add_parser(
+        "stop",
+        help="stop the run (an open PR waits for review); then end your turn. "
+        "The session ends here.",
         description="The session ends here.",
     )
-    end.add_argument("--withdraw", metavar="REASON", help="close your open PR and end the run")
-    end.add_argument("--report", default="", help="file containing your final report")
+    st.add_argument("--withdraw", metavar="REASON", help="close your open PR and stop the run")
+    st.add_argument("--report", default="", help="file containing your final report")
     # judge verbs
     fi = sub.add_parser("finding", help="record one finding")
     fi.add_argument("--file", required=True)
@@ -932,7 +960,7 @@ def cmd_history(root: Path, args) -> str:
 
 
 _HANDLERS = {
-    "end": cmd_end,
+    "stop": cmd_stop,
     "message": cmd_message,
     "launch": cmd_launch,
     "submit": cmd_submit,

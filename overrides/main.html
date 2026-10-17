@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  <link rel="icon" type="image/png" href="{{ 'assets/outerloop-favicon.png' | url }}">
+  <link rel="apple-touch-icon" href="{{ 'assets/outerloop-apple-touch-icon.png' | url }}">
+  {%- if config.extra.staging %}
+  {#- Staging: keep search engines out until the public release. -#}
+  <meta name="robots" content="noindex, nofollow">
+  {%- endif %}
+  {#- Mirror Material's color scheme (on <body>) onto <html data-theme>, which
+      is what the shared lab tokens key off. Runs before first paint, so the
+      lab colors never flash the wrong theme. -#}
+  <script>
+    (function () {
+      var root = document.documentElement;
+      function sync() {
+        var b = document.body;
+        var s = b && b.getAttribute("data-md-color-scheme");
+        if (s) root.setAttribute("data-theme", s === "slate" ? "dark" : "light");
+      }
+      new MutationObserver(sync).observe(root, {
+        subtree: true, childList: true, attributes: true,
+        attributeFilter: ["data-md-color-scheme"]
+      });
+    })();
+    // Scroll-aware header, like the lab site: past 20px of scroll the header
+    // becomes a frosted --card-bg card (styled in lab-mkdocs.css).
+    (function () {
+      var root = document.documentElement;
+      function onScroll() { root.classList.toggle("lab-scrolled", window.scrollY > 20); }
+      onScroll();
+      window.addEventListener("scroll", onScroll, { passive: true });
+    })();
+    // Desktop: Material opens search when its input gets focus, so the header
+    // search button just focuses the input (the panel is styled in lab-mkdocs.css
+    // as a centered modal, like the lab site's search).
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest && e.target.closest('label.md-header__button[for="__search"]');
+      if (!btn || !window.matchMedia("(min-width: 60em)").matches) return;
+      e.preventDefault();
+      var input = document.querySelector(".md-search__input");
+      if (input) input.focus();
+    }, true);
+  </script>
+{% endblock %}

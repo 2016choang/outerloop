@@ -5,6 +5,10 @@ __pycache__/
 dist/
 build/
 
+# Docs site (scripts/docs/build.sh; dist/ is the Python build)
+dist-docs/
+site/
+
 # Environments
 .venv/
 
@@ -12,6 +16,9 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Agent run artifacts (transcripts contain target-repo code — never commit)
 runs/

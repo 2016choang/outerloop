@@ -54,7 +54,7 @@ records; operators must confirm zero across every fleet before deployment.
 
 | State | Meaning | Leaves it |
 | --- | --- | --- |
-| `running` | a session is live in a job | the session ends: it slept (park), or it stopped (end) |
+| `running` | a session is live in a job | the session ends: it slept (park), or it stopped (stop) |
 | `parked` | no session; the run waits for jobs it launched, for messages, or both | a wake (the same session resumes), or a PR or operator ending |
 | `ended` | terminal, with a report | never |
 
@@ -154,9 +154,9 @@ wake the tick sooner than its cadence; that is a trigger, not a transport.
 | `sleep` | seals the tree, submits the staged jobs, records them in the ledger, parks the run on them (possibly none); the results arrive at the wake | containment, placement, the sleep count |
 | `submit` | seals the tree, runs the gate and the panel as jobs, delivers the verdict as a message; a credited verdict publishes | the gate; the publish |
 | `message` | sends to the public thread, self or a live agent on this target; public posts are redacted and scrubbed of self-approval | kernel identity, routing, bounds and redaction |
-| `end` | without a PR, ends with the report and last failed verdict; with an open PR, posts a supplied report and parks for messages | the report |
+| `stop` | without a PR, ends with the report and last failed verdict; with an open PR, posts a supplied report and parks for messages | the report |
 
-`message` and `end` are new. A session that stops without sleeping or
+`message` and `stop` are new. A session that stops without sleeping or
 submitting ends the run with what it has, unmeasured. That is a change: today
 a plain finish is measured by the gate on the tree it left, and can publish.
 Under this note only a submit is measured, on every benchmark, so the author
@@ -175,7 +175,7 @@ The verdict comes back as a message whatever it says, naming the sealed
 tree, the base and the contract it was measured under. A gate that says no is
 not a terminal; the author reads the numbers and decides to try again, launch
 more, or end. Today a plain finish's failed gate ends the run and a submitted
-park's failed gate wakes the author; the second is right, and with `end` the
+park's failed gate wakes the author; the second is right, and with `stop` the
 author can still choose the first.
 
 The publish is the one rigid act after the gate, and there is one of it. When
@@ -275,8 +275,8 @@ remains terminal. Judges still receive the run record.
 | the panel re-read after a push, its two-revision cap [36, 37] | a submit runs the panel; findings are a message; the sleep count bounds revisions |
 | `finish_attempts` | folds into `wake_attempts`: any kernel retry without progress counts |
 | the kernel re-pins the base and tells the agent to merge; kernel-written conflict prompts [26, 54] | the base-moved message says what happened; no instruction |
-| a submit is refused until the run has launched [49]; a metered finish without a submit is scored no-improvement [7]; a submit needs a report [50] | the meter and the gate are the constraints; the report is `end`'s and the publish's |
-| a plain finish is measured; its failed gate ends the run as negative-result [9] | only a submit is measured; the verdict is a message; `end` is the author's |
+| a submit is refused until the run has launched [49]; a metered finish without a submit is scored no-improvement [7]; a submit needs a report [50] | the meter and the gate are the constraints; the report is `stop`'s and the publish's |
+| a plain finish is measured; its failed gate ends the run as negative-result [9] | only a submit is measured; the verdict is a message; `stop` is the author's |
 | research advice in the wake text and the brief | the role's instructions |
 | advisory findings never reach the author; siblings frozen at start | delivered; refreshed |
 | two first-publish implementations; an inline submit that drops its sibling launches | one publish; one job-and-wake path on every backend |
@@ -319,7 +319,7 @@ Settled (Mengye, 2026-09-12):
    in every wake.
 3. A worse submit on an open PR moves the head, with the number posted
    plainly; the ledger row does not move.
-4. `end` is a verb, so a report is asked for at the moment the author
+4. `stop` is a verb, so a report is asked for at the moment the author
    decides; a session that simply stops still ends the run with what it has.
 
 5. **Auto-merge** (Mengye, 2026-09-13): the owner opts in with `merge: auto`.
@@ -355,7 +355,7 @@ between stages.
    parks; comments and base moves are inbox messages; the author can launch,
    use `message` and sleep in review. A session that edits code in review still goes
    through today's re-measure-and-push until the next stage replaces it.
-3. **Submit in review, and `end`.** Status: landed in full, including `end`
+3. **Submit in review, and `stop`.** Status: landed in full, including `stop`
    and the review top-up. The publish moves the PR head by
    fast-forward; a gate verdict is a message on every path; the meter's
    top-up exists; the submit policies [7, 49, 50] go; the follow-up

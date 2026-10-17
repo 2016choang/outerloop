@@ -661,24 +661,53 @@ def test_legacy_slot_is_miss_and_redispatch_is_idempotent(
 
 
 @pytest.mark.parametrize("name", ["baseline", "sib-tsp-base", "candidate"])
-def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_no_result_baseline_retries_then_parks_for_an_operator(
+    tmp_path, name, interrupt, monkeypatch
+):
     """A dispatched baseline, suite baseline, or cleanly completed candidate
     that ends with no result is an infrastructure failure, not a negative
     result: two uncharged re-dispatches — the count survives restarts, and a
     repeated delivery of one job counts once — then a park whose note names
     the file an operator deletes."""
+    from outerloop.operator_limits import CapacityError
+
     measure = Measure(name, "sha", "cmd", "r2")
     submitted: list = []
     states = {"100": "COMPLETED"}
     m = _measurer(tmp_path, submitted, states=states)
     _dispatched(m, measure, job="100")  # the original dispatch, no journal
+    write_text = Path.write_text
+    marker = m._ev(measure) / "submitted"
+
+    def interrupted_write(path, *args, **kwargs):
+        if path == marker:
+            raise KeyboardInterrupt
+        return write_text(path, *args, **kwargs)
+
+    def rejected_submit(spec):
+        raise CapacityError("submission unavailable")
+
     for retry in (1, 2):
         m = _measurer(tmp_path, submitted, states=states)  # a fresh process per wake
         states[str(100 + retry)] = "PENDING"  # the retry job is in queue
-        with pytest.raises(MeasurementPending) as caught:
-            m.results([measure])
-        assert caught.value.capacity_wait  # an infra retry is not charged
-        assert caught.value.job_ids == (str(100 + retry),)
+        with monkeypatch.context() as patch:
+            patch.setattr(m.compute, "submit", rejected_submit)
+            with pytest.raises(MeasurementPending) as waiting:
+                m.results([measure])
+            assert waiting.value.capacity_wait
+        assert len(submitted) == retry - 1
+
+        if interrupt:
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "write_text", interrupted_write)
+                with pytest.raises(KeyboardInterrupt):
+                    m.results([measure])
+        else:
+            with pytest.raises(MeasurementPending) as caught:
+                m.results([measure])
+            assert caught.value.capacity_wait  # an infra retry is not charged
+            assert caught.value.job_ids == (str(100 + retry),)
         # a repeated delivery while the retry job is live spends nothing
         live = {m._job_name(measure): str(100 + retry)}
         with pytest.raises(MeasurementPending) as repeat:
@@ -696,6 +725,7 @@ def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
         _measurer(tmp_path, submitted, states=states).results([measure])
     assert len(submitted) == 2  # the original dispatch plus exactly two retries
     # a journal that cannot be written parks the run; it never aborts it
+    _dispatched(m, measure, job="102")
     infra = m._infra_retry_path(measure)
     infra.unlink()  # the operator cleared the journal…
     infra.mkdir()  # …but the path cannot hold a file, so every write fails

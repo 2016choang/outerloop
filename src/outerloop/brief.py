@@ -143,7 +143,7 @@ class SessionBrief:
     # launch/sleep tool to the author; 0 (the default) means the feature is off
     # for this run and the brief never mentions it.
     launch_budget: int = 0
-    syscalls: bool = False  # the syscall tool is offered (end, message, submit exist)
+    syscalls: bool = False  # the syscall tool is offered (stop, message, submit exist)
     sleep_budget: int = 0
     # GPU benchmarks: the run's GPU-hour budget (launches + gate evals draw
     # on it) and the contract's default eval walltime; 0 = not metered
@@ -216,7 +216,7 @@ class BriefInputs:
     verification: str = "gate"
     budget: BudgetState = field(default_factory=lambda: BudgetState(0.0, 0))
     launch_budget: int = 0  # launches the author may make; 0 = no launch section
-    syscalls: bool = False  # the tool is offered at all (end, message, submit)
+    syscalls: bool = False  # the tool is offered at all (stop, message, submit)
     sleep_budget: int = 0
     gpu_hour_budget: float = 0.0  # GPU benchmarks only; 0 = not metered
     review_topup: str = ""
@@ -325,7 +325,7 @@ def render(brief: SessionBrief) -> str:
                 fence,
             ]
         parts += [
-            "A session ends whenever you stage a launch, a sleep, a submit or an end, "
+            "A session ends whenever you stage a launch, a sleep, a submit or a stop, "
             "or end your turn. Write durable findings into AGENT_MEMORY.md as you learn "
             "them, and bring it up to date before each of those. It is your index; "
             "keep it within its budget. Detail goes in agent_memory/<topic>.md beside "
@@ -363,7 +363,7 @@ def render(brief: SessionBrief) -> str:
         "# Budget",
         *(
             [
-                "`end [--report <file>]` ends without a PR, or posts the report and parks "
+                "`stop [--report <file>]` ends without a PR, or posts the report and parks "
                 "with an open PR, at turn end."
             ]
             if brief.syscalls
@@ -382,7 +382,7 @@ def render(brief: SessionBrief) -> str:
             "Self leaves a reminder for your next wake. An agent-NN destination sends to "
             "that live agent on this target and keeps a sent copy in your inbox. "
             "Use your own inbox number with --reply-to; `message --show <n>` shows its "
-            "chain, oldest first. At most 8 messages per leg, 20,000 characters each; "
+            "chain, oldest first. At most 8 messages, 20,000 characters each; "
             "a recipient may have at most 4 unread messages from you. "
             "Once a public message is staged the final message is not posted. "
             "A code change is published only by submit.",
@@ -488,7 +488,7 @@ def render(brief: SessionBrief) -> str:
                     "A submit spends a sleep and its gate's GPU-hours, but no launch count. "
                     "Stopping without a submit ends unmeasured; with a PR open it returns "
                     "to review. An edit in review is measured and pushed only on submit. "
-                    'Withdraw a superseded open PR with `end --withdraw "<reason>"`.',
+                    'Withdraw a superseded open PR with `stop --withdraw "<reason>"`.',
                 ]
                 if brief.verification == "gate"
                 else []
