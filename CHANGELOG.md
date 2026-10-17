@@ -12,7 +12,7 @@ Versions follow [SemVer](https://semver.org).
   with figures, and reference pages for contract fields, the operator CLI,
   agent syscalls, inbox messages and environment variables.
 - Tests, comments and design notes use generic cluster, partition and
-  hardware names (`gpu-large`, `cpu-short`, "cluster A") instead of a site's.
+  hardware names (`gpu-large`, `cpu-short`, "cluster A") instead of site-specific ones.
   The docs site drops its footer line.
 
 ### Changed
