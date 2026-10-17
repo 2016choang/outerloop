@@ -128,7 +128,7 @@ def test_dispatched_but_vanished_fails_not_resubmits(tmp_path):
 
 def test_late_result_files_are_waited_for(tmp_path, monkeypatch):
     """A shared filesystem can show the scheduler's terminal state before the
-    job's files reach the reader (Empire AI Alpha, 2026-09-15: an improvement
+    job's files reach the reader (a second site, 2026-09-15: an improvement
     was read as "no result"). With a marker, no live job and no result, the
     measurer waits up to RESULT_SETTLE_S for the exit-code before it gives up."""
     from outerloop import measure as mod
@@ -483,20 +483,20 @@ def test_dispatch_settings_place_gpu_jobs_on_the_gpu_lane(tmp_path):
         image="/i.sif",
         account="acct",
         partition="cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
     )
-    assert with_lane.placement(1) == ("acct", "h200")
+    assert with_lane.placement(1) == ("acct", "gpu-large")
     m = with_lane.measurer(tmp_path, repo_root=tmp_path, eval_minutes=240, run_tag="r")
-    assert (m.account, m.partition, m.gpu_partition) == ("acct", "cpu", "h200")
+    assert (m.account, m.partition, m.gpu_partition) == ("acct", "cpu", "gpu-large")
     own_account = DispatchSettings(
         compute=cpu_only.compute,
         image="/i.sif",
         account="acct",
         partition="cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         gpu_account="gpu-acct",
     )
-    assert own_account.placement(2) == ("gpu-acct", "h200")
+    assert own_account.placement(2) == ("gpu-acct", "gpu-large")
 
 
 def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
@@ -526,7 +526,7 @@ def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
         partition="cpu",
         eval_minutes=60,
         run_tag="r1",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         gpu_account="gpu-acct",
     )
     plan = plan_measures(
@@ -545,7 +545,7 @@ def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
         assert "--partition=cpu" in argv and "--account=acct" in argv
         assert not any(a.startswith("--gpus") for a in argv)
     for argv in gpu_jobs:
-        assert "--partition=h200" in argv and "--account=gpu-acct" in argv
+        assert "--partition=gpu-large" in argv and "--account=gpu-acct" in argv
         assert "--gpus-per-node=1" in argv
     # the GPU measures' job scripts carry --nv; the CPU ones do not
     scripts = {n: Path(a[-1]).read_text() for n, a in by_job.items()}

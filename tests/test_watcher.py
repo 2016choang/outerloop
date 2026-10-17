@@ -41,7 +41,7 @@ def _row(
         "name": name,
         "state": state,
         "elapsed": "0:00",
-        "partition": "h200",
+        "partition": "gpu-large",
         "submitted": "2026-09-07T10:00:00",
         "reason": reason,
         "gres": "gpu:1",
@@ -77,7 +77,7 @@ def _ctx(root: Path, ws: Path, compute: object, **kw) -> WatcherContext:
         target="o/r",
         agent_id="agent-01",
         compute=compute,
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         **kw,
     )
 
@@ -134,7 +134,7 @@ def test_queue_view_attributes_every_agents_jobs_and_labels_launches(tmp_path: P
         "",
     )
     assert (wake["kind"], wake["experiment"]) == ("wake", "")
-    assert view["lane"] == {"partition": "h200", "nodes": {"idle": 3, "mixed": 20}}
+    assert view["lane"] == {"partition": "gpu-large", "nodes": {"idle": 3, "mixed": 20}}
     assert view["error"] == "" and view["agent"] == "agent-01"
 
 
@@ -223,7 +223,7 @@ def test_lane_load_is_asked_once_a_minute_and_its_failure_is_said(tmp_path: Path
     _ask(ws, "queue", 80.0)
     watcher.service()
     view = _answered(ws, "queue")
-    assert view["lane"] == {"partition": "h200", "nodes": {}, "error": "sinfo failed (1)"}
+    assert view["lane"] == {"partition": "gpu-large", "nodes": {}, "error": "sinfo failed (1)"}
     assert view["error"] == ""  # the queue itself was fine
 
 

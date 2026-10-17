@@ -57,26 +57,26 @@ def test_only_a_starving_relocated_successor_is_cancelled(tmp_path: Path) -> Non
         ("102", "cs", "BeginTime"),  # relocated but waiting for its slot -> keep
         ("103", "cs", "Dependency"),  # relocated but singleton-blocked -> keep
         ("104", "cs", "Priority"),  # relocated, eligible only 5 minutes -> keep
-        ("105", "cpu_short", "Priority"),  # not relocated -> keep
+        ("105", "cpu-short", "Priority"),  # not relocated -> keep
         ("106", "cs", "Priority"),  # relocated, eligibility absent -> keep (doubt)
         ("107", "cs", "Priority"),  # relocated, EligibleTime=Unknown -> keep (doubt)
     ]
     eligible = {"101": _iso(45), "104": _iso(5), "107": "Unknown"}
     bindir, log = _shims(tmp_path, rows, eligible)
-    out = _run(bindir, "autoresearch-tick", "cpu_short", "20")
+    out = _run(bindir, "autoresearch-tick", "cpu-short", "20")
     assert log.read_text().split() == ["101"]
     assert "cancelled successor 101 starving on cs" in out.stdout
 
 
 def test_partition_lists_match_by_membership_and_no_partition_is_a_no_op(tmp_path: Path) -> None:
     rows = [
-        ("201", "cpu_short,all", "Priority"),
+        ("201", "cpu-short,all", "Priority"),
         ("202", "all", "Priority"),
         ("203", "", "Priority"),
     ]
     eligible = {"201": _iso(60), "202": _iso(60), "203": _iso(60)}
     bindir, log = _shims(tmp_path, rows, eligible)
-    out = _run(bindir, "autoresearch-tick", "cpu_short,cpu_prem")
+    out = _run(bindir, "autoresearch-tick", "cpu-short,cpu-preempt")
     assert log.read_text().split() == ["202"]
     assert "201" not in out.stdout and "203" not in out.stdout
     bindir2, log2 = _shims(tmp_path / "two", rows, eligible)

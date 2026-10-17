@@ -183,7 +183,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         from_file={
             "OUTERLOOP_ROOT": "/scratch/me/ar",
             "OUTERLOOP_ACCOUNT": "pr_1_general",
-            "OUTERLOOP_PARTITION": "cpu_short",
+            "OUTERLOOP_PARTITION": "cpu-short",
             "OUTERLOOP_CADENCE_MIN": "20",
             "OUTERLOOP_PAT_FILE": "/home/me/.config/autoresearch/bot_pat",
         },
@@ -196,7 +196,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         f"--time={DEFAULT_RESIDENT_MINUTES}",
         f"--job-name={job_name()}",
         "--account=pr_1_general",
-        "--partition=cpu_short",
+        "--partition=cpu-short",
         "--export=ALL",
         str(home / "scripts" / "tick_chain.sbatch"),
     ]
@@ -207,7 +207,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         "OUTERLOOP_ROOT": "/scratch/me/ar",
         "OUTERLOOP_ACCOUNT": "pr_1_general",
         "OUTERLOOP_RESIDENT_MINUTES": str(DEFAULT_RESIDENT_MINUTES),
-        "OUTERLOOP_PARTITION": "cpu_short",
+        "OUTERLOOP_PARTITION": "cpu-short",
         "OUTERLOOP_CADENCE_MIN": "20",
         "OUTERLOOP_PAT_FILE": "/home/me/.config/autoresearch/bot_pat",
     }
@@ -266,9 +266,9 @@ def test_slurm_requires_root_but_account_and_partition_are_optional(tmp_path: Pa
 def test_slurm_accepts_a_comma_list_partition(tmp_path: Path) -> None:
     # a multi-partition "a,b" now rides the inherited env, not the --export
     # delimiter, so it is accepted and passed through verbatim.
-    p = plan(tmp_path, root="/r", account="a", partition="cpu_short,cpu_long")
-    assert p.export_env()["OUTERLOOP_PARTITION"] == "cpu_short,cpu_long"
-    assert "--partition=cpu_short,cpu_long" in p.command()
+    p = plan(tmp_path, root="/r", account="a", partition="cpu-short,cpu-long")
+    assert p.export_env()["OUTERLOOP_PARTITION"] == "cpu-short,cpu-long"
+    assert "--partition=cpu-short,cpu-long" in p.command()
     # a newline would still corrupt the environment / sbatch argv.
     with pytest.raises(StartError, match="newline"):
         plan(tmp_path, root="/r", account="a", partition="cpu\nlong")
@@ -430,17 +430,17 @@ def test_slurm_start_submits_once_and_reports(
         "sbatch",
         f'printf "%s\\n" "$@" > {log}\n'
         f'printf "%s:%s" "$OUTERLOOP_RESIDENT" "$OUTERLOOP_HOME" > {envlog}\n'
-        'echo "4242;torch"\n',
+        'echo "4242;clusterx"\n',
     )
     shim(bin_dir, "squeue", "exit 0\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.chdir(home)
     rc = main(
-        ["start", "--root", "/scratch/me/ar", "--account", "acct", "--partition", "cpu_short"]
+        ["start", "--root", "/scratch/me/ar", "--account", "acct", "--partition", "cpu-short"]
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "job 4242" in out and "cpu_short" in out and "PAUSE" in out
+    assert "job 4242" in out and "cpu-short" in out and "PAUSE" in out
     argv = log.read_text().split("\n")
     assert argv[0] == "--parsable" and f"--job-name={job_name()}" in argv
     assert "--dependency=singleton" in argv
@@ -770,7 +770,7 @@ def test_slurm_start_hands_the_installer_directory_to_the_resident_job(
     bin_dir = clean_env / "bin"
     bin_dir.mkdir()
     pathlog = clean_env / "sbatch.path"
-    shim(bin_dir, "sbatch", f'printf "%s" "$PATH" > {pathlog}\necho "4242;torch"\n')
+    shim(bin_dir, "sbatch", f'printf "%s" "$PATH" > {pathlog}\necho "4242;clusterx"\n')
     shim(bin_dir, "squeue", "exit 0\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(cli, "find_uv", lambda: ("/h/.local/bin/uv", "/h/.local/bin"))

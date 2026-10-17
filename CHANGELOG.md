@@ -11,6 +11,9 @@ Versions follow [SemVer](https://semver.org).
 - The docs site is now a manual: getting started, task guides, concept pages
   with figures, and reference pages for contract fields, the operator CLI,
   agent syscalls, inbox messages and environment variables.
+- Tests, comments and design notes use generic cluster, partition and
+  hardware names (`gpu-large`, `cpu-short`, "cluster A") instead of a site's.
+  The docs site drops its footer line.
 
 ### Changed
 
@@ -645,7 +648,7 @@ tasks to finish.
 - A review panel skipped at preflight or in the follow-up now sends the author a kernel note and records the reason in the submit’s PR addendum. These publishes never arm auto-merge.
 
 - A submitted review measurement could go unreported when its push failed. The number is now posted once, as soon as it is known. Review submits push a bot commit with the report’s first line and measured number as its message.
-- On local compute an author-sleep wake could lose an improvement: the gate answers inline there, and the wake only knew how to end a run, so the result became an aborted ending with no PR (cluster0, three runs). Fresh and resumed climbs now share one terminal: the report, the line notebook, a PR or an ending record, and the issue note. A wake that opened its PR but died before recording it reconciles to that PR instead of opening a second, and a park's snapshot is released only once the run has left waiting.
+- On local compute an author-sleep wake could lose an improvement: the gate answers inline there, and the wake only knew how to end a run, so the result became an aborted ending with no PR (local mode, three runs). Fresh and resumed climbs now share one terminal: the report, the line notebook, a PR or an ending record, and the issue note. A wake that opened its PR but died before recording it reconciles to that PR instead of opening a second, and a park's snapshot is released only once the run has left waiting.
 - A research line lost its snapshot when the author's session reset its branch to main: the seal parented on main, the push was refused, and the run left no notebook entry (#368). The kernel now records the line head itself and the line only moves forward from that record. Memory files a reset dropped from the tree come back at the seal; files the session deleted on the line stay deleted.
 - Intake dropped an issue from a private org member without a word: the App's token sees such an author as CONTRIBUTOR, and only OWNER/MEMBER/COLLABORATOR qualified. Every skipped issue is now logged with its reason, a maintainer's `outerloop:task` label vouches for an issue regardless of association, and new Apps request members read so private members read as MEMBER.
 
@@ -936,7 +939,7 @@ removes them. The full history since the first pre-release follows.
 - GPU BENCHMARKS: a per-benchmark contract field `gpus` (default 0) sizes
   every dispatched job of that benchmark — gate measures and author
   launches — with `--gpus-per-node=N` on the job (the per-job `--gpus` form
-  is rejected by Torch's submit plugin as a "CPU job" on a GPU partition —
+  is rejected by the cluster's submit plugin as a "CPU job" on a GPU partition —
   the first fleet speedrun attempt aborted on it) and `--nv` on the jail. GPU jobs go
   to a dedicated lane (`AUTORESEARCH_GPU_PARTITION`, optional
   `AUTORESEARCH_GPU_ACCOUNT`); a `gpus > 0` benchmark on a deployment with no
@@ -1300,7 +1303,7 @@ removes them. The full history since the first pre-release follows.
 - Self-deadline: climbs arm a SIGALRM at walltime-minus-margin (default
   120s, floor 60s, `--deadline-margin-s`) raising into the ordinary
   containment — the only pre-kill warning on clusters that deliver no
-  signals to job processes (measured on Torch 2026-08-08). The tick passes
+  signals to job processes (measured on the cluster, 2026-08-08). The tick passes
   each climb its own walltime via `--job-minutes`.
 
 - The advisory reviewer posts one comment PER ROUND (numbered, stamped
@@ -1315,7 +1318,7 @@ removes them. The full history since the first pre-release follows.
   job is terminal — Slurm truth plus grace, outage never reads as dead.
   Previously only crashes (Python exceptions) were contained; kills
   stranded the record forever. A SIGTERM handler also raises into the
-  ordinary containment, but measurement (Torch, 2026-08-08) showed Slurm
+  ordinary containment, but measurement (on the cluster, 2026-08-08) showed Slurm
   delivers no signal to job processes there — on such clusters the sweep
   and the self-deadline (below) are the real teardown paths; the handler
   covers direct kills and other sites.
@@ -2294,7 +2297,7 @@ removes them. The full history since the first pre-release follows.
   agent-01 right after its own win).
 - A job the site relocated off its submitted partition counts as lost only
   when it is also starving: eligible (dependencies done, slot passed) and not
-  started past the grace window. Relocation alone is routine on Torch and
+  started past the grace window. Relocation alone is routine on the cluster and
   cancelling a relocated job only reset its queue age.
 - `AUTORESEARCH_BOT_ALIASES` names the kernel's former logins, and every
   "is this ours" check (own issues, claims, alarms, own PRs, own comments)
@@ -2399,7 +2402,7 @@ removes them. The full history since the first pre-release follows.
   Also fixes the sha pin itself (here and in `scripts/install_hermes.sh`):
   hermes v-tags are ANNOTATED, so `ls-remote` had yielded the tag OBJECT's
   sha — every verify comparing `rev-parse HEAD` (a commit) against it would
-  have always failed, stubbing out all hermes lenses and making the Torch
+  have always failed, stubbing out all hermes lenses and making the cluster
   installer refuse. Pins are now the dereferenced `^{}` commit sha, and the
   installer's three paths (fresh / idempotent / tamper re-pin) were executed
   live against the real repo (a 222 MB clone — the cache earns its keep).
@@ -2411,7 +2414,7 @@ removes them. The full history since the first pre-release follows.
   that finished in minutes. The park-time afterany wake job (zero-latency
   primary) remains planned; the sweep stays the backup.
 - A genuine API refusal the Claude CLI reports as a `subtype: "success"` error
-  is no longer misclassified as a `session-error`. Surfaced on Torch: a session
+  is no longer misclassified as a `session-error`. Surfaced on the cluster: a session
   hit the author key's workspace usage cap and came back `is_error` with a
   content-free `subtype: "success"` and the real cause only in
   `result="API Error: 400 ... usage limits"`. The parse stamped `"success"` into

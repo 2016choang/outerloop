@@ -235,11 +235,11 @@ boundary. Both are kernel-owned.
   them. `allowed_tools` is the single security surface.
 
 **Two orthogonal axes.** Backend (what drives the session: Claude Code / Codex /
-Hermes) is separate from execution environment (where it runs: apptainer on Torch
+Hermes) is separate from execution environment (where it runs: apptainer on the cluster
 / GH runner / local / Docker). The RoleSpec picks both. The read-only
 reviewer on a GH runner is where we first prove an alternate backend (Codex) —
 a judge that never executes is the safe place to swap; the author runs in
-apptainer on Torch. Hermes's Singularity backend maps onto apptainer directly.
+apptainer on the cluster. Hermes's Singularity backend maps onto apptainer directly.
 
 **One seam.** The one-shot `Completer` is deleted outright — every role,
 judges included, is an agent session on the same adapter. No second seam.

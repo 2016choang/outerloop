@@ -10,7 +10,7 @@ note keeps to that.
 
 ## Why now
 
-On 2026-09-06 four speedrun launches sat pending for a day on Torch, parked
+On 2026-09-06 four speedrun launches sat pending for a day on the cluster, parked
 by a cap on the job QOS: per-user one day, a group cap shared with other
 users the next. The partition and association QOS carry no cap at all, so
 the number is not something a submitter can read or trust. Three designs
@@ -86,7 +86,7 @@ Two small additions make this complete:
   for cap reasons are removed; throttled arrays below replace them.
 - **Experiments yield to verification.** Every kernel job is one Slurm
   user, so the order among the kernel's own pending jobs is ours to set.
-  Launches carry `--nice` (5000 on Torch, above the age factor's 1000
+  Launches carry `--nice` (5000 on the cluster, above the age factor's 1000
   ceiling and the size and per-GPU factors), gate evals and follow-up
   re-measures do not, so a slot the cap frees goes to verifying claimed work
   before starting new experiments. Other users' jobs and the cap itself are
@@ -120,7 +120,7 @@ the sweep the way Slurm wants it.
   a two-GPU task gets half the tasks of a one-GPU task and the same share of
   the machine. It is deliberately not the cap divided by the agent count:
   agents rarely launch at the same moment, and an idle share is wasted GPU.
-  On Torch's 16-GPU per-user cap the ceiling might be 12, so a lone sweep
+  On the site's per-user GPU cap the ceiling might be 12, so a lone sweep
   uses most of the machine and a sibling's job can still get in. A request
   above the ceiling is clamped to it, and the wake text says so.
 - **Fairness follows from Slurm.** A sibling's job competes with `K` eligible
@@ -187,9 +187,9 @@ them for humans, and the limit the author is being held to.
   jobs are not ours to show.
 - **Context lines** from what Slurm does expose: each sweep's concurrency
   and the contract's ceiling; the lane's load from `sinfo` (nodes idle, mixed,
-  allocated); the account's QOS limits when readable (on Torch, sixteen GPUs
-  per user and five hundred submitted jobs). No start estimates: Slurm
-  reports none on Torch, and the view promises nothing it cannot back.
+  allocated); the account's QOS limits when readable (on the cluster, a
+  per-user GPU cap and a submitted-job cap). No start estimates: Slurm
+  reports none on this site, and the view promises nothing it cannot back.
 - **Freshness is seconds**, through the watcher. In local mode the queue is
   empty by construction and the view says so.
 - **`status`** gains the run's own launches with their state.
@@ -230,7 +230,7 @@ There is no database, and none is needed at this scale:
   derived index, sqlite built from the ledgers and rebuildable from them,
   pays for itself, and nothing the kernel writes would change.
 - Slurm's accounting keeps each job's elapsed time and final state for as
-  long as the site retains it, months on Torch, joined on the job id.
+  long as the site retains it, months on the cluster, joined on the job id.
 
 ## What this is not
 
@@ -246,7 +246,7 @@ There is no database, and none is needed at this scale:
 ## Rollout
 
 1. The watcher, with `queue`, `history`, the `why` field and the ledger.
-   Test on cluster0 (local mode, the empty-queue path) and on Torch (one
+   Test in local mode (the empty-queue path) and on the cluster (one
    session asking during a busy queue). Measure the answer latency and the
    watcher's overhead.
 2. Always queue: remove #315's admission; sweeps as throttled arrays with

@@ -4,7 +4,7 @@
 # A tick job killed mid-fetch (walltime, node death) leaves .git/*.lock files
 # behind, and every later deploy then fails with "Unable to create ...lock:
 # File exists" — the chain keeps running OLD code until someone clears them by
-# hand (twice on Torch, 2026-09-01). A lock is stale when it is older than
+# hand (twice, 2026-09-01). A lock is stale when it is older than
 # MIN_AGE_MINUTES (default 10 — a live git op holds one for seconds) AND no
 # git process of ours is working in the checkout. Only *.lock files are
 # touched, at any depth (slash-named branches nest their ref locks); git

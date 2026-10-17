@@ -368,7 +368,7 @@ class DispatchedMeasurer:
     def _settled(self, m: Measure) -> bool:
         """Wait a little for a finished job's files. A shared filesystem can
         show the scheduler's terminal state before the job's exit-code and
-        stdout reach the node reading them (Empire AI Alpha, 2026-09-15: a
+        stdout reach the node reading them (a second site, 2026-09-15: a
         measured improvement was read as "no result"). True once the result
         is readable; False after RESULT_SETTLE_S."""
         deadline = time.monotonic() + RESULT_SETTLE_S

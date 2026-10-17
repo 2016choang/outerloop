@@ -358,7 +358,7 @@ class SlurmCompute:
     def job_partition(self, job_id: str) -> str:
         """The partition(s) a queued job currently sits in, as squeue prints
         them, or "" when squeue no longer lists it. A site can MOVE a pending
-        job off the partition it was submitted to (Torch does, under
+        job off the partition it was submitted to (ours does, under
         congestion); callers compare this with what they asked for."""
         _check_job_id(job_id)
         try:
@@ -1127,7 +1127,7 @@ def is_pending(state: str) -> bool:
 
 def gpus_in_gres(gres: str) -> int:
     """GPUs a queue row asks for, from squeue's %b (`gres/gpu:8`,
-    `gres/gpu:h200:2`, `gres:gpu:4`; `N/A` or anything else = 0)."""
+    `gres/gpu:xx:2`, `gres:gpu:4`; `N/A` or anything else = 0)."""
     total = 0
     for part in gres.replace(";", ",").split(","):
         fields = part.strip().split(":")
