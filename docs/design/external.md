@@ -19,10 +19,10 @@ confidential research), retention, and query — a database with tenant
 isolation. Seam: `report` writes through a storage interface; notebook-repo is
 backend #1. Cross-tenant lesson sharing is a product decision — default walled.
 
-## Experimentation: Torch sbatch → pluggable feedback backends
+## Experimentation: cluster sbatch → pluggable feedback backends
 
 The loop's invariant core is **hypothesis → experiment → verifiable feedback**.
-Torch is backend #1 behind the `compute` interface. The external shape:
+Slurm is backend #1 behind the `compute` interface. The external shape:
 
 - **Consumer-side runners**: the consumer installs a runner in their own infra
   (their CI, cluster, or robot) that executes the contract's benchmark

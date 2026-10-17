@@ -956,7 +956,7 @@ def _dispatch_settings(args: argparse.Namespace) -> DispatchSettings:
 # among the kernel's own pending jobs the priority order is ours: launches
 # carry this nice so a gate eval or a follow-up re-measure (nice 0) starts
 # first when the cap frees a slot. Sized above the factors that differ between
-# our jobs on Torch — age tops out at 1000 after a week, job size at 1000, the
+# our jobs on the cluster — age tops out at 1000 after a week, job size at 1000, the
 # per-GPU TRES share stays in the hundreds — so the order holds however long a
 # launch has waited. Other users' jobs and the group cap are untouched.
 LAUNCH_NICE = 5000
@@ -5265,7 +5265,7 @@ MIN_ARM_S = 180
 def arm_self_deadline(job_minutes: int, margin_s: float = 120.0) -> int:
     """Arm our own end-of-walltime alarm; returns the armed seconds (0 = off).
 
-    Slurm delivers NO signal to our process on Torch before SIGKILL
+    Slurm delivers NO signal to our process on this cluster before SIGKILL
     (scancel and walltime timeout both signal the
     batch shell only) — so the only way to end a run richly before the
     wall is our own clock. SIGALRM fires `margin_s` before the job's

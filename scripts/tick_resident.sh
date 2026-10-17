@@ -11,7 +11,7 @@
 # leases, markers and the coalescing guard make a late or repeated tick safe.
 #
 # Knobs (chain environment): OUTERLOOP_RESIDENT_MINUTES (walltime the job
-# was started with; default 360 = cpu_short's maximum), OUTERLOOP_CADENCE_MIN,
+# was started with; default 360 = the resident partition's maximum), OUTERLOOP_CADENCE_MIN,
 # OUTERLOOP_TICK_TIMEOUT (default 15m), OUTERLOOP_RESIDENT_MARGIN_S
 # (stop this many seconds before walltime; default 1200),
 # OUTERLOOP_RESIDENT_CADENCE_S (tests: override the cadence in seconds).

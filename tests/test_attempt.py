@@ -3737,7 +3737,7 @@ def test_capacity_wait_wake_delivers_refusal_with_fresh_session_when_needed(
 def test_author_sleep_wake_publishes_an_inline_improvement(tmp_path, monkeypatch) -> None:
     """On a synchronous backend the gate answers inline instead of parking a
     candidate: the woken session's improvement becomes a PR through the same
-    terminal a fresh climb takes (cluster0, 2026-09-12: two improved wakes
+    terminal a fresh climb takes (local mode, 2026-09-12: two improved wakes
     ended `aborted` with no PR)."""
     from outerloop.roles import author_spec
 
@@ -4230,17 +4230,17 @@ def test_dispatch_settings_read_once_for_fresh_and_wake() -> None:
         image="/i.sif",
         account="acct",
         partition="cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         gpu_account="gpu-acct",
     )
     d = _dispatch_settings(args)
     assert (d.account, d.partition, d.gpu_partition, d.gpu_account) == (
         "acct",
         "cpu",
-        "h200",
+        "gpu-large",
         "gpu-acct",
     )
-    assert d.placement(1) == ("gpu-acct", "h200")
+    assert d.placement(1) == ("gpu-acct", "gpu-large")
 
 
 def _line_ws(tmp_path: Path, bare: Path):

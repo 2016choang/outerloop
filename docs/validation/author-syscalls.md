@@ -1,6 +1,6 @@
 # Validating the author sleep/wake substrate (live)
 
-> **VALIDATED 2026-08-25** on Torch (run `tsp-20260825-141345`): all six
+> **VALIDATED 2026-08-25** on the cluster (run `tsp-20260825-141345`): all six
 > milestones green — the codex author launched + slept unprompted, the same
 > session resumed with its launch's post-hibernation results, and the run
 > reached an honest negative terminal. The `--author-syscalls` /

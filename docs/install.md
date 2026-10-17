@@ -32,7 +32,7 @@ Use this when no partition can start a resident tick within your cadence and you
 
 ```bash
 OUTERLOOP_TICK_HOST=login
-OUTERLOOP_QOS=priority
+OUTERLOOP_QOS=my-qos
 OUTERLOOP_APPTAINER_BIN=/path/to/apptainer
 ```
 

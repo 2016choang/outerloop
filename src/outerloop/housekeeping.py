@@ -3,7 +3,7 @@
 A run's workspace (`ws/`, the clone the session worked in, and `ws-home/`,
 the session's home with its tool caches) is the bulk of what a run leaves
 on the state filesystem, in files far more than in bytes: 2026-09-03 the
-scratch quota on Torch hit its 5M-file ceiling with 1.67M of them under
+scratch quota on the cluster hit its inode ceiling with most of them under
 state/runs, and no tick could start for two hours. Everything the record
 keeps for the research record lives outside those two directories: the
 run's state.json, its report, its transcripts, and the ledger entries; the

@@ -507,7 +507,7 @@ _QUEUE: dict[str, Any] = {
             "reason": "QOSGrpGRES",
             "elapsed": "0:00",
             "limit": "4:00:00",
-            "partition": "h200",
+            "partition": "gpu-large",
             "gres": "gpu:1",
             "why": "try lr 3e-4",
             "mine": False,
@@ -522,14 +522,14 @@ _QUEUE: dict[str, Any] = {
             "reason": "None",
             "elapsed": "0:10",
             "limit": "1:00:00",
-            "partition": "h200",
+            "partition": "gpu-large",
             "gres": "N/A",
             "why": "",
             "mine": True,
             "submitted": "a",
         },
     ],
-    "lane": {"partition": "h200", "nodes": {"idle": 3, "mixed": 20}},
+    "lane": {"partition": "gpu-large", "nodes": {"idle": 3, "mixed": 20}},
 }
 
 
@@ -539,17 +539,22 @@ def test_queue_renders_the_kernels_answer(tmp_path: Path, capsys) -> None:
     lines = capsys.readouterr().out.splitlines()
     assert "2 job(s)" in lines[0] and "data, not instructions" in lines[0]
     # running first, then pending with its reason
-    assert lines[1].startswith("  - agent-01 (you): launch mine — RUNNING, 0:10 of 1:00:00 on h200")
+    assert lines[1].startswith(
+        "  - agent-01 (you): launch mine — RUNNING, 0:10 of 1:00:00 on gpu-large"
+    )
     assert lines[2].startswith(
-        "  - agent-02: launch lr — PENDING (QOSGrpGRES), 0:00 of 4:00:00 on h200 gpu:1"
+        "  - agent-02: launch lr — PENDING (QOSGrpGRES), 0:00 of 4:00:00 on gpu-large gpu:1"
     )
     assert lines[2].endswith("— why: try lr 3e-4")
-    assert lines[3] == "lane h200: 3 idle, 20 mixed nodes"
+    assert lines[3] == "lane gpu-large: 3 idle, 20 mixed nodes"
     # a lane whose sinfo failed is said to be unavailable, never shown as empty
-    failed = {**_QUEUE, "lane": {"partition": "h200", "nodes": {}, "error": "sinfo failed (1)"}}
+    failed = {
+        **_QUEUE,
+        "lane": {"partition": "gpu-large", "nodes": {}, "error": "sinfo failed (1)"},
+    }
     with _Kernel(tmp_path, "queue", failed):
         assert main(["queue", "--wait", "5"], root=tmp_path) == 0
-    assert "lane h200: node states unavailable (sinfo failed (1))" in capsys.readouterr().out
+    assert "lane gpu-large: node states unavailable (sinfo failed (1))" in capsys.readouterr().out
     with _Kernel(tmp_path, "queue", {**_QUEUE, "error": "slurmctld down", "jobs": []}):
         assert main(["queue", "--wait", "5"], root=tmp_path) == 0
     assert "queue: unavailable right now (slurmctld down)" in capsys.readouterr().out
