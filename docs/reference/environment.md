@@ -344,7 +344,6 @@ default, because an uncontained judge holds a shell on the launch node.
 
 - Values: `1`
 - Default: off
-- Configuration: the shell only
 
 ### `OUTERLOOP_STEWARD_KEY_FILE`
 
