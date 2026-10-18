@@ -103,6 +103,16 @@ Versions follow [SemVer](https://semver.org).
 
 ### Fixed
 
+- A wake that upgrades the author's syscall tool now queues the "tool was
+  updated" note once per tool version, keyed by the installed tool's content
+  digest. The kernel records that digest in the run record when it installs or
+  refreshes the tool (a fresh climb records it without a note), so a wake under
+  the same kernel has nothing to announce. A wake whose recorded digest differs
+  appends the note before saving the new digest: an interruption between the
+  two re-sends at most once, and the inbox's key dedup prevents a duplicate.
+  Upgrading: an old `tool:` inbox key written by an earlier kernel no longer
+  suppresses the new note, so a parked run may see one update note at its first
+  wake after upgrading.
 - Reserve infrastructure retries before submission so a crash before recording
   the job id cannot exceed the two-retry cap; undo the reservation only on a
   capacity rejection before submission. Upgrading: a measure that was between

@@ -2073,6 +2073,15 @@ def test_syscalls_arm_by_default_with_dispatch_and_resume(tmp_path, target_repo_
     assert outcome.outcome == "parked"
     record = load_record(tmp_path / "state", "tsp-1")
     assert record.state == "parked" and record.stage["phase"] == "author-sleep"
+    # the fresh climb records the tool it installed, silently: its first wake is
+    # not an upgrade and must not announce one
+    from outerloop.inbox import pending
+    from outerloop.syscall import tool_digest
+
+    assert record.stage["tool_digest"] == tool_digest()
+    assert not any(
+        m.key.startswith("tool:") for m in pending(tmp_path / "state" / "runs" / "tsp-1", 0)
+    )
 
 
 def test_depth_k_zero_keeps_checkpoint_and_submit_available(tmp_path, target_repo_optout) -> None:
@@ -8658,3 +8667,202 @@ def test_publish_missing_benchmark_records_outcome(tmp_path, target_repo, monkey
         assert record.state == "ended" and record.ending == "aborted"
         assert "benchmark 'tsp' not in contract (['renamed'])" in record.ending_note
     assert not github.prs
+
+
+TOOL_NOTE_MARKER = "Your syscall tool was updated."
+
+
+def _seed_inbox_history(tmp_path, run_id: str, count: int = 4) -> int:
+    """A real inbox: seqs 1..count delivered before the run's cursor. The note a
+    wake queues must land AFTER this cursor, or real delivery would skip it."""
+    from outerloop.inbox import Message, append
+
+    for index in range(1, count + 1):
+        append(
+            tmp_path / "runs" / run_id,
+            Message(
+                0,
+                "note",
+                "kernel",
+                "",
+                0.0,
+                f"history:{index}",
+                {"text": f"history message {index}"},
+            ),
+        )
+    return count
+
+
+def _tool_wake(tmp_path, record, workspace) -> list[str]:
+    """Run a wake leg through the session and return the prompts it rendered.
+
+    No changed paths and no launcher make attempt_once return its terminal right
+    after the session, so the leg also acknowledges its inbox cursor exactly as
+    a real wake does. The harness records each prompt so delivery is asserted on
+    what the session actually saw, not merely on what landed in the inbox."""
+    import subprocess
+
+    from outerloop.github import GitHubClient, Workspace
+    from outerloop.harness import Harness
+    from outerloop.roles import author_spec
+
+    prompts: list[str] = []
+
+    class CapturingHarness:
+        supports_resume = True
+
+        def run(self, brief_text, workspace, resume_session_id=None) -> SessionResult:
+            prompts.append(brief_text)
+            return _session("sess-1")
+
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    climb_mod.run_author_leg(
+        RunConfig(target=record.target, benchmark=record.benchmark),
+        CONTRACT,
+        workspace,
+        cast(Harness, CapturingHarness()),
+        None,
+        "HEAD",
+        lambda: "unused",
+        pinned_tip="",
+        run_root=tmp_path,
+        record=record,
+        ws=Workspace(root=workspace),
+        dispatch=None,
+        github=cast(GitHubClient, object()),
+        secrets=(),
+        spec=author_spec(),
+        changed_paths=lambda: [],
+        on_inbox_delivered=lambda seq: climb_mod.acknowledge_messages(tmp_path, record.run_id, seq),
+    )
+    return prompts
+
+
+def _tool_wake_record(*, inbox_seq: int, stage: dict[str, object] | None = None) -> RunRecord:
+    return RunRecord(
+        run_id="tsp-7",
+        target="org/pilot",
+        task_title="t",
+        state="running",
+        benchmark="tsp",
+        resume_session_id="sess-1",
+        inbox_seq=inbox_seq,
+        stage=stage or {},
+    )
+
+
+def _tool_notes(tmp_path, run_id: str) -> list:
+    from outerloop.inbox import pending
+
+    return [m for m in pending(tmp_path / "runs" / run_id, 0) if m.key.startswith("tool:")]
+
+
+def test_an_unchanged_fresh_run_wake_delivers_no_update_note(tmp_path) -> None:
+    """A fresh climb records the tool it installed, so its first wake under the
+    same kernel has nothing to announce."""
+    from outerloop.syscall import tool_digest
+
+    seq = _seed_inbox_history(tmp_path, "tsp-7")
+    record = _tool_wake_record(inbox_seq=seq, stage={"tool_digest": tool_digest()})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    prompts = _tool_wake(tmp_path, record, workspace)
+    assert len(prompts) == 1
+    assert TOOL_NOTE_MARKER not in prompts[0]
+    assert _tool_notes(tmp_path, record.run_id) == []
+
+
+def test_an_upgraded_tool_delivers_its_note_once(tmp_path) -> None:
+    from outerloop.syscall import tool_digest
+
+    seq = _seed_inbox_history(tmp_path, "tsp-7")
+    record = _tool_wake_record(inbox_seq=seq, stage={"tool_digest": "an older tool"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    prompts = _tool_wake(tmp_path, record, workspace)
+    # delivered after the seeded cursor and exactly once in the prompt
+    assert prompts[0].count(TOOL_NOTE_MARKER) == 1
+    assert "`end` verb is now `stop`" in prompts[0]
+    saved = load_record(tmp_path, record.run_id)
+    assert saved.stage["tool_digest"] == tool_digest()
+    assert [m.key for m in _tool_notes(tmp_path, record.run_id)] == [f"tool:{tool_digest()}"]
+    # the leg acknowledged the note; a second wake under the same tool is silent
+    prompts = _tool_wake(tmp_path, saved, workspace)
+    assert TOOL_NOTE_MARKER not in prompts[0]
+    assert len(_tool_notes(tmp_path, record.run_id)) == 1
+
+
+def test_an_interrupted_upgrade_delivers_one_note_on_retry(tmp_path, monkeypatch) -> None:
+    """The note is appended before the digest is saved. If the save is cut off,
+    the retry's append dedups the key instead of sending a second note."""
+    from outerloop.syscall import install_tool, tool_digest
+
+    seq = _seed_inbox_history(tmp_path, "tsp-7")
+    record = _tool_wake_record(inbox_seq=seq, stage={"tool_digest": "an older tool"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    install_tool(workspace)  # the upgrade wrote the bytes before the interruption
+
+    real_save = climb_mod.save_record
+    interrupted = [True]
+
+    def cut_after_the_note(run_root, saved, now):
+        if interrupted[0] and saved.stage.get("tool_digest") == tool_digest():
+            interrupted[0] = False
+            raise OSError("interrupted between the note and the record")
+        return real_save(run_root, saved, now)
+
+    monkeypatch.setattr(climb_mod, "save_record", cut_after_the_note)
+    with pytest.raises(OSError):
+        _tool_wake(tmp_path, record, workspace)
+    assert [m.key for m in _tool_notes(tmp_path, record.run_id)] == [f"tool:{tool_digest()}"]
+    assert load_record(tmp_path, record.run_id).stage.get("tool_digest") == "an older tool"
+
+    monkeypatch.setattr(climb_mod, "save_record", real_save)
+    prompts = _tool_wake(tmp_path, record, workspace)
+    assert prompts[0].count(TOOL_NOTE_MARKER) == 1
+    assert [m.key for m in _tool_notes(tmp_path, record.run_id)] == [f"tool:{tool_digest()}"]
+    assert load_record(tmp_path, record.run_id).stage["tool_digest"] == tool_digest()
+
+
+def test_a_stale_leg_record_keeps_the_persisted_tool_digest(tmp_path) -> None:
+    """The caller captures its record before the leg installs the tool. Later
+    stage writes (a park, a review reply) must take the digest from the record
+    on disk, or the next wake re-announces the same tool."""
+    from outerloop.attempt import _clear_stage
+
+    saved = RunRecord(
+        run_id="tsp-7",
+        target="org/pilot",
+        task_title="t",
+        state="parked",
+        benchmark="tsp",
+        stage={"tool_digest": "the installed tool"},
+    )
+    save_record(tmp_path, saved, 1)
+    stale = RunRecord(
+        run_id="tsp-7", target="org/pilot", task_title="t", state="parked", benchmark="tsp"
+    )
+    assert _clear_stage(stale, tmp_path).stage["tool_digest"] == "the installed tool"
+
+
+def test_an_old_tool_note_key_does_not_swallow_the_new_note(tmp_path) -> None:
+    from outerloop.inbox import Message, append
+    from outerloop.syscall import tool_digest
+
+    seq = _seed_inbox_history(tmp_path, "tsp-7")
+    # a sessionless checkpoint wrote this key: both parts empty/0
+    append(
+        tmp_path / "runs" / "tsp-7",
+        Message(0, "note", "kernel", "", 0.0, "tool::0", {"text": "an old kernel's note"}),
+    )
+    record = _tool_wake_record(inbox_seq=seq + 1, stage={"tool_digest": "an older tool"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    prompts = _tool_wake(tmp_path, record, workspace)
+    # the old key was delivered already; the new note is delivered, not swallowed
+    assert prompts[0].count(TOOL_NOTE_MARKER) == 1
+    assert {m.key for m in _tool_notes(tmp_path, record.run_id)} == {
+        "tool::0",
+        f"tool:{tool_digest()}",
+    }
