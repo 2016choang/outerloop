@@ -68,8 +68,8 @@ Versions follow [SemVer](https://semver.org).
   note to a run's inbox, delivered at the run's next wake — no PR needed.
   Reuses the existing `note`/`kernel` message shape, so older kernels read it
   without a compatibility change. Upgrading: no action needed; it appends an
-  ordinary note from the kernel and schedules no wake, so it is delivered when
-  the run next wakes.
+  ordinary note from the kernel, and a parked run with a pending inbox message
+  wakes at the next tick.
 
 ### Documentation
 
@@ -190,8 +190,9 @@ Versions follow [SemVer](https://semver.org).
 - Upgrading: labels and comment markers are recognized only under the
   `outerloop:` prefix; the retired markers are `followup`, `body-edit`,
   `claimed`, `claim-released`, `withdraw`, `unmeasured-merge`,
-  `advisory-review`, `verification-review`, `maintenance-digest` and
-  `round-skipped`, and the retired labels are `review`, `steward`,
+  `advisory-review`, `verification-review`, `maintenance-digest`,
+  `round-skipped`, `contract-alarm`, `outage-release` and `research-log`, and
+  the retired labels are `review`, `steward`,
   `no-review` and `task`. Rename any `autoresearch:*` labels on target repos
   (`gh label edit autoresearch:review --name outerloop:review`), update
   workflow `if:` conditions that match the old label, and change an open
@@ -203,9 +204,10 @@ Versions follow [SemVer](https://semver.org).
   the marker to `outerloop:` where the kernel must still recognize it.
 - Upgrading: the contract budget key `climb_job_minutes` is no longer read,
   and a contract that still uses it fails validation, so rename it to
-  `attempt_job_minutes` before upgrading. Finish or rebind a run parked on a
-  base commit whose contract still uses it: that run fails on wake and stays
-  stuck, because the kernel reads the contract pinned at that commit.
+  `attempt_job_minutes` before upgrading. A wake reads both the current base
+  branch's contract and the contract at the commit the run was parked on, so
+  finish or rebind a run whose parked commit still uses the old key: it fails
+  on wake and stays stuck even after the branch is renamed.
 
 ### Added
 
