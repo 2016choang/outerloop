@@ -67,7 +67,9 @@ Versions follow [SemVer](https://semver.org).
 - Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
   note to a run's inbox, delivered at the run's next wake — no PR needed.
   Reuses the existing `note`/`kernel` message shape, so older kernels read it
-  without a compatibility change.
+  without a compatibility change. Upgrading: no action needed; it appends an
+  ordinary note from the kernel; a parked run that is not waiting on jobs wakes
+  at the next tick to read it, and one waiting on jobs reads it when they end.
 
 ### Documentation
 
@@ -92,14 +94,18 @@ Versions follow [SemVer](https://semver.org).
   workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
 - The review and verify posting CLIs now share one gate for the untrusted
   emitted envelope, so a security fix to the decode/identity/kind checks lands
-  in both (#337).
+  in both (#337). Upgrading: no action needed; envelopes already emitted keep
+  their shape and are read the same way, so a round started before the upgrade
+  posts normally.
 - The `.git` guard's object read no longer derives filter-driver overrides
   (`cat-file -e` never converts working-tree files), dropping one
   `git config --get-regexp` subprocess from every guarded kernel git call
   with no change to what is refused or neutralized (#512).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
-  and how to fix it instead of calling it an API outage (#475).
+  and how to fix it instead of calling it an API outage (#475). Upgrading: no
+  action needed; the next skipped round names the cause, and skip comments
+  already posted keep their text.
 
 ### Fixed
 
@@ -138,21 +144,29 @@ Versions follow [SemVer](https://semver.org).
   sessions captured after upgrading.
 - A label-triggered review round no longer restarts the round counter at 1
   after a summarizer (panel) round: both paths post as the same underlying
-  reviewer, so the count continues (#373).
+  reviewer, so the count continues (#373). Upgrading: no action needed; round
+  stamps already posted are still counted, and the next round continues the
+  reviewer's count instead of restarting at 1.
 - A manual climb now refuses a relative codex/hermes panel key path, like the
   service preflight always did (#498).
 - A session that ends in error while an out-of-memory kill happens in the job
   ended its run with only the session's symptom; the ending now notes when an
   out-of-memory kill was observed in the job during the session (#483).
+  Upgrading: no action needed; endings already recorded keep their text, and
+  only a session that ends after the upgrade carries the note.
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
-  so throttled runs park briefly instead of ending aborted (#481).
+  so throttled runs park briefly instead of ending aborted (#481). Upgrading:
+  no action needed; a latch stamped before the upgrade keeps the cooldown it
+  recorded (up to 45 minutes), and a throttle stamped after it takes 5 minutes.
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
   that nothing ran and the run is still open, up to three times per leg. A stop
   after a kernel note, a gate verdict, or with a PR open is still taken as the
-  agent's answer, and `end` still ends the run.
+  agent's answer, and `stop` (formerly `end`) still ends the run. Upgrading: no action needed; a
+  run already ended as "ended without a submit" stays ended, and the resume
+  applies to a leg that stops after the upgrade.
 - A Codex session that recovers from a transient error no longer ends its run
   as aborted. Codex reports a dropped or timed-out model stream as an `error`
   event ("Reconnecting... 1/5") and carries on; the kernel now counts an error
@@ -177,19 +191,33 @@ Versions follow [SemVer](https://semver.org).
   stops with one clear message naming the benchmarks the contract has,
   instead of continuing on default settings (no GPU budget, default eval
   walltime, research lines off). A contract that fails to load still leaves
-  parked runs parked until it is fixed.
+  parked runs parked until it is fixed. Upgrading: finish or rebind a parked
+  run before upgrading if its benchmark was renamed or removed; on its next
+  wake it ends aborted with a message naming the benchmarks the contract has.
 
 ### Removed
 
 - Upgrading: labels and comment markers are recognized only under the
-  `outerloop:` prefix. Rename any `autoresearch:*` labels on target repos
+  `outerloop:` prefix; the retired markers are `followup`, `body-edit`,
+  `claimed`, `claim-released`, `withdraw`, `unmeasured-merge`,
+  `advisory-review`, `verification-review`, `maintenance-digest`,
+  `round-skipped`, `contract-alarm`, `outage-release` and `research-log`, and
+  the retired labels are `review`, `steward`,
+  `no-review` and `task`. Rename any `autoresearch:*` labels on target repos
   (`gh label edit autoresearch:review --name outerloop:review`), update
   workflow `if:` conditions that match the old label, and change an open
   research-log issue's `<!-- autoresearch:research-log -->` marker to
-  `<!-- outerloop:research-log -->`, or the kernel opens a new one.
-- Upgrading: the contract budget key `climb_job_minutes` is no longer read; a
-  contract that still uses it fails validation. Rename it to
-  `attempt_job_minutes` before upgrading.
+  `<!-- outerloop:research-log -->`, or the kernel opens a new one; on old
+  comments and issue or PR bodies it no longer sees the retired markers, so it
+  may re-post a review or addendum, re-pick an already claimed issue, or open
+  a duplicate digest issue — finish or close them before upgrading, or edit
+  the marker to `outerloop:` where the kernel must still recognize it.
+- Upgrading: the contract budget key `climb_job_minutes` is no longer read,
+  and a contract that still uses it fails validation, so rename it to
+  `attempt_job_minutes` before upgrading. A wake reads both the current base
+  branch's contract and the contract at the commit the run was parked on, so
+  finish or rebind a run whose parked commit still uses the old key: it fails
+  on wake and stays stuck even after the branch is renamed.
 
 ### Added
 
