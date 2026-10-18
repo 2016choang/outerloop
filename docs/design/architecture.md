@@ -165,13 +165,13 @@ unbounded one like wall-clock timing — EVERY sub-floor
 delta over the recorded best, including one below the relative
 threshold, is an honest negative result ("does not clear the noise
 floor"), never a PR and never an abort; the stale-clone abort remains
-the semantics for fixed-pool benchmarks only. The seed is drawn by the
-orchestrator at measurement time — never knowable when the solver wrote
-its code — and the baseline is measured in a throwaway worktree of the
-pre-session commit, so even an eval that persists artifacts cannot leak
-the pinned seed or the sampled pool into the tree the solver session
-sees. That combination is what makes a resampled pool tuning-proof
-while staying reproducible.
+the semantics for fixed-pool benchmarks only. The orchestrator draws
+the seed at the start of each author leg — fresh on an author wake,
+reused from the saved seed on a measurement wake — and withholds it
+from the author and its launches; a revision in the same leg is
+measured on the same seed. The baseline runs in a throwaway worktree of
+the pre-session commit, so an eval that persists artifacts cannot leak
+the pinned seed or the sampled pool into the tree the author sees.
 
 ## The life of a run
 
