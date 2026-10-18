@@ -166,12 +166,12 @@ delta over the recorded best, including one below the relative
 threshold, is an honest negative result ("does not clear the noise
 floor"), never a PR and never an abort; the stale-clone abort remains
 the semantics for fixed-pool benchmarks only. The seed is drawn by the
-orchestrator at measurement time — never knowable when the solver wrote
-its code — and the baseline is measured in a throwaway worktree of the
-pre-session commit, so even an eval that persists artifacts cannot leak
-the pinned seed or the sampled pool into the tree the solver session
-sees. That combination is what makes a resampled pool tuning-proof
-while staying reproducible.
+orchestrator before the solver session and never shown to it, so the
+solver cannot know or tune to it — and the baseline is measured in a
+throwaway worktree of the pre-session commit, so even an eval that
+persists artifacts cannot leak the pinned seed or the sampled pool into
+the tree the solver session sees. That combination is what makes a
+resampled pool tuning-proof while staying reproducible.
 
 ## The life of a run
 
