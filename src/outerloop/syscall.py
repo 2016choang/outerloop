@@ -716,6 +716,17 @@ def tool_update_note(
     return note
 
 
+def tool_digest() -> str:
+    """Content digest of the syscall tool this kernel installs. The wake
+    notice is keyed by it: a new tool always yields a new key, and the same
+    tool never queues a second note."""
+    import hashlib
+
+    from outerloop import syscall_cli
+
+    return hashlib.sha256(Path(syscall_cli.__file__).read_bytes()).hexdigest()
+
+
 def refresh_tool(workspace: Path) -> bool:
     """Rewrite the installed tool from this kernel's source at a wake, so a
     session that started under an older kernel gets the current verbs and
