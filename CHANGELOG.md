@@ -68,8 +68,8 @@ Versions follow [SemVer](https://semver.org).
   note to a run's inbox, delivered at the run's next wake — no PR needed.
   Reuses the existing `note`/`kernel` message shape, so older kernels read it
   without a compatibility change. Upgrading: no action needed; it appends an
-  ordinary note from the kernel, and a parked run with a pending inbox message
-  wakes at the next tick.
+  ordinary note from the kernel; a parked run that is not waiting on jobs wakes
+  at the next tick to read it, and one waiting on jobs reads it when they end.
 
 ### Documentation
 
