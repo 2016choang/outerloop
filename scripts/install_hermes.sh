@@ -50,7 +50,7 @@ if [ ! -d "$TARGET/.git" ]; then
     # Public foreign repository: clone anonymously, never with a job's
     # repo-scoped GitHub token. Retry cold fan-out/rate-limit failures.
     for i in 1 2 3 4 5 6; do
-        if git clone --depth 1 --branch "$WANT" \
+        if git clone --progress --depth 1 --branch "$WANT" \
             https://github.com/NousResearch/hermes-agent "$TARGET"; then
             break
         fi
@@ -68,7 +68,7 @@ if [ "$head" != "$WANT_SHA" ] || [ -n "$dirty" ]; then
     # a wrong or DIRTY checkout must never run with the panel key: re-pin
     # hard (this clone is a provisioned artifact, not a dev tree)
     echo "hermes-agent at $TARGET is $head (dirty=$([ -n "$dirty" ] && echo yes || echo no)); re-pinning to $WANT"
-    git -C "$TARGET" fetch --depth 1 origin "refs/tags/$WANT:refs/tags/$WANT"
+    git -C "$TARGET" fetch --progress --depth 1 origin "refs/tags/$WANT:refs/tags/$WANT"
     git -C "$TARGET" checkout -q --detach "tags/$WANT"
     git -C "$TARGET" reset --hard -q "tags/$WANT"
     git -C "$TARGET" clean -fdxq
@@ -95,13 +95,13 @@ export UV_PROJECT_ENVIRONMENT="$RUNTIME/venv"
 export UV_CACHE_DIR="$RUNTIME/cache"
 export UV_PYTHON_PREFERENCE=only-managed
 export UV_LINK_MODE=copy
-uv python install --no-bin 3.12
+uv python install --no-bin 3.12 -v
 python=$(uv python find --system 3.12)  # UV_PYTHON_PREFERENCE=only-managed restricts the search
 case "$python" in
     "$RUNTIME/python/"*) ;;
     *) echo "hermes-agent: Python must live under $RUNTIME/python" >&2; exit 1 ;;
 esac
-uv sync --project "$TARGET" --frozen --no-install-project --python "$python"
+uv sync --project "$TARGET" --frozen --no-install-project --python "$python" -v
 "$RUNTIME/venv/bin/python" -B -c 'import sys; assert sys.version_info >= (3, 12)'
 rm -rf "$UV_CACHE_DIR"  # the venv is complete; sessions never need the download cache
 sha256sum "$RUNTIME/venv/bin/python" | cut -d' ' -f1 > "$RUNTIME/venv/bin/python.verified-sha256"

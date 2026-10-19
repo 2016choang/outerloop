@@ -596,12 +596,13 @@ disarm comes from touching `<root>/DISARM_WAKE`.
 
 ### `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`
 
-How long a harness installation may make no progress before it is killed.
-Progress is new installer output or growth of the candidate installation
-directory, so a slow but working venv build is not cut off; a stalled
-download is. The same value still bounds verification. An install that keeps
-progressing is stopped by a one-hour overall backstop. Probes in
-`outerloop harness status` use their own short fixed timeouts.
+How long a harness installation may go without installer output before it is
+killed. Progress is a chunk of new output: the installers print while they
+download and unpack (uv runs verbosely, curl shows a progress bar), so a slow
+but working build is not cut off while a silent hang is. The same value still
+bounds verification. An install that keeps printing is stopped by a one-hour
+overall backstop. Probes in `outerloop harness status` use their own short
+fixed timeouts.
 
 - Default: 300
 - Constraint: positive and finite

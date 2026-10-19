@@ -403,39 +403,42 @@ def test_timeout_cleanup_and_backoff(tmp_path, monkeypatch):
     assert not child.exists()
 
 
-def test_progressing_install_survives_idle_limit(tmp_path):
+def test_output_progress_survives_idle_limit(tmp_path):
     target = tmp_path / "candidate" / "claude"
-    script = tmp_path / "slow.sh"
+    script = tmp_path / "chatty.sh"
     script.write_text(
-        'mkdir -p "$(dirname "$1")"\n'
-        'for _ in 1 2 3 4 5 6; do printf x >> "$1.progress"; sleep 0.1; done\n'
+        'mkdir -p "$(dirname "$1")"\nfor _ in $(seq 1 20); do printf x; sleep 0.05; done\n'
     )
-    harness_cli.run_installer(script, target, dict(os.environ), 0.25, 60, walk_interval=0.02)
+    # The script outlives the idle limit, but never pauses for it.
+    harness_cli.run_installer(script, target, dict(os.environ), 0.5, 60)
 
 
-def test_install_shrink_then_grow_is_progress(tmp_path):
+def test_closed_output_does_not_spin_and_is_killed(tmp_path, monkeypatch):
     target = tmp_path / "candidate" / "claude"
-    script = tmp_path / "shrink.sh"
-    script.write_text(
-        'mkdir -p "$(dirname "$1")"\n'
-        'head -c 4096 /dev/zero > "$1"\n'
-        "sleep 0.15\n"
-        'rm "$1"\n'
-        "sleep 0.15\n"
-        'for _ in 1 2 3 4; do printf x >> "$1"; sleep 0.15; done\n'
-    )
-    harness_cli.run_installer(script, target, dict(os.environ), 0.4, 60, walk_interval=0.02)
+    script = tmp_path / "closed.sh"
+    script.write_text("exec 1>&- 2>&-\nsleep 5\n")
+    real_read = os.read
+    reads = []
+
+    def counting(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(harness_cli.os, "read", counting)
+    with pytest.raises(TimeoutError, match="timed out"):
+        harness_cli.run_installer(script, target, dict(os.environ), 0.2, 60)
+    # EOF is read once; re-selecting the closed descriptor would spin on it.
+    assert len(reads) < 10
 
 
 def test_install_backstop_stops_an_install_that_keeps_progressing(tmp_path):
     target = tmp_path / "candidate" / "claude"
     script = tmp_path / "endless.sh"
     script.write_text(
-        'mkdir -p "$(dirname "$1")"\n'
-        'for _ in $(seq 1 100); do printf x >> "$1.progress"; sleep 0.05; done\n'
+        'mkdir -p "$(dirname "$1")"\nfor _ in $(seq 1 100); do printf x; sleep 0.05; done\n'
     )
     with pytest.raises(TimeoutError, match="backstop"):
-        harness_cli.run_installer(script, target, dict(os.environ), 1.0, 0.4, walk_interval=0.02)
+        harness_cli.run_installer(script, target, dict(os.environ), 1.0, 0.4)
 
 
 def test_backstop_interrupts_a_blocked_loop_and_cleans_up(tmp_path, monkeypatch):
@@ -444,23 +447,18 @@ def test_backstop_interrupts_a_blocked_loop_and_cleans_up(tmp_path, monkeypatch)
     env_file = tmp_path / ".env"
     original = f"OUTERLOOP_CLAUDE_BIN={old}\n"
     env_file.write_text(original)
-    # The idle limit clamps the walk to 0.15 s, so a walk blocks before the
-    # in-loop checks; only the SIGALRM backstop can end the install from there.
+    # The installer keeps printing, but the loop blocks before its in-loop
+    # checks; only the SIGALRM backstop can end the install from there.
     env = {"OUTERLOOP_CLAUDE_BIN": str(old), "OUTERLOOP_HARNESS_TIMEOUT_SECONDS": "0.3"}
-    script = tmp_path / "silent.sh"
+    script = tmp_path / "endless.sh"
     pid_file = tmp_path / "pid"
     script.write_text(
         f'echo $$ > "{pid_file}"\n'
         'mkdir -p "$(dirname "$1")"\n'
-        'for _ in $(seq 1 200); do printf x >> "$1.progress"; sleep 0.05; done\n'
+        "for _ in $(seq 1 200); do printf x; sleep 0.05; done\n"
     )
-    real = harness_cli.install_bytes
-    calls = []
 
-    def blocked(root):
-        calls.append(root)
-        if len(calls) == 1:
-            return real(root)
+    def blocked(*unused):
         # Only the SIGALRM backstop can end the install from in here.
         time.sleep(5)
 
@@ -469,7 +467,7 @@ def test_backstop_interrupts_a_blocked_loop_and_cleans_up(tmp_path, monkeypatch)
     def use_script(unused, target, install_env, idle_timeout, max_seconds):
         real_installer(script, target, install_env, idle_timeout, max_seconds)
 
-    monkeypatch.setattr(harness_cli, "install_bytes", blocked)
+    monkeypatch.setattr(harness_cli.select, "select", blocked)
     monkeypatch.setattr(harness_cli, "run_installer", use_script)
     monkeypatch.setattr(harness_cli, "MAX_INSTALL_SECONDS", 0.8)
     monkeypatch.setattr(harness_cli, "probe", lambda *a: ("0.0.1", True))
@@ -488,17 +486,6 @@ def test_backstop_interrupts_a_blocked_loop_and_cleans_up(tmp_path, monkeypatch)
         harness_cli.upgrade_one("claude", env, env_file, tmp_path)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
-
-
-def test_short_idle_limit_still_sees_silent_growth(tmp_path):
-    target = tmp_path / "candidate" / "claude"
-    script = tmp_path / "grow.sh"
-    script.write_text(
-        'mkdir -p "$(dirname "$1")"\nfor _ in $(seq 1 100); do printf x >> "$1"; sleep 0.02; done\n'
-    )
-    # The default walk interval is far longer than this idle limit; the walk
-    # must be clamped to idle_timeout / 2 or the growing install is killed.
-    harness_cli.run_installer(script, target, dict(os.environ), 0.6, 60)
 
 
 def test_initial_verification_is_bounded(tmp_path, monkeypatch):
@@ -736,15 +723,3 @@ def test_upgrade_used_continues_after_role_resolution_error(tmp_path, monkeypatc
     assert len(lines) == 1
     assert "skipping bridge detection" in lines[0]
     assert ("names no model" if role == "lens_model" else "unknown endpoint profile") in lines[0]
-
-
-def test_install_size_walk_lets_the_backstop_through(tmp_path, monkeypatch) -> None:
-    # TimeoutError is an OSError: the walk must not swallow the backstop alarm.
-    (tmp_path / "file").write_text("x")
-
-    def alarm(_path):
-        raise TimeoutError("install exceeded the backstop")
-
-    monkeypatch.setattr(harness_cli.os, "lstat", alarm)
-    with pytest.raises(TimeoutError):
-        harness_cli.install_bytes(tmp_path)

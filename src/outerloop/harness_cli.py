@@ -152,20 +152,8 @@ def installer_environment(env: Mapping[str, str], root: Path) -> dict[str, str]:
 
 
 MAX_INSTALL_SECONDS = 60 * 60
-INSTALL_WALK_SECONDS = 60.0
 OUTPUT_WAIT_SECONDS = 2.0
 MAX_DRAIN_BYTES = 8 * 1024
-
-
-def install_bytes(root: Path) -> int:
-    """Total size of a candidate install; a silent venv unpack still grows."""
-    total = 0
-    for directory, _, files in os.walk(root):
-        for name in files:
-            # Not OSError: the backstop's TimeoutError is an OSError and must propagate.
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                total += os.lstat(os.path.join(directory, name)).st_size
-    return total
 
 
 def run_installer(
@@ -174,25 +162,21 @@ def run_installer(
     env: dict[str, str],
     idle_timeout: float,
     max_seconds: float,
-    walk_interval: float = INSTALL_WALK_SECONDS,
 ) -> None:
-    """Run an installer, killing it once output and candidate growth both stop.
+    """Run an installer, killing it once its output stops for ``idle_timeout``.
 
-    Output is echoed as it arrives. Builds such as a venv can be silent while
-    they unpack, so a change in size under the candidate also counts as
-    progress. The candidate is walked at most every
-    ``min(walk_interval, idle_timeout / 2)`` seconds, so a short stall limit
-    still sees growth before it expires.
+    Output is echoed as it arrives, and a chunk of output counts as progress.
+    The installers print while they download and unpack, so a slow but healthy
+    build stays within the idle limit while a silent hang does not.
 
     A SIGALRM timer enforces ``max_seconds`` for the whole step, just as the
     old fixed deadline did. The in-loop checks handle the idle limit, but a
-    blocked write, walk or drain could otherwise hang past the backstop
+    blocked read, drain or sleep could otherwise hang past the backstop
     without ever reaching them.
 
     The timer raises the same ``TimeoutError`` a stall raises, so the caller's
     cleanup (kill the process group, back off, delete the candidate) runs.
     """
-    walk_every = min(walk_interval, idle_timeout / 2)
 
     def backstop(signum: int, frame: object) -> None:
         raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
@@ -202,8 +186,6 @@ def run_installer(
     try:
         started = time.monotonic()
         last_progress = started
-        last_walk = started
-        size = install_bytes(target.parent)
         with subprocess.Popen(
             ["bash", str(script), str(target)],
             env=env,
@@ -240,7 +222,6 @@ def run_installer(
                         0.0,
                         min(
                             OUTPUT_WAIT_SECONDS,
-                            walk_every - (now - last_walk),
                             idle_timeout - (now - last_progress),
                             max_seconds - (now - started),
                         ),
@@ -250,20 +231,12 @@ def run_installer(
                     else:
                         readable = []
                         time.sleep(wait)
-                    progressed = bool(readable) and drain()
-                    if time.monotonic() - last_walk >= walk_every:
-                        current = install_bytes(target.parent)
-                        # Stamp after the walk: a slow walk must not age the progress it found.
-                        last_walk = time.monotonic()
-                        if current != size:
-                            size = current
-                            progressed = True
+                    if bool(readable) and drain():
+                        last_progress = time.monotonic()
                     now = time.monotonic()
-                    if progressed:
-                        last_progress = now
                     if now - last_progress >= idle_timeout:
                         raise TimeoutError(
-                            f"install timed out after {idle_timeout:g} seconds without progress"
+                            f"install timed out after {idle_timeout:g} seconds without output"
                         )
                     if now - started >= max_seconds:
                         raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
@@ -446,7 +419,7 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         if ready and have == identity(name, desired) and verified(name, previous, desired):
             print(f"{name}: unchanged {have} at {previous}")
             return
-        # The install itself is bounded by the stall timeout instead.
+        # The install itself is bounded by the idle (no-output) timeout instead.
         signal.setitimer(signal.ITIMER_REAL, 0)
         parent = root / "harnesses" / name / identity(name, desired)
         parent.mkdir(parents=True, exist_ok=True)
