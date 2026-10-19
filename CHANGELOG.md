@@ -14,6 +14,10 @@ in each entry):
 - Rename `autoresearch:*` labels on target repos to `outerloop:*` and update
   workflow `if:` conditions that match them; old labels and comment markers
   are no longer recognized.
+- Change an open research-log issue's `<!-- autoresearch:research-log -->`
+  marker to `<!-- outerloop:research-log -->`, and finish, close, or re-mark
+  issues and PRs that carry other `autoresearch:` markers; otherwise the
+  kernel may re-post a review, re-pick a claimed issue, or open a duplicate.
 - Rename the contract key `climb_job_minutes` to `attempt_job_minutes`, and
   finish or rebind runs parked on a commit whose contract still uses it.
 - Finish or rebind parked runs whose benchmark was renamed or removed.
@@ -28,7 +32,7 @@ retry; codex costs captured before the upgrade still overstate resumed
 sessions.
 
 Before rolling back: remove `regression` blocks from contracts, drain parked
-runs, and keep this kernel while self-reported claims exist.
+runs, and do not roll back while self-reported claims exist.
 
 ### Documentation
 
