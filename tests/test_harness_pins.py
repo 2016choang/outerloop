@@ -403,6 +403,16 @@ def test_timeout_cleanup_and_backoff(tmp_path, monkeypatch):
     assert not child.exists()
 
 
+def test_candidate_setup_stays_under_the_fixed_bound(tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    binary(old, "0.0.1")
+    env = {"OUTERLOOP_CLAUDE_BIN": str(old), "OUTERLOOP_HARNESS_TIMEOUT_SECONDS": "0.2"}
+    monkeypatch.setattr(harness_cli, "probe", lambda *a: ("0.0.1", True))
+    monkeypatch.setattr(harness_cli.tempfile, "mkdtemp", lambda **kw: time.sleep(2))
+    with pytest.raises(TimeoutError, match="upgrade timed out"):
+        harness_cli.upgrade_one("claude", env, tmp_path / ".env", tmp_path)
+
+
 def test_output_progress_survives_idle_limit(tmp_path):
     target = tmp_path / "candidate" / "claude"
     script = tmp_path / "chatty.sh"

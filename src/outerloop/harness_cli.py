@@ -421,8 +421,6 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         if ready and have == identity(name, desired) and verified(name, previous, desired):
             print(f"{name}: unchanged {have} at {previous}")
             return
-        # The install itself is bounded by the idle (no-output) timeout instead.
-        signal.setitimer(signal.ITIMER_REAL, 0)
         parent = root / "harnesses" / name / identity(name, desired)
         parent.mkdir(parents=True, exist_ok=True)
         candidate = Path(tempfile.mkdtemp(prefix="install-", dir=parent))
@@ -430,6 +428,8 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         script = Path(__file__).resolve().parents[2] / "scripts" / f"install_{name}.sh"
         if not script.is_file():
             script = Path(__file__).with_name("_installers") / script.name
+        # The install itself is bounded by the idle (no-output) timeout instead.
+        signal.setitimer(signal.ITIMER_REAL, 0)
         run_installer(
             script,
             target,
