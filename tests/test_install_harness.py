@@ -244,7 +244,7 @@ case "$1 $2" in
         ;;
     "sync --project")
         expected="sync --project $REPO --frozen --no-install-project"
-        [ "$*" = "$expected --python $UV_PYTHON_INSTALL_DIR/bin/python" ]
+        [ "$*" = "$expected --python $UV_PYTHON_INSTALL_DIR/bin/python -v" ]
         [ ! -f "$FAIL" ] || exit 9
         mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"
         ln -sf "$UV_PYTHON_INSTALL_DIR/bin/python" "$UV_PROJECT_ENVIRONMENT/bin/python"
@@ -408,7 +408,7 @@ if [ "$1" = clone ]; then
         exit 1
     fi
     [ ! -e "$REPO/partial" ]
-    expected="clone --depth 1 --branch v2026.9.24"
+    expected="clone --progress --depth 1 --branch v2026.9.24"
     [ "$*" = "$expected https://github.com/NousResearch/hermes-agent $REPO" ]
     mkdir -p "$REPO/.git"
 elif [ "$3" = rev-parse ]; then
@@ -441,7 +441,7 @@ fi
         text=True,
     )
     assert result.returncode == (1 if moved_tag else 29)
-    assert calls.read_text().count("clone --depth") == 2
+    assert calls.read_text().count("clone --progress") == 2
     assert uv_called.exists() is not moved_tag
     assert not Path(f"{repo}.installing").exists()
     if moved_tag:
