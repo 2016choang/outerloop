@@ -72,7 +72,7 @@ Versions follow [SemVer](https://semver.org).
   step). Without it, a cluster deployment with no image still services nothing,
   and its log now names the setting. `outerloop start` now checks the fleet
   default author with the tick's own author check, as it already did for
-  overrides, so a default the tick would refuse (a Codex or Hermes author
+  overrides, reading settings with the precedence the launched tick applies, so a default the tick would refuse (a Codex or Hermes author
   without an image, a Codex author without a Codex model) fails at start
   instead of idling every tick.
 - `OUTERLOOP_OPERATOR_HARNESSES` lists harness CLIs the operator supplies, such

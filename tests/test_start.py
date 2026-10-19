@@ -1079,8 +1079,10 @@ def test_start_launches_with_resolved_author(clean_env, monkeypatch, backend, re
     monkeypatch.delenv(key)
     monkeypatch.setenv("PATH", str(clean_env) if not recorded else "")
     values = {"OUTERLOOP_AUTHOR_BACKEND": backend}
-    if backend == "codex":
-        values["OUTERLOOP_AUTHOR_MODEL"] = "gpt-x"  # start validates the default author
+    if backend == "codex":  # start validates the default author: a codex one runs contained
+        image = clean_env / "agent.sif"
+        image.write_text("")
+        values |= {"OUTERLOOP_AUTHOR_MODEL": "gpt-x", "OUTERLOOP_IMAGE": str(image)}
     if recorded:
         values[key] = str(binary)
     monkeypatch.setattr(
@@ -1106,10 +1108,12 @@ def test_missing_path_does_not_accept_a_cli_only_in_cwd(tmp_path, monkeypatch):
 def test_start_sees_steward_key_from_env_file(clean_env, monkeypatch, capsys):
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("OUTERLOOP_STEWARD_KEY_FILE", raising=False)
+    image = clean_env / "agent.sif"  # a codex author runs contained
+    image.write_text("")
     path = env_file(
         clean_env,
         "OUTERLOOP_AUTHOR_BACKEND=codex\nOUTERLOOP_AUTHOR_MODEL=gpt-x\n"
-        "OUTERLOOP_PANEL=\nOUTERLOOP_STEWARD_KEY_FILE=/keys/steward\n",
+        f"OUTERLOOP_PANEL=\nOUTERLOOP_STEWARD_KEY_FILE=/keys/steward\nOUTERLOOP_IMAGE={image}\n",
     )
     monkeypatch.setattr(cli, "ENV_FILE", path)
     exports = []
