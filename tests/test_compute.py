@@ -21,7 +21,7 @@ from outerloop.compute import (
 SPEC = JobSpec(
     job_name="test-job",
     account="acct",
-    partition="cpu_short",
+    partition="cpu-short",
     time_minutes=10,
     command="echo hi",
 )
@@ -63,7 +63,7 @@ def test_account_and_partition_are_optional_in_the_argv() -> None:
 
 
 def test_submit_parses_cluster_suffixed_id() -> None:
-    runner = FakeRunner([CommandResult(0, "12345;torch\n", "")])
+    runner = FakeRunner([CommandResult(0, "12345;clusterx\n", "")])
     assert SlurmCompute(runner=runner).submit(SPEC) == "12345"
 
 
@@ -190,9 +190,9 @@ def test_gpus_in_gres_parses_squeue_tres() -> None:
     from outerloop.compute import gpus_in_gres
 
     assert gpus_in_gres("gres/gpu:8") == 8
-    assert gpus_in_gres("gres/gpu:h200:2") == 2
+    assert gpus_in_gres("gres/gpu:xx:2") == 2
     assert gpus_in_gres("gres:gpu:4") == 4
-    assert gpus_in_gres("gres/gpu:1,gres/gpu:h100:1") == 2
+    assert gpus_in_gres("gres/gpu:1,gres/gpu:yy:1") == 2
     assert gpus_in_gres("N/A") == 0 and gpus_in_gres("") == 0 and gpus_in_gres("gres/gpu:x") == 0
 
 
@@ -202,15 +202,15 @@ def test_lane_load_counts_nodes_by_state() -> None:
     from outerloop.compute import LocalCompute
 
     runner = FakeRunner([CommandResult(0, "idle 3\nmixed* 20\nallocated 11\nmixed 2\n", "")])
-    assert SlurmCompute(runner=runner).lane_load("h200_courant,h200_public") == {
+    assert SlurmCompute(runner=runner).lane_load("gpu-large-a,gpu-large-b") == {
         "idle": 3,
         "mixed": 22,
         "allocated": 11,
     }
-    assert runner.seen[0][:4] == ["sinfo", "--noheader", "-p", "h200_courant,h200_public"]
+    assert runner.seen[0][:4] == ["sinfo", "--noheader", "-p", "gpu-large-a,gpu-large-b"]
     assert SlurmCompute(runner=FakeRunner([])).lane_load("") == {}  # no lane named: nothing asked
     with pytest.raises(SlurmQueryError):
-        SlurmCompute(runner=FakeRunner([CommandResult(1, "", "down")])).lane_load("h200")
+        SlurmCompute(runner=FakeRunner([CommandResult(1, "", "down")])).lane_load("gpu-large")
     assert LocalCompute.lane_load(None, "gpu") == {}  # type: ignore[arg-type]
 
 

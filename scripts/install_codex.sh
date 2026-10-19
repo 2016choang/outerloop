@@ -46,7 +46,7 @@ staged="$TARGET.tmp.$$"
 host_staged="$HOST.tmp.$$"
 trap 'rm -rf "$tmp" "$staged" "$host_staged"' EXIT
 host_asset="codex-code-mode-host-x86_64-unknown-linux-musl"
-curl -fsSL --connect-timeout 15 --max-time 120 --retry 0 \
+curl -fL --progress-bar --connect-timeout 15 --max-time 120 --retry 0 \
     "https://github.com/openai/codex/releases/download/rust-v${WANT}/${host_asset}.tar.gz" -o "$tmp/host.tar.gz"
 host_sha=$(sha256sum "$tmp/host.tar.gz" | cut -d' ' -f1)
 if [ "$host_sha" != "$HOST_SHA256" ]; then
@@ -62,7 +62,7 @@ install -m 0755 "$tmp/host/$host_asset" "$host_staged"
 if [ -n "${OUTERLOOP_CODEX_VERSION:-}" ]; then
     export npm_config_cache="${npm_config_cache:-${OUTERLOOP_CACHE_ROOT:-${OUTERLOOP_ROOT:-$HOME/.outerloop}/cache}/npm}"
     mkdir -p "$(dirname "$TARGET")"
-    npm install --prefix "$TARGET.package" "@openai/codex@$WANT"
+    npm install --prefix "$TARGET.package" --loglevel=http "@openai/codex@$WANT"
     bin="$(find "$TARGET.package/node_modules" -type f -path '*/codex/codex' | head -1)"
     [ -n "$bin" ] || { echo "codex native binary missing" >&2; exit 1; }
     actual=$(sha256sum "$bin" | cut -d' ' -f1)
@@ -72,7 +72,7 @@ if [ -n "${OUTERLOOP_CODEX_VERSION:-}" ]; then
 else
     asset="codex-x86_64-unknown-linux-musl.tar.gz"
     url="https://github.com/openai/codex/releases/download/rust-v${WANT}/${asset}"
-    curl -fsSL --connect-timeout 15 --max-time 120 --retry 0 "$url" -o "$tmp/codex.tar.gz"
+    curl -fL --progress-bar --connect-timeout 15 --max-time 120 --retry 0 "$url" -o "$tmp/codex.tar.gz"
     # Verify the archive before extracting or executing it.
     got_sha=$(sha256sum "$tmp/codex.tar.gz" | cut -d' ' -f1)
     if [ "$got_sha" != "$WANT_SHA256" ]; then

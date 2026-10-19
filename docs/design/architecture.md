@@ -15,10 +15,10 @@ reports weekly. Humans keep the merge button unless a repo owner opts in to
 
 | Axis | Decision |
 | --- | --- |
-| Compute | Torch-first: GPU jobs via sbatch under a sponsoring account, tagged, low-priority, hard GPU-hour budgets. Cloud burst deferred. |
+| Compute | Cluster-first: GPU jobs via sbatch under a sponsoring account, tagged, low-priority, hard GPU-hour budgets. Cloud burst deferred. |
 | Agent/LLM | Every LLM touchpoint sits behind the `Harness` seam, so a new backend is an implementation, not a rewrite. Wired today: Claude Code and Codex (subscription harnesses) and hermes-agent (via OpenRouter, an aggregator), plus the first-party API with tiered models and hard $ caps. Self-hosted: deferred. |
 | GitHub | A GitHub App installed on the opted-in repos (default; see design/github-app-auth.md), or an org machine user with a fine-grained PAT (fallback) + a contract file per repo. |
-| Scheduling | Self-resubmitting sbatch chain on Torch (scrontab is disabled there); nothing SSHes in — all connections outbound. Reviewer role on GitHub Actions. |
+| Scheduling | Self-resubmitting sbatch chain on the cluster (scrontab is disabled there); nothing SSHes in — all connections outbound. Reviewer role on GitHub Actions. |
 
 ## Target-repo contract
 
@@ -76,7 +76,7 @@ needs inbound access is a human with the runbook.
   uses the target repo's own Actions `GITHUB_TOKEN`; the first target Write
   grant comes with the phase-5 opt-in). Issues and PRs are for humans —
   reports, digests, alerts.
-- **Watchdog**: a scheduled GitHub Action; alert-only (it cannot reach Torch) —
+- **Watchdog**: a scheduled GitHub Action; alert-only (it cannot reach the cluster) —
   it opens an issue and emails on stale heartbeat. Restart is a human action;
   the lease makes restarts safe, the runbook makes them fast.
 - **GPU jobs**: submitted `--nice`/requeueable so humans always win the queue at
@@ -84,7 +84,7 @@ needs inbound access is a human with the runbook.
 - **Deployment = pull at tick start.** The batch script is a minimal, stable
   shim ordered so updates can never kill the chain: submit successors first
   (with the already-queued shim), then `git reset --hard origin/main` +
-  `uv sync --locked` in the deploy clone (Torch home dir), then exec the
+  `uv sync --locked` in the deploy clone (the cluster home dir), then exec the
   orchestrator from the fresh checkout. Merges to main are live at the next
   tick; a bad merge crashes the tick but not the chain — heartbeat records it,
   the fix is a revert PR. Slurm spools batch scripts at submission, so shim
@@ -165,13 +165,13 @@ unbounded one like wall-clock timing — EVERY sub-floor
 delta over the recorded best, including one below the relative
 threshold, is an honest negative result ("does not clear the noise
 floor"), never a PR and never an abort; the stale-clone abort remains
-the semantics for fixed-pool benchmarks only. The seed is drawn by the
-orchestrator at measurement time — never knowable when the solver wrote
-its code — and the baseline is measured in a throwaway worktree of the
-pre-session commit, so even an eval that persists artifacts cannot leak
-the pinned seed or the sampled pool into the tree the solver session
-sees. That combination is what makes a resampled pool tuning-proof
-while staying reproducible.
+the semantics for fixed-pool benchmarks only. The orchestrator draws
+the seed at the start of each author leg — fresh on an author wake,
+reused from the saved seed on a measurement wake — and withholds it
+from the author and its launches; a revision in the same leg is
+measured on the same seed. The baseline runs in a throwaway worktree of
+the pre-session commit, so an eval that persists artifacts cannot leak
+the pinned seed or the sampled pool into the tree the author sees.
 
 ## The life of a run
 
@@ -376,7 +376,7 @@ failure can strand a run:
 
 1. *Primary — Slurm is the event system.* When the compute module submits an
    experiment, it submits the wake job in the same breath with
-   `--dependency=afterany:<experiment>` (verified live on Torch: fires within
+   `--dependency=afterany:<experiment>` (verified live on the cluster: fires within
    seconds of the experiment ending, including on FAILURE — a failed
    experiment is a wake with bad news, which becomes a negative-result
    report, not a dead run). `afterany` cannot be left never-satisfied, and a
@@ -419,7 +419,7 @@ failure can strand a run:
 Run state is a small file per run on the shared filesystem, written by atomic
 rename; the sweep reasons only from state files plus `sacct`, never from
 process memory — a crash anywhere leaves a file that says what happens next.
-No component lives on a login node (ephemeral k8s pods on Torch).
+No component lives on a login node (ephemeral k8s pods on the cluster).
 
 **The backend seam.** `Harness` is one method: take rendered brief text and a
 workspace, return a `SessionResult` (transcript path, cost, stop reason, final
@@ -430,10 +430,10 @@ accounting) live inside the adapter; context policy lives in the brief builder,
 shared by all backends. This is also what makes backend comparisons honest:
 same brief, same task pool, different backend, diff the outcomes.
 
-## Placement on the cluster (Torch facts, verified 2026-08-06)
+## Placement on the cluster (site facts, verified 2026-08-06)
 
-Slurm bounds every job: `cpu_short` = 6h wall, `cpu48`/`gpu48` = 48h,
-`cpu168`/`gpu168` = 7d. GPU partitions carry a utilization floor. Nothing
+Slurm bounds every job: `cpu-short` = 6h wall, `cpu-long`/`gpu-long` = 48h,
+`cpu-xl`/`gpu-xl` = 7d. GPU partitions carry a utilization floor. Nothing
 about the agent may therefore depend on a long-lived process — and nothing
 does: **the agent is state on the shared filesystem** (per-run HOME, the
 workspace, run reports), never a process. Job death loses at most one bounded
@@ -441,12 +441,12 @@ step, never the research.
 
 | What | Where | Lifetime | Why |
 | --- | --- | --- | --- |
-| Orchestrator tick | `cpu_short` | minutes | Self-resubmitting sbatch chain (verified live: a compute-node job can sbatch its successor with `--begin`); two queued successors + the GH-Actions watchdog cover a lost link |
-| Agent session | `cpu_short` | ≤ 1h (harness timeout) | A session must NEVER hold a GPU: it thinks, edits, and submits — idling a GPU under the utilization floor gets jobs killed and wastes allocation |
-| Experiment | `gpu48` (`gpu168` only by exception) | ≤ 48h and ≤ the contract's `gpu_hours_per_run` | Actually uses the GPU, so the floor is satisfied; results land on the shared filesystem |
+| Orchestrator tick | `cpu-short` | minutes | Self-resubmitting sbatch chain (verified live: a compute-node job can sbatch its successor with `--begin`); two queued successors + the GH-Actions watchdog cover a lost link |
+| Agent session | `cpu-short` | ≤ 1h (harness timeout) | A session must NEVER hold a GPU: it thinks, edits, and submits — idling a GPU under the utilization floor gets jobs killed and wastes allocation |
+| Experiment | `gpu-long` (`gpu-xl` only by exception) | ≤ 48h and ≤ the contract's `gpu_hours_per_run` | Actually uses the GPU, so the floor is satisfied; results land on the shared filesystem |
 | The agent itself | shared filesystem | unbounded | Run state + session state + reports; any node can wake it (verified live: a session resumed on a different node recalled its context verbatim) |
 
-Scheduler etiquette learned live: `--exclude` is disallowed on Torch and node
+Scheduler etiquette learned live: `--exclude` is disallowed on the cluster and node
 pinning (`-w`) queues behind reservations — the orchestrator requests
 partitions and lets the scheduler place jobs, never nodes.
 
@@ -468,9 +468,8 @@ exactly this race at scale. Locking was considered and rejected: locks on
 NFS are their own failure mode, and not-sharing is strictly better here.
 
 
-Torch supports exactly one container runtime — Apptainer (Singularity); no
-Docker daemon exists ([cluster docs](https://services.rt.nyu.edu/docs/hpc/containers/intro/)).
-Containers are applied where they pay, not uniformly:
+The cluster supports exactly one container runtime — Apptainer (Singularity); no
+Docker daemon exists. Containers are applied where they pay, not uniformly:
 
 | What | Environment | Why |
 | --- | --- | --- |
@@ -532,8 +531,9 @@ when the block is present, and runs it bare otherwise.
   The reviewer's GitHub operations use the workflow's default `GITHUB_TOKEN` —
   the bot PAT is not involved in that role.
 - **Transcripts**: contain target-repo code — same confidentiality as the code.
-  Secret-scanned, then stored on project space (not scratch — 60-day purge) with
-  a stated retention period; durable per-run metadata lives in the ledger so
+  Secret-scanned, then stored on project space (not scratch, which the site
+  purges) with a stated retention period; durable per-run metadata lives in
+  the ledger so
   audits survive storage cleanup.
 
 ## Cluster facts (verified 2026-08-05)
@@ -565,7 +565,7 @@ not yet build-gating.
 - The second harness backend (pilot one; add the other when the pilot's volume
   data says it's worth it)
 - GitHub App (revisit if PAT limits bite)
-- Cloud compute backend (burst valve when Torch queues block)
+- Cloud compute backend (burst valve when cluster queues block)
 - Third-party / self-hosted models
 - Auto-merge on code is off by default and is never the kernel's decision.
   A repo owner may turn it on with `merge: auto` in the contract: a PR whose

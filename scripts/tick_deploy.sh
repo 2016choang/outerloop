@@ -186,7 +186,7 @@ if [ -n "$ENV_TRUSTED" ]; then
 fi
 
 # Host-side caches must never land in $HOME: home quotas are tiny on many
-# clusters and invisible until EDQUOT (verified on Torch — a full home took
+# clusters and invisible until EDQUOT (verified on the cluster — a full home took
 # down a live run). Default them under the state root (scratch-class
 # storage); explicit env wins. Submitted jobs inherit these via sbatch.
 export OUTERLOOP_CACHE_ROOT="${OUTERLOOP_CACHE_ROOT:-$OUTERLOOP_ROOT/cache}"

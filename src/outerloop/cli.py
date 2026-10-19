@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from outerloop.init import AppPermissionGaps
 
 RESIDENT_JOB_NAME = "outerloop-resident"
-DEFAULT_RESIDENT_MINUTES = 360  # cpu_short's ceiling on Torch; the loop hands over to itself
+DEFAULT_RESIDENT_MINUTES = 360  # a 6 h partition ceiling; the loop hands over to itself
 DEFAULT_LOCAL_ROOT = Path.home() / ".outerloop"
 ENV_FILE = paths.ENV_FILE
 

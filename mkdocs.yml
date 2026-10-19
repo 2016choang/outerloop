@@ -9,7 +9,6 @@ repo_url: https://github.com/outerloop-science/outerloop
 repo_name: outerloop-science/outerloop
 edit_uri: edit/main/docs/
 
-copyright: Agentic Learning AI Lab, NYU
 
 hooks:
   - scripts/docs/hooks.py

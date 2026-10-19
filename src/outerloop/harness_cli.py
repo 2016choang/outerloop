@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -164,18 +165,114 @@ def installer_environment(env: Mapping[str, str], root: Path) -> dict[str, str]:
     return result
 
 
-def run_installer(script: Path, target: Path, env: dict[str, str]) -> None:
-    with subprocess.Popen(
-        ["bash", str(script), str(target)], env=env, start_new_session=True
-    ) as process:
-        try:
-            code = process.wait()
-            if code:
-                raise subprocess.CalledProcessError(code, process.args)
-        finally:
-            # Also reap descendants when the shell exits before its children.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+MAX_INSTALL_SECONDS = 60 * 60
+OUTPUT_WAIT_SECONDS = 2.0
+MAX_DRAIN_BYTES = 8 * 1024
+
+
+def run_installer(
+    script: Path,
+    target: Path,
+    env: dict[str, str],
+    idle_timeout: float,
+    max_seconds: float,
+) -> None:
+    """Run an installer, killing it once its output stops for ``idle_timeout``.
+
+    Output is echoed as it arrives, and a chunk of output counts as progress.
+    The installers print while they download and unpack, so a slow but healthy
+    build stays within the idle limit while a silent hang does not.
+
+    A SIGALRM timer enforces ``max_seconds`` for the whole step, just as the
+    old fixed deadline did. The in-loop checks handle the idle limit, but a
+    blocked read, drain or sleep could otherwise hang past the backstop
+    without ever reaching them.
+
+    The timer raises the same ``TimeoutError`` a stall raises, so the caller's
+    cleanup (kill the process group, back off, delete the candidate) runs.
+    """
+
+    def backstop(signum: int, frame: object) -> None:
+        raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+
+    previous_handler = signal.signal(signal.SIGALRM, backstop)
+    signal.setitimer(signal.ITIMER_REAL, max_seconds)
+    try:
+        started = time.monotonic()
+        last_progress = started
+        with subprocess.Popen(
+            ["bash", str(script), str(target)],
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        ) as process:
+            assert process.stdout is not None
+            descriptor = process.stdout.fileno()
+            os.set_blocking(descriptor, False)
+            output = sys.stdout.buffer
+
+            open_output = True
+
+            def drain() -> bool:
+                """Echo one chunk; the caller bounds reads so deadlines still run."""
+                nonlocal open_output
+                try:
+                    chunk = os.read(descriptor, MAX_DRAIN_BYTES)
+                except BlockingIOError:
+                    return False
+                if not chunk:
+                    # EOF stays readable forever: stop selecting it, or the loop spins.
+                    open_output = False
+                    return False
+                output.write(chunk)
+                output.flush()
+                return True
+
+            try:
+                while process.poll() is None:
+                    now = time.monotonic()
+                    wait = max(
+                        0.0,
+                        min(
+                            OUTPUT_WAIT_SECONDS,
+                            idle_timeout - (now - last_progress),
+                            max_seconds - (now - started),
+                        ),
+                    )
+                    if open_output:
+                        readable, _, _ = select.select([descriptor], [], [], wait)
+                    else:
+                        readable = []
+                        time.sleep(wait)
+                    if bool(readable) and drain():
+                        last_progress = time.monotonic()
+                    now = time.monotonic()
+                    if process.poll() is not None:
+                        break  # exited during the wait: report its exit code, not a stall
+                    if now - last_progress >= idle_timeout:
+                        raise TimeoutError(
+                            f"install timed out after {idle_timeout:g} seconds without output"
+                        )
+                    if now - started >= max_seconds:
+                        raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+                # The shell exited: stop any descendant still writing before the final
+                # drain, so a noisy leftover cannot hold a successful install open.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                while drain():
+                    pass
+                code = process.wait()
+                if code:
+                    raise subprocess.CalledProcessError(code, process.args)
+            finally:
+                # Also reap descendants when the shell exits before its children.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+    finally:
+        # Verification re-arms its own fixed bound once the install is done.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def status(env: Mapping[str, str]) -> int:
@@ -339,8 +436,9 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         raise TimeoutError(f"upgrade timed out after {timeout:g} seconds")
 
     handler = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
+        # The probe/verification of the existing install keeps the old fixed bound.
+        signal.setitimer(signal.ITIMER_REAL, timeout)
         previous = installed_path(name, env)
         have, ready = probe(name, previous)
         if ready and have == identity(name, desired) and verified(name, previous, desired):
@@ -353,7 +451,17 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         script = Path(__file__).resolve().parents[2] / "scripts" / f"install_{name}.sh"
         if not script.is_file():
             script = Path(__file__).with_name("_installers") / script.name
-        run_installer(script, target, installer_environment(env, root))
+        # The install itself is bounded by the idle (no-output) timeout instead.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        run_installer(
+            script,
+            target,
+            installer_environment(env, root),
+            timeout,
+            MAX_INSTALL_SECONDS,
+        )
+        # Verification keeps the same fixed bound as before the stall timeout.
+        signal.setitimer(signal.ITIMER_REAL, timeout)
         got, complete = probe(name, target)
         if not complete or got != identity(name, desired) or not verified(name, target, desired):
             raise ValueError(
@@ -405,7 +513,12 @@ def main(argv: list[str] | None = None) -> int:
             return status(env)
         env_file.parent.mkdir(parents=True, exist_ok=True)
         with (env_file.parent / ".harness-upgrade.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError(
+                    "another harness upgrade is running; retry when it finishes"
+                ) from exc
             env = {**env_file_values(env_file, keys=CONFIG_KEYS), **os.environ}
             names = args.names or (used_harnesses(env) if args.used else list(NAMES))
             operator = operator_supplied(env)

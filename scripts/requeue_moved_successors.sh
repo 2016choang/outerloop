@@ -4,10 +4,10 @@
 # --begin, no dependency left) and not started for MIN_STARVE_MINUTES. The
 # tick chain keeps two successors queued under `--dependency=singleton`; a
 # successor stuck on a lower-tier partition blocks its twin (singleton waits
-# for same-name jobs to END) and the chain stalls (Torch, 2026-09-02).
+# for same-name jobs to END) and the chain stalls (observed 2026-09-02).
 #
 # Relocation ALONE is not a fault: the site moves pending jobs routinely
-# (cpu_short -> cs, 2026-09-02 evening), and cancelling a relocated job that
+# (between sibling partitions, 2026-09-02 evening), and cancelling a relocated job that
 # is not yet eligible only resets its queue age. Prints each cancelled job
 # id. Never fails the caller.
 #

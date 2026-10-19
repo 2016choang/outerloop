@@ -120,7 +120,7 @@ The reviewer and verifier are event-driven, not scheduled. They are GitHub
 Actions workflows that fire on a PR event: opened, or the review label
 applied. There is no cadence. A PR gets a response when it arrives.
 
-This is a separate system from the tick. The tick runs on Torch, polls on
+This is a separate system from the tick. The tick runs on the cluster, polls on
 the :00/:30 grid, submits research jobs, and makes no model calls. The
 reviewer runs on a GitHub runner, fires on PR events, and is the model call.
 Do not merge them. Putting the reviewer on the tick would add polling
@@ -131,11 +131,11 @@ The runner can be GitHub-hosted or self-hosted. Both are event-driven. A
 self-hosted runner could sit on lab hardware for tighter egress control, but
 it still picks up jobs on PR events, not on the tick's clock.
 
-Torch enters only for deep verification that re-runs an eval to check a
+The cluster enters only for deep verification that re-runs an eval to check a
 measurement claim, for a GPU benchmark. That is a job submitted per PR,
-triggered by the event. For untrusted fork PRs it must not run on Torch at
+triggered by the event. For untrusted fork PRs it must not run on the cluster at
 all, only on a throwaway GitHub runner. For trusted internal PRs it may
-submit to Torch, still event-driven.
+submit to the cluster, still event-driven.
 
 ## Security
 

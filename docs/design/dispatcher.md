@@ -75,7 +75,7 @@ evals that can never run. GPUs exist only on DISPATCHED jobs: the contract
 rejects a GPU benchmark whose `eval_minutes` would keep its evals in-job
 (the climb job has no allocation), and the steward lane refuses GPU
 benchmarks outright for now — a stewardship validates its rewrite in-job.
-The first target in this shape is the speedrun (`gpt-speedrun`: one H200
+The first target in this shape is the speedrun (`gpt-speedrun`: one large GPU
 per eval, ~3.5h).
 
 **Always queue.** Launches are submitted at sleep time and Slurm does the

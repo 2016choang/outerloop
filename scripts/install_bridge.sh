@@ -22,10 +22,10 @@ export UV_PROJECT_ENVIRONMENT="$TARGET/venv"
 export UV_CACHE_DIR="$TARGET/cache"
 export UV_PYTHON_PREFERENCE=only-managed
 export UV_LINK_MODE=copy
-uv python install --no-bin 3.12
+uv python install --no-bin 3.12 -v
 python=$(uv python find --system 3.12)
 case "$python" in "$TARGET/python/"*) ;; *) exit 1 ;; esac
-uv sync --project "$SOURCE" --frozen --compile-bytecode --no-install-project --python "$python"
+uv sync --project "$SOURCE" --frozen --compile-bytecode --no-install-project --python "$python" -v
 "$TARGET/venv/bin/python" -c 'import importlib.metadata, sys; assert importlib.metadata.version("litellm") == sys.argv[1]' "$WANT"
 DIGEST=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SOURCE/uv.lock")
 python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$TARGET/venv/bin/python" > "$TARGET/python.sha256"

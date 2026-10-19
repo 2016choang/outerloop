@@ -6,13 +6,53 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Upgrading
+
+Operator actions before upgrading (everything else needs no action; details
+in each entry):
+
+- Rename `autoresearch:*` labels on target repos to `outerloop:*` and update
+  workflow `if:` conditions that match them; old labels and comment markers
+  are no longer recognized.
+- Change an open research-log issue's `<!-- autoresearch:research-log -->`
+  marker to `<!-- outerloop:research-log -->`, and finish, close, or re-mark
+  issues and PRs that carry other `autoresearch:` markers; otherwise the
+  kernel may re-post a review, re-pick a claimed issue, or open a duplicate.
+- Rename the contract key `climb_job_minutes` to `attempt_job_minutes`, and
+  finish or rebind runs parked on a commit whose contract still uses it.
+- Finish or rebind parked runs whose benchmark was renamed or removed.
+- Run `outerloop harness upgrade codex` (deploys that run harness upgrades do
+  this automatically).
+- The one-idea rule is no longer enforced; a repository that wants it writes
+  it into its guidance files.
+
+What changes for runs in flight: a parked run may get one tool-update note at
+its first wake; a measurement between infrastructure retries may get one extra
+retry; codex costs captured before the upgrade still overstate resumed
+sessions.
+
+Before rolling back: remove `regression` blocks from contracts, drain parked
+runs, and do not roll back while self-reported claims exist.
+
 ### Documentation
 
 - The docs site is now a manual: getting started, task guides, concept pages
   with figures, and reference pages for contract fields, the operator CLI,
   agent syscalls, inbox messages and environment variables.
+- Tests, comments and design notes use generic cluster, partition and
+  hardware names (`gpu-large`, `cpu-short`, "cluster A") instead of site-specific ones.
+  The docs site drops its footer line.
 
 ### Changed
+
+- Harness upgrades kill an install only after `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`
+  without installer output, with a one-hour overall backstop, so a slow venv
+  build completes instead of dying every tick. The installers now print while
+  they download and unpack (uv runs verbosely, curl shows progress bars, git
+  clone reports progress), so a healthy install never looks stalled. A busy
+  upgrade lock now says another upgrade is running rather than `[Errno 11]`.
+  Upgrading: the variable keeps its name and default but now means time since
+  the last output, so an install that keeps printing may run for up to an hour.
 
 - The author verb `end` is renamed `stop` (`stop --report FILE`,
   `stop --withdraw REASON`), with no alias: agents read `end` as "end this
@@ -64,7 +104,9 @@ Versions follow [SemVer](https://semver.org).
 - Operator `outerloop message <run-id> (<text> | --file <path>)` to append one
   note to a run's inbox, delivered at the run's next wake — no PR needed.
   Reuses the existing `note`/`kernel` message shape, so older kernels read it
-  without a compatibility change.
+  without a compatibility change. Upgrading: no action needed; it appends an
+  ordinary note from the kernel; a parked run that is not waiting on jobs wakes
+  at the next tick to read it, and one waiting on jobs reads it when they end.
 - `OUTERLOOP_UNCONTAINED=1` runs a cluster deployment without a container
   runtime: sessions and evaluations run as Slurm jobs the way local mode runs
   them without an image, the image is ignored, and the panel stays opt-in
@@ -106,17 +148,31 @@ Versions follow [SemVer](https://semver.org).
   workflows pin `astral-sh/setup-uv@v10.2.0` (#337).
 - The review and verify posting CLIs now share one gate for the untrusted
   emitted envelope, so a security fix to the decode/identity/kind checks lands
-  in both (#337).
+  in both (#337). Upgrading: no action needed; envelopes already emitted keep
+  their shape and are read the same way, so a round started before the upgrade
+  posts normally.
 - The `.git` guard's object read no longer derives filter-driver overrides
   (`cat-file -e` never converts working-tree files), dropping one
   `git config --get-regexp` subprocess from every guarded kernel git call
   with no change to what is refused or neutralized (#512).
 - A review round refused because the pinned harness is too old for the model,
   or because the runner's harness install is missing or stale, now says which
-  and how to fix it instead of calling it an API outage (#475).
+  and how to fix it instead of calling it an API outage (#475). Upgrading: no
+  action needed; the next skipped round names the cause, and skip comments
+  already posted keep their text.
 
 ### Fixed
 
+- A wake that upgrades the author's syscall tool now queues the "tool was
+  updated" note once per tool version, keyed by the installed tool's content
+  digest. The kernel records that digest in the run record when it installs or
+  refreshes the tool (a fresh climb records it without a note), so a wake under
+  the same kernel has nothing to announce. A wake whose recorded digest differs
+  appends the note before saving the new digest: an interruption between the
+  two re-sends at most once, and the inbox's key dedup prevents a duplicate.
+  Upgrading: an old `tool:` inbox key written by an earlier kernel no longer
+  suppresses the new note, so a parked run may see one update note at its first
+  wake after upgrading.
 - Reserve infrastructure retries before submission so a crash before recording
   the job id cannot exceed the two-retry cap; undo the reservation only on a
   capacity rejection before submission. Upgrading: a measure that was between
@@ -142,21 +198,29 @@ Versions follow [SemVer](https://semver.org).
   sessions captured after upgrading.
 - A label-triggered review round no longer restarts the round counter at 1
   after a summarizer (panel) round: both paths post as the same underlying
-  reviewer, so the count continues (#373).
+  reviewer, so the count continues (#373). Upgrading: no action needed; round
+  stamps already posted are still counted, and the next round continues the
+  reviewer's count instead of restarting at 1.
 - A manual climb now refuses a relative codex/hermes panel key path, like the
   service preflight always did (#498).
 - A session that ends in error while an out-of-memory kill happens in the job
   ended its run with only the session's symptom; the ending now notes when an
   out-of-memory kill was observed in the job during the session (#483).
+  Upgrading: no action needed; endings already recorded keep their text, and
+  only a session that ends after the upgrade carries the note.
 - A model-API rate limit (HTTP 429) is now recognized as an outage in every
   backend's wording, and always takes the latch's short 5-minute cooldown,
-  so throttled runs park briefly instead of ending aborted (#481).
+  so throttled runs park briefly instead of ending aborted (#481). Upgrading:
+  no action needed; a latch stamped before the upgrade keeps the cooldown it
+  recorded (up to 45 minutes), and a throttle stamped after it takes 5 minutes.
 - An author session that stops without staging anything (an empty reply after
   long reasoning, or a line of narration with no command) no longer ends its
   run as "ended without a submit". The kernel resumes the session with a note
   that nothing ran and the run is still open, up to three times per leg. A stop
   after a kernel note, a gate verdict, or with a PR open is still taken as the
-  agent's answer, and `end` still ends the run.
+  agent's answer, and `stop` (formerly `end`) still ends the run. Upgrading: no action needed; a
+  run already ended as "ended without a submit" stays ended, and the resume
+  applies to a leg that stops after the upgrade.
 - A Codex session that recovers from a transient error no longer ends its run
   as aborted. Codex reports a dropped or timed-out model stream as an `error`
   event ("Reconnecting... 1/5") and carries on; the kernel now counts an error
@@ -184,19 +248,33 @@ Versions follow [SemVer](https://semver.org).
   stops with one clear message naming the benchmarks the contract has,
   instead of continuing on default settings (no GPU budget, default eval
   walltime, research lines off). A contract that fails to load still leaves
-  parked runs parked until it is fixed.
+  parked runs parked until it is fixed. Upgrading: finish or rebind a parked
+  run before upgrading if its benchmark was renamed or removed; on its next
+  wake it ends aborted with a message naming the benchmarks the contract has.
 
 ### Removed
 
 - Upgrading: labels and comment markers are recognized only under the
-  `outerloop:` prefix. Rename any `autoresearch:*` labels on target repos
+  `outerloop:` prefix; the retired markers are `followup`, `body-edit`,
+  `claimed`, `claim-released`, `withdraw`, `unmeasured-merge`,
+  `advisory-review`, `verification-review`, `maintenance-digest`,
+  `round-skipped`, `contract-alarm`, `outage-release` and `research-log`, and
+  the retired labels are `review`, `steward`,
+  `no-review` and `task`. Rename any `autoresearch:*` labels on target repos
   (`gh label edit autoresearch:review --name outerloop:review`), update
   workflow `if:` conditions that match the old label, and change an open
   research-log issue's `<!-- autoresearch:research-log -->` marker to
-  `<!-- outerloop:research-log -->`, or the kernel opens a new one.
-- Upgrading: the contract budget key `climb_job_minutes` is no longer read; a
-  contract that still uses it fails validation. Rename it to
-  `attempt_job_minutes` before upgrading.
+  `<!-- outerloop:research-log -->`, or the kernel opens a new one; on old
+  comments and issue or PR bodies it no longer sees the retired markers, so it
+  may re-post a review or addendum, re-pick an already claimed issue, or open
+  a duplicate digest issue — finish or close them before upgrading, or edit
+  the marker to `outerloop:` where the kernel must still recognize it.
+- Upgrading: the contract budget key `climb_job_minutes` is no longer read,
+  and a contract that still uses it fails validation, so rename it to
+  `attempt_job_minutes` before upgrading. A wake reads both the current base
+  branch's contract and the contract at the commit the run was parked on, so
+  finish or rebind a run whose parked commit still uses the old key: it fails
+  on wake and stays stuck even after the branch is renamed.
 
 ### Added
 
@@ -665,7 +743,7 @@ tasks to finish.
 - A review panel skipped at preflight or in the follow-up now sends the author a kernel note and records the reason in the submit’s PR addendum. These publishes never arm auto-merge.
 
 - A submitted review measurement could go unreported when its push failed. The number is now posted once, as soon as it is known. Review submits push a bot commit with the report’s first line and measured number as its message.
-- On local compute an author-sleep wake could lose an improvement: the gate answers inline there, and the wake only knew how to end a run, so the result became an aborted ending with no PR (cluster0, three runs). Fresh and resumed climbs now share one terminal: the report, the line notebook, a PR or an ending record, and the issue note. A wake that opened its PR but died before recording it reconciles to that PR instead of opening a second, and a park's snapshot is released only once the run has left waiting.
+- On local compute an author-sleep wake could lose an improvement: the gate answers inline there, and the wake only knew how to end a run, so the result became an aborted ending with no PR (local mode, three runs). Fresh and resumed climbs now share one terminal: the report, the line notebook, a PR or an ending record, and the issue note. A wake that opened its PR but died before recording it reconciles to that PR instead of opening a second, and a park's snapshot is released only once the run has left waiting.
 - A research line lost its snapshot when the author's session reset its branch to main: the seal parented on main, the push was refused, and the run left no notebook entry (#368). The kernel now records the line head itself and the line only moves forward from that record. Memory files a reset dropped from the tree come back at the seal; files the session deleted on the line stay deleted.
 - Intake dropped an issue from a private org member without a word: the App's token sees such an author as CONTRIBUTOR, and only OWNER/MEMBER/COLLABORATOR qualified. Every skipped issue is now logged with its reason, a maintainer's `outerloop:task` label vouches for an issue regardless of association, and new Apps request members read so private members read as MEMBER.
 
@@ -956,7 +1034,7 @@ removes them. The full history since the first pre-release follows.
 - GPU BENCHMARKS: a per-benchmark contract field `gpus` (default 0) sizes
   every dispatched job of that benchmark — gate measures and author
   launches — with `--gpus-per-node=N` on the job (the per-job `--gpus` form
-  is rejected by Torch's submit plugin as a "CPU job" on a GPU partition —
+  is rejected by the cluster's submit plugin as a "CPU job" on a GPU partition —
   the first fleet speedrun attempt aborted on it) and `--nv` on the jail. GPU jobs go
   to a dedicated lane (`AUTORESEARCH_GPU_PARTITION`, optional
   `AUTORESEARCH_GPU_ACCOUNT`); a `gpus > 0` benchmark on a deployment with no
@@ -1320,7 +1398,7 @@ removes them. The full history since the first pre-release follows.
 - Self-deadline: climbs arm a SIGALRM at walltime-minus-margin (default
   120s, floor 60s, `--deadline-margin-s`) raising into the ordinary
   containment — the only pre-kill warning on clusters that deliver no
-  signals to job processes (measured on Torch 2026-08-08). The tick passes
+  signals to job processes (measured on the cluster, 2026-08-08). The tick passes
   each climb its own walltime via `--job-minutes`.
 
 - The advisory reviewer posts one comment PER ROUND (numbered, stamped
@@ -1335,7 +1413,7 @@ removes them. The full history since the first pre-release follows.
   job is terminal — Slurm truth plus grace, outage never reads as dead.
   Previously only crashes (Python exceptions) were contained; kills
   stranded the record forever. A SIGTERM handler also raises into the
-  ordinary containment, but measurement (Torch, 2026-08-08) showed Slurm
+  ordinary containment, but measurement (on the cluster, 2026-08-08) showed Slurm
   delivers no signal to job processes there — on such clusters the sweep
   and the self-deadline (below) are the real teardown paths; the handler
   covers direct kills and other sites.
@@ -2314,7 +2392,7 @@ removes them. The full history since the first pre-release follows.
   agent-01 right after its own win).
 - A job the site relocated off its submitted partition counts as lost only
   when it is also starving: eligible (dependencies done, slot passed) and not
-  started past the grace window. Relocation alone is routine on Torch and
+  started past the grace window. Relocation alone is routine on the cluster and
   cancelling a relocated job only reset its queue age.
 - `AUTORESEARCH_BOT_ALIASES` names the kernel's former logins, and every
   "is this ours" check (own issues, claims, alarms, own PRs, own comments)
@@ -2419,7 +2497,7 @@ removes them. The full history since the first pre-release follows.
   Also fixes the sha pin itself (here and in `scripts/install_hermes.sh`):
   hermes v-tags are ANNOTATED, so `ls-remote` had yielded the tag OBJECT's
   sha — every verify comparing `rev-parse HEAD` (a commit) against it would
-  have always failed, stubbing out all hermes lenses and making the Torch
+  have always failed, stubbing out all hermes lenses and making the cluster
   installer refuse. Pins are now the dereferenced `^{}` commit sha, and the
   installer's three paths (fresh / idempotent / tamper re-pin) were executed
   live against the real repo (a 222 MB clone — the cache earns its keep).
@@ -2431,7 +2509,7 @@ removes them. The full history since the first pre-release follows.
   that finished in minutes. The park-time afterany wake job (zero-latency
   primary) remains planned; the sweep stays the backup.
 - A genuine API refusal the Claude CLI reports as a `subtype: "success"` error
-  is no longer misclassified as a `session-error`. Surfaced on Torch: a session
+  is no longer misclassified as a `session-error`. Surfaced on the cluster: a session
   hit the author key's workspace usage cap and came back `is_error` with a
   content-free `subtype: "success"` and the real cause only in
   `result="API Error: 400 ... usage limits"`. The parse stamped `"success"` into

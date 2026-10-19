@@ -106,7 +106,7 @@ Outerloop runs untrusted research agents against a small trusted kernel, and in 
 <text x="688" y="434" class="bt" text-anchor="start">Measure  (the gate)</text>
 <text x="688" y="456" class="bl" text-anchor="start">candidate vs base · paired</text>
 <text x="688" y="476" class="bl" text-anchor="start">or cached per base · seed</text>
-<text x="688" y="496" class="bl" text-anchor="start">drawn at measurement time</text>
+<text x="688" y="496" class="bl" text-anchor="start">drawn up front · never shown</text>
 <text x="688" y="516" class="bl" text-anchor="start">credit when gain meets floor</text>
 <rect x="956" y="410" width="298" height="120" rx="6" class="box k"/>
 <text x="968" y="434" class="bt" text-anchor="start">Panel rules</text>
@@ -215,7 +215,7 @@ When every job has finished, the kernel wakes the same session. The author resum
 
 ## The gate
 
-In the default `gate` mode, a `submit` seals the author's tree and only the kernel's measurement can credit it. The gate measures the candidate against the base, either as a paired comparison under one fresh seed or against a cached baseline for that base commit. The kernel draws the seed at measurement time, so the author cannot tune to it. Credit needs a relative improvement of at least 0.5% and a delta that meets the floor the contract sets (`min_delta`), so seed luck cannot pose as progress. The contract's `baseline` field chooses between the two protocols, and [writing a contract](contract.md) walks through that choice.
+In the default `gate` mode, a `submit` seals the author's tree and only the kernel's measurement can credit it. The gate measures the candidate against the base, either as a paired comparison under one fresh seed or against a cached baseline for that base commit. The kernel draws the seed at the start of each author leg — fresh on an author wake, reused from the saved seed on a measurement wake — and withholds it from the author and its launches; a revision in the same leg is measured on the same seed. Credit needs a relative improvement of at least 0.5% and a delta that meets the floor the contract sets (`min_delta`), so seed luck cannot pose as progress. The contract's `baseline` field chooses between the two protocols, and [writing a contract](contract.md) walks through that choice.
 
 A contract can instead set `verification: self_report`. The author claims two numbers, the kernel applies the same floors to the claimed pair, nothing is re-measured and no panel runs. Reports and the ledger label these results as self-reported, and they never arm automatic merging.
 

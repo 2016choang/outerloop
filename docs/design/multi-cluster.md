@@ -2,11 +2,13 @@
 
 Status: design note, 2026-09-15, for the owner to read before anything is
 built. The question: try Outerloop on a second cluster while the 0.2.0
-release candidate runs on both fleets (Empire AI Alpha, NERSC Perlmutter,
+release candidate runs on both fleets (a second site, NERSC Perlmutter,
 possibly ALCF Polaris), and say what
 multi-cluster coordination would take later. The roadmap's cross-cluster
 section names the tiers; this note fills them in against the code as of
-main `697b0b8` and against each cluster's public documentation.
+main `697b0b8` and against each cluster's public documentation. The lab's
+own sites are called cluster A (the current site), cluster B (the try-out)
+and cluster C (a second cluster at B's site) below.
 
 ## What a deployment is today
 
@@ -54,7 +56,7 @@ benchmark. What that needs, in order of how soon it bites:
   a slot and passes `--agent-id`; the issue-requested lane passes nothing
   and the attempt CLI defaults to `agent-01`, so a requested run shares the
   slot, and on a lines target the branch, with whichever self-initiated run
-  holds `agent-01` (Torch's issue-#1 run on 2026-09-02 was one). The fix is
+  holds `agent-01` (cluster A's issue-#1 run on 2026-09-02 was one). The fix is
   one allocator for every lane that starts a run, with occupancy read from
   live records and pending markers as the self-initiated lane already does,
   `--agent-id` required with no default so a lane that forgets fails at
@@ -75,8 +77,8 @@ benchmark. What that needs, in order of how soon it bites:
   the contract alone, and a deployment-side lower value does not preserve
   the target's ceiling: a contract allowance of ten with two fleets set to
   eight permits sixteen. The contract therefore declares the shares
-  (`budgets.fleets: {torch: {max_active_attempts: 2, runs_per_week: 5},
-  empire: {...}}`), each kernel enforces its own share, and the target's
+  (`budgets.fleets: {a: {max_active_attempts: 2, runs_per_week: 5},
+  b: {...}}`), each kernel enforces its own share, and the target's
   owner keeps one place that bounds total spend. New work either way.
 - Claims. PR merges go through GitHub and the climb board batch is pushed
   with an expected-head guard, so those are safe across kernels; the
@@ -108,39 +110,38 @@ file transport and cross-scheduler dependencies for no gain over tier 2.
 
 ## The clusters
 
-Facts from public documentation as of this note; "confirm" marks what the
-documentation does not say and a first login must answer.
+The properties that matter, per site; "confirm" marks what no documentation
+says and a first login must answer.
 
-| | Torch (today) | Empire AI Alpha | NERSC Perlmutter | ALCF Polaris |
+| | Cluster A (today) | Cluster B (the try-out) | NERSC Perlmutter | ALCF Polaris |
 | --- | --- | --- | --- | --- |
 | Scheduler | Slurm | Slurm | Slurm | PBS Pro |
-| Login | `login.torch.hpc.nyu.edu`, 2FA | `alpha.empire-ai.org` (2FA: confirm) | NERSC MFA | ALCF MFA |
-| Accounts | `torch_pr_36_*` | `ny_mren1_mars` (QOS `priority` 1 day, `standard` 2 days, `long` and `normal` 7 days, `test` 2 hours); the `nyu` partition needs the `nyu` account and a GPU | `-A m<project>` | project allocation |
-| GPUs | H200, L40S | `alpha`: 18 nodes of 8×H100 80GB, 6 of 8×H200, 4 of 8×RTX Pro 6000; `grace`: 60 ARM nodes without GPUs | 4×A100 per GPU node | 4×A100 per node |
-| CPU partition for the tick | `cpu_short` (6h) | `cpu` is one node (96 cores) with a multi-day backlog; CPU-only jobs are accepted on `alpha` but wait days except under `priority` | login-node pool via `scrontab` (`cron` QOS; `workflow` QOS for long jobs) | confirm; login nodes run PBS clients |
-| Containers | Apptainer on host | Apptainer 1.1.9 on PATH, no module needed | Shifter and podman-hpc; no Apptainer | Apptainer, compute nodes only |
+| Login | 2FA | 2FA (confirm) | NERSC MFA | ALCF MFA |
+| Accounts | sponsoring accounts under one association | one association with QOS tiers that set walltime (2 h test to 7 d long) and priority; a GPU account is needed for the GPU lane | `-A m<project>` | project allocation |
+| GPUs | a GPU lane with a utilization floor | whole-node GPU jobs only | 4×A100 per GPU node | 4×A100 per node |
+| CPU partition for the tick | a cheap CPU partition (6h MaxTime) | no usable CPU partition: one CPU node with a multi-day backlog; CPU-only jobs on the GPU lane wait days except under the top-priority QOS | login-node pool via `scrontab` (`cron` QOS; `workflow` QOS for long jobs) | confirm; login nodes run PBS clients |
+| Containers | Apptainer on host | Apptainer on PATH, no module needed | Shifter and podman-hpc; no Apptainer | Apptainer, compute nodes only |
 | Egress | outbound HTTPS from login and compute nodes | login node reaches GitHub and both model APIs; compute nodes confirm in the first job | login yes; compute nodes confirm | proxy only (`http_proxy`/`https_proxy` to `proxy.alcf.anl.gov:3128`) |
-| Storage | scratch, 60-day purge, 5M-inode quota | home on a 17 PB NFS with no quota shown; `/mnt/lustre/nyu/<user>` scratch, writable | `$SCRATCH` purged; `$CFS` project space | project filesystems (`-l filesystems=`) |
-| Long-running login processes | login nodes are ephemeral pods; forbidden | login node has 192 cores and 1 TB; no policy published; ask | cgroup-limited (56 GB); `scrontab` is the sanctioned way | confirm |
+| Storage | scratch with a purge window and an inode quota | shared home NFS with no visible quota; a separate scratch tree, writable | `$SCRATCH` purged; `$CFS` project space | project filesystems (`-l filesystems=`) |
+| Long-running login processes | login nodes are ephemeral pods; forbidden | a large shared login node; no policy published; ask | cgroup-limited (56 GB); `scrontab` is the sanctioned way | confirm |
 
 ## What each cluster asks of the kernel
 
-**Empire AI Alpha.** Probed on 2026-09-15 over the owner's session.
+**Cluster B.** Probed on 2026-09-15 over the owner's session.
 Slurm and Apptainer, the two things the kernel assumes, are there, and the
 login node reaches GitHub and both model APIs. Two things it does not have.
 Python is 3.9 (a 3.10 module exists), so `uv` with a managed 3.12 was
 installed under the home directory; that is enough. And there is no place a
 resident tick can live: the one CPU node carries a multi-day backlog, and a
-CPU-only job on the GPU partition waits days under every QOS except
-`priority`, whose one-day walltime would requeue a resident every day into
-the same wait. So on Alpha the tick is a loop on the login node, which needs
-the tick-host build below and the operators' word that a long-lived process
-there is allowed. Sessions and launches take the `priority` QOS (a two-core
-job in about two and a half hours, one GPU in about five and a half, at the
-time of the probe); the kernel has no QOS setting today (`JobSpec.qos`
+CPU-only job on the GPU lane waits days under every QOS except the
+top-priority one, whose one-day walltime would requeue a resident every day
+into the same wait. So on cluster B the tick is a loop on the login node,
+which needs the tick-host build below and the operators' word that a
+long-lived process there is allowed. Sessions and launches take the
+top-priority QOS; the kernel has no QOS setting today (`JobSpec.qos`
 exists, nothing sets it), so `OUTERLOOP_QOS` joins the placement settings.
-The `.env` also names the GPU lane by hand, `OUTERLOOP_GPU_PARTITION=alpha`
-and the account, because `outerloop init` asks only for the CPU placement.
+The `.env` also names the GPU lane by hand, `OUTERLOOP_GPU_PARTITION` and
+the account, because `outerloop init` asks only for the CPU placement.
 GPU jobs use `--gpus-per-node`, which is what `JobSpec` already writes.
 
 **NERSC Perlmutter.** Slurm, so `SlurmCompute` and the chain scripts carry
@@ -167,7 +168,7 @@ every session and job, which today's `--cleanenv` scrubs. Apptainer runs
 only on compute nodes there, which suits author sessions (they are jobs)
 and does not affect the tick (which uses no container).
 
-**Common to all three: where the tick lives.** Torch's answer (a six-hour
+**Common to all three: where the tick lives.** Cluster A's answer (a six-hour
 resident job on a cheap CPU partition, chained by `singleton`) is the only
 one the code knows. The alternatives are a `scrontab` entry (NERSC), a loop
 process on a login node where policy allows it (the `tick --loop` that local
@@ -179,78 +180,77 @@ along with the loop), and residents that `singleton` no longer serializes
 need a tick-level lease in the state root (the existing lease guards one
 run's wake, and tick coalescing is a timer, not mutual exclusion). So:
 `OUTERLOOP_TICK_HOST=resident|scrontab|login` in `outerloop start`, with
-`resident` the default that exists today, plus a tick lease. Empire AI needs
+`resident` the default that exists today, plus a tick lease. Cluster B needs
 the login host: the probe showed no partition a resident could live on.
 
-## The try-out: Empire AI Alpha, tier 1
+## The try-out: cluster B, tier 1
 
 1. Access and probe: done on 2026-09-15 over a multiplexed SSH master from
-   the owner's session (`Host empire` in the SSH config, `ControlPersist
-   12h`); the table above carries the answers. Still open on the machine:
+   the owner's session (`ControlPersist 12h`); the table above carries the
+   answers. Still open on the machine:
    whether a long-lived process may sit on the login node (ask the
    operators), model-API reach from a contained compute job, GPU visibility
    under `--nv`, and the shared filesystem's atomic-rename, `O_EXCL` and
-   `flock` behavior across nodes; the first one-minute job under `priority`
-   answers the last three.
+   `flock` behavior across nodes; the first one-minute job under the
+   top-priority QOS answers the last three.
 2. Build first: `OUTERLOOP_TICK_HOST=login` (the `tick --loop` local mode
    already runs, with `SlurmCompute` instead of the forced local backend, a
    tick lease in the state root against a second loop, and a per-cadence
    pull of the checkout in place of the resident's deploy step) and
    `OUTERLOOP_QOS` threaded into every job the kernel submits. One small
-   PR, before the first tick on Alpha.
-3. Install. A source checkout on Alpha (`git clone` and `uv sync`, as on
-   Torch): in Slurm mode `outerloop start` submits `scripts/tick_chain.sbatch`
+   PR, before the first tick on cluster B.
+3. Install. A source checkout on cluster B (`git clone` and `uv sync`, as on
+   cluster A): in Slurm mode `outerloop start` submits `scripts/tick_chain.sbatch`
    from the checkout and refuses a bare PyPI install (shipping the chain
    script inside the wheel is a queued item). `outerloop init` writes
    `~/.config/outerloop/.env` with the account, the partition and the App
    file; the GPU lane, the QOS and the tick host are added by hand. The App:
    the owner decided to keep one App per target's fleets (decision 2), so
-   the `outerloop-science` App file and key are copied over the two SSH
+   the `outerloop-science` App file and key are copied over the SSH
    masters; the bot login on PRs stays the same.
-4. Target. Tier 1 wants a target the Torch fleet is not climbing. A copy
+4. Target. Tier 1 wants a target the cluster A fleet is not climbing. A copy
    of `quickstart-trial` proves the plumbing in an afternoon (small GPU
    task, cheap evals); a real benchmark follows once a tick cycle, one
    climb with a launch, a sleep and a wake, a published report and a ledger
-   row have all been seen on Alpha.
-5. Operate. Alpha is operated over the same SSH master as the probe; the
+   row have all been seen on cluster B.
+5. Operate. Cluster B is operated over the same SSH master as the probe; the
    owner opens it once per twelve hours of use. The kernel's own evidence
    (tick log, run directories, the board) is what "seen working" means.
 
-## Empire AI Beta, as probed
+## Cluster C, as probed
 
-The owner pointed at the second Empire AI cluster on 2026-09-15
-(`beta.empireai.edu`; `Host empire-beta` in the SSH config, the same
-master-socket pattern as Alpha). Probed the same day from its login node:
+The owner pointed at a second cluster at the same site on 2026-09-15 (the
+same master-socket pattern as cluster B). Probed the same day from its
+login node:
 
-- **One partition, whole-node jobs.** `beta` is 72 nodes of 4×B200 80GB
-  (288 GPUs, `TIMELIMIT infinite`); the QOS decide everything. Our
-  association (`ny_mren1_mars`) has `test` (2 h), `interactive` (2 h, one
-  job), `standard` (2 days, default), `long` (7 days), `priority` (1 day,
-  priority 1000) and `normal`. Every one of those but `normal` carries
-  `MinTRES gres/gpu=4`: a job below four GPUs is refused (`QOSMinGRES`),
-  including a two-core CPU job and a one-GPU job. `normal` has no minimum
-  and priority 0; a two-core job under it is estimated three and a half
-  days out. Billing is 2 SU per GPU-hour times the QOS factor (`priority`
-  4×). Estimates at probe time for a four-GPU job: `priority` about 3.5 h,
-  `standard` about 30 h; 91 pending (36 `priority`, 53 `standard`), 47
-  running, all with GPUs.
+- **One partition, whole-node jobs.** Cluster C runs whole-node GPU jobs
+  with no walltime limit; the QOS decide everything. Our association has
+  tiers from a two-hour test and interactive (one job) through the default
+  two-day standard and seven-day long to a one-day priority tier. Every one
+  of those but the lowest carries `MinTRES gres/gpu=4`: a job below four
+  GPUs is refused (`QOSMinGRES`), including a two-core CPU job and a
+  one-GPU job. The lowest has no minimum and no priority; a two-core job
+  under it is estimated three and a half days out. Billing is per
+  GPU-hour times the QOS factor (4× on the priority tier). Estimates at
+  probe time for a four-GPU job: the priority tier about 3.5 h, standard
+  about 30 h; 91 pending, 47 running, all with GPUs.
 - **Containers are pyxis and enroot, not Apptainer.** `srun --container-image`
   and `--container-mounts` are the interface; `/usr/bin/enroot` is present;
-  no Apptainer binary or module on the login node. Beta is therefore the
-  second consumer of the container seam the NERSC section asks for, and it
-  wants an OCI form of the agent image (enroot imports `docker://`).
-- **The login node is shared with nobody's scheduler.** 144 cores, 478 GB,
-  load about 9, no CPU or memory quota on the user slice, user processes
+  no Apptainer binary or module on the login node. Cluster C is therefore
+  the second consumer of the container seam the NERSC section asks for, and
+  it wants an OCI form of the agent image (enroot imports `docker://`).
+- **The login node is shared with nobody's scheduler.** A large shared node
+  with no CPU or memory quota on the user slice and user processes
   running for days: a login-host loop is within observed practice, as on
-  Alpha. Slurm's binaries live under `/cm/local/apps/slurm/current/bin` and
-  are on PATH only in a login shell, so the loop must start from one (tmux).
-- **The home is Alpha's home.** `/mnt/home` is the same NFS export on both
+  cluster B. Slurm's binaries are on PATH only in a login shell, so the
+  loop must start from one (tmux).
+- **The home is cluster B's home.** The same NFS export is mounted on both
   clusters: `~/outerloop`, `~/.config/outerloop/` (App file, keys, `.env`)
-  and the uv install written for Alpha are already visible on Beta. No user
-  scratch exists yet (`/ddn/lustre` holds validation runs; `/projects/nyu`
-  is empty and root-owned); the state root would have to sit on the home
-  NFS until the operators hand out project space. Egress from the login
-  node reaches GitHub and both model APIs.
+  and the uv install written for cluster B are already visible on cluster
+  C. No user scratch exists yet (a lustre filesystem holds validation
+  runs; a projects tree is empty and root-owned); the state root would
+  have to sit on the home NFS until the operators hand out project space.
+  Egress from the login node reaches GitHub and both model APIs.
 
 What this means for the kernel and the order of work:
 
@@ -258,21 +258,22 @@ What this means for the kernel and the order of work:
    one `~/.config/outerloop/.env` cannot both be right (root, partition,
    QOS, container path all differ). `start` and `tick_deploy.sh` need an
    explicit env-file setting (`OUTERLOOP_ENV_FILE`, or a per-host file the
-   default resolves to) before Beta gets a loop. Small; independent.
+   default resolves to) before cluster C gets a loop. Small; independent.
 2. **Job shape.** With four GPUs the floor for every job, Outerloop's small
-   jobs (a five-minute eval, a one-hour session) each spend a node. Beta is
-   economical only when an attempt bundles its session and its evaluations
-   into one allocation, or when the benchmark itself uses the four GPUs.
-   That is the "sessions ride GPU allocations" item from the Alpha section,
-   now with a number attached; until it exists, Beta launches only work
-   whose benchmark is four-GPU sized.
+   jobs (a five-minute eval, a one-hour session) each spend a node. Cluster
+   C is economical only when an attempt bundles its session and its
+   evaluations into one allocation, or when the benchmark itself uses the
+   four GPUs. That is the "sessions ride GPU allocations" item from the
+   cluster B section, now with a number attached; until it exists, cluster
+   C launches only work whose benchmark is four-GPU sized.
 3. **Container seam first.** The pyxis path is the same code change NERSC
-   needs; Beta makes it the next backend seam after the login-host loop.
-4. **Order.** Alpha stays the tier-1 try-out. Beta is the natural tier-2
-   partner (same institution, same home, same App, a second fleet on a
-   shared target) once 1 and 3 exist, and the place to test slot ranges
-   and the shared mail. Ask the operators for project scratch and for the
-   login-node policy in the same message as Alpha's.
+   needs; cluster C makes it the next backend seam after the login-host
+   loop.
+4. **Order.** Cluster B stays the tier-1 try-out. Cluster C is the natural
+   tier-2 partner (same institution, same home, same App, a second fleet
+   on a shared target) once 1 and 3 exist, and the place to test slot
+   ranges and the shared mail. Ask the operators for project scratch and
+   for the login-node policy in the same message as cluster B's.
 
 ## Cross-fleet messages on one target
 
@@ -403,7 +404,7 @@ persisted group expansion; expiry bounces; sender-side pruning; the forum verb a
 a shallow fetch of `research-log` for attempts; a tick lease for
 non-singleton tick hosts; the GitHub outage latch. Tests for each crash
 window above. It waits for a second fleet to share a target, which in turn
-waits for the Empire AI tier-1 try-out, except the outage latch, which
+waits for the cluster B tier-1 try-out, except the outage latch, which
 waits for nothing.
 
 ## Decisions for the owner
@@ -415,14 +416,14 @@ directory later. Still the owner's:
 
 1. **Tick host.** Built (#402, 2026-09-15): `OUTERLOOP_TICK_HOST=login`
    runs the foreground loop against Slurm with a tick lease in the state
-   root; `resident` stays the default; `scrontab` waits for NERSC. Alpha
-   runs this way.
-2. **Bot identity.** In effect: Alpha reuses the `outerloop-science` App
+   root; `resident` stays the default; `scrontab` waits for NERSC. Cluster
+   B runs this way.
+2. **Bot identity.** In effect: cluster B reuses the `outerloop-science` App
    (decided 2026-09-15); a lab-org target uses the same App's lab
    installation. Per-deployment Apps stay out until claims are
    identity-independent.
-3. **Order.** Empire AI Alpha is live (2026-09-15, one full cycle seen);
-   Beta next (decision 9), then NERSC (container seam and `scrontab`), ALCF
+3. **Order.** Cluster B is live (2026-09-15, one full cycle seen);
+   cluster C next (decision 9), then NERSC (container seam and `scrontab`), ALCF
    last (PBS backend).
 4. **Pacing.** Contract-declared fleet shares whose sum is the target's
    ceiling, enforced per kernel; the earlier "each deployment sets a lower
@@ -441,15 +442,16 @@ directory later. Still the owner's:
 8. **Two small fixes first, independent of any fleet decision.** Still
    open: the GitHub outage latch (a publish that meets a GitHub failure
    today ends the run aborted; a clone at attempt start has no retry
-   either, seen on Alpha), and the agent-slot allocator on every lane with
+   either, seen on cluster B), and the agent-slot allocator on every lane with
    `--agent-id` required (a requested run lands on `agent-01` today). For
    the second, whether a requested run counts against the width or takes an
    id beyond it (recommended).
 
-9. **Empire AI Beta.** Decided (2026-09-15): Beta hosts four-GPU-sized
+9. **Cluster C.** Decided (2026-09-15): cluster C hosts four-GPU-sized
    experiments; allocation bundling for small jobs is not built. Order as
-   above (Alpha first; Beta after the per-deployment env file and the pyxis
-   seam). Still open: where author sessions and wake jobs run on Beta, since
+   above (cluster B first; cluster C after the per-deployment env file and
+   the pyxis seam). Still open: where author sessions and wake jobs run on
+   cluster C, since
    the four-GPU floor applies to them too. Recommended: on the login host,
    as a hybrid compute where sessions and wakes run locally next to the loop
    and only evaluations and launches go to Slurm; the alternatives are a
@@ -459,6 +461,5 @@ directory later. Still the owner's:
 
 ## Sources
 
-- Empire AI Alpha: University at Buffalo CCR guide, https://docs.ccr.buffalo.edu/en/latest/howto/empireai/ ; Mount Sinai Minerva guide, https://labs.icahn.mssm.edu/minervalab/documentation-new-york-states-empire-ai/ ; Cornell call for proposals, https://ai.cornell.edu/empire-ai-cornell-call-for-compute-resource-proposals
 - NERSC: scrontab, https://docs.nersc.gov/jobs/workflow/scrontab/ ; containers, https://docs.nersc.gov/development/containers/ ; running jobs, https://docs.nersc.gov/systems/perlmutter/running-jobs/ ; resource usage policies, https://docs.nersc.gov/policies/resource-usage/
 - ALCF Polaris (indexed titles only; the pages refuse automated reads): containers, https://docs.alcf.anl.gov/polaris/containers/containers/ ; running jobs, https://docs.alcf.anl.gov/polaris/running-jobs/ ; PBS qsub options, https://docs.alcf.anl.gov/running-jobs/not_in_nav/pbs-qsub-options-table/

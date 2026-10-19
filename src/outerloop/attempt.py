@@ -139,6 +139,7 @@ from outerloop.syscall import (
     channel_dir,
     launch_task_ids,
     shipped_channel,
+    tool_digest,
     tool_update_note,
 )
 from outerloop.syscall import ensure_excluded as syscall_excluded
@@ -583,6 +584,7 @@ STAGE_RETAINED_KEYS = (
     "hypothesis",
     "message_counter",
     "message_delivery",
+    "tool_digest",
 )
 
 
@@ -594,6 +596,11 @@ def _message_stage(run_root: Path, record: RunRecord) -> dict[str, object]:
         stage.pop(key, None)
         if key in current.stage:
             stage[key] = current.stage[key]
+    # The tool digest is kernel bookkeeping written mid-leg by
+    # `_ensure_author_tool`; a record captured before the leg cannot know it,
+    # and losing it would re-announce the same tool at the next wake.
+    if "tool_digest" in current.stage:
+        stage["tool_digest"] = current.stage["tool_digest"]
     return stage
 
 
@@ -956,7 +963,7 @@ def _dispatch_settings(args: argparse.Namespace) -> DispatchSettings:
 # among the kernel's own pending jobs the priority order is ours: launches
 # carry this nice so a gate eval or a follow-up re-measure (nice 0) starts
 # first when the cap frees a slot. Sized above the factors that differ between
-# our jobs on Torch — age tops out at 1000 after a week, job size at 1000, the
+# our jobs on the cluster — age tops out at 1000 after a week, job size at 1000, the
 # per-GPU TRES share stays in the hundreds — so the order holds however long a
 # launch has waited. Other users' jobs and the group cap are untouched.
 LAUNCH_NICE = 5000
@@ -1337,6 +1344,55 @@ def save_meter(run_root: Path, run_id: str, launches: int, sleeps: int, hours: f
     )
 
 
+def _ensure_author_tool(
+    run_root: Path,
+    directory: Path,
+    workspace: Path,
+    record: RunRecord,
+    *,
+    messages: bool,
+    siblings: bool,
+    verification: str,
+) -> RunRecord:
+    """Install or refresh the author's tool and queue its update note once per
+    tool version. A wake owes the note when the stage's recorded digest differs
+    from this kernel's; a missing field means an older kernel installed the
+    tool, so it is owed too. The note is appended BEFORE the new digest is
+    saved: an interruption between the two leaves the key in the inbox, where
+    `append`'s dedup suppresses the retry's duplicate."""
+    syscall_excluded(workspace)
+    if not (workspace / channel_dir(workspace)).exists():
+        syscall_install_tool(workspace)
+    else:
+        syscall_refresh_tool(workspace)
+    digest = tool_digest()
+    if record.stage.get("tool_digest") == digest:
+        return record
+    append(
+        directory,
+        Message(
+            0,
+            "note",
+            "kernel",
+            thread_for(record),
+            time.time(),
+            f"tool:{digest}",
+            {
+                "text": tool_update_note(
+                    channel_dir(workspace),
+                    messages=messages,
+                    siblings=siblings,
+                    verification=verification,
+                )
+            },
+            origin=record.run_id,
+        ),
+    )
+    record = dc_replace(record, stage={**record.stage, "tool_digest": digest})
+    save_record(run_root, record, time.time())
+    return record
+
+
 def run_author_leg(
     config: RunConfig,
     contract_text: str,
@@ -1387,33 +1443,15 @@ def run_author_leg(
     owned = not shipped
     if shipped:
         log.warning("target ships a %s path; author syscalls disabled for this leg", shipped)
-    installed = changed = False
     if owned:
-        syscall_excluded(workspace)
-        installed = not (workspace / channel_dir(workspace)).exists()
-        if installed:
-            syscall_install_tool(workspace)
-        changed = syscall_refresh_tool(workspace)
-    if installed or changed:
-        append(
+        record = _ensure_author_tool(
+            run_root,
             directory,
-            Message(
-                0,
-                "note",
-                "kernel",
-                thread_for(record),
-                time.time(),
-                f"tool:{record.resume_session_id}:{record.inbox_seq}",
-                {
-                    "text": tool_update_note(
-                        channel_dir(workspace),
-                        messages=contract.channels.messages,
-                        siblings=contract.channels.siblings,
-                        verification=bench.verification,
-                    )
-                },
-                origin=record.run_id,
-            ),
+            workspace,
+            record,
+            messages=contract.channels.messages,
+            siblings=contract.channels.siblings,
+            verification=bench.verification,
         )
     launches = int(str(record.stage.get("launches_used", 0)))
     sleeps = int(str(record.stage.get("sleeps_used", 0)))
@@ -4899,6 +4937,12 @@ def live_attempt(
             # launch ... -- <cmd>`; `... sleep`), never the raw ABI file —
             # install it plus the informational budget its `status` shows.
             syscall_install_tool(workspace)
+            # Record the version this run installed. A wake compares its own
+            # tool digest against it, so a wake under the same kernel sends no
+            # update note (a missing field belongs to an older kernel, so it
+            # does). The fresh climb itself has no note to send.
+            record = dc_replace(record, stage={**record.stage, "tool_digest": tool_digest()})
+            save_record(run_root, record, now)
             # AFTER install_tool: installing the tool recreates the channel
             # dir it owns, which would delete an archive written earlier
             _install_report_archive(workspace, reports)
@@ -5265,7 +5309,7 @@ MIN_ARM_S = 180
 def arm_self_deadline(job_minutes: int, margin_s: float = 120.0) -> int:
     """Arm our own end-of-walltime alarm; returns the armed seconds (0 = off).
 
-    Slurm delivers NO signal to our process on Torch before SIGKILL
+    Slurm delivers NO signal to our process on this cluster before SIGKILL
     (scancel and walltime timeout both signal the
     batch shell only) — so the only way to end a run richly before the
     wall is our own clock. SIGALRM fires `margin_s` before the job's

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -126,7 +127,7 @@ def test_upgrade_legacy_failure_retry_and_idempotence(tmp_path, monkeypatch, fai
     calls = []
     broken = True
 
-    def run(script, target, install_env):
+    def run(script, target, install_env, *_):
         argv = ["bash", str(script), str(target)]
         calls.append(argv)
         if broken and failure == "install":
@@ -432,9 +433,9 @@ def test_timeout_cleanup_and_backoff(tmp_path, monkeypatch):
     run = harness_cli.run_installer
     calls = []
 
-    def hung(unused, target, install_env):
+    def hung(unused, target, install_env, idle_timeout, max_seconds):
         calls.append(target)
-        run(script, target, install_env)
+        run(script, target, install_env, idle_timeout, max_seconds)
 
     monkeypatch.setattr(harness_cli, "probe", lambda *a: ("0.0.1", True))
     monkeypatch.setattr(harness_cli, "run_installer", hung)
@@ -445,10 +446,131 @@ def test_timeout_cleanup_and_backoff(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="backoff"):
         harness_cli.upgrade_one("claude", env, env_file, tmp_path)
     assert len(calls) == 1
-    import time
 
     time.sleep(1)
     assert not child.exists()
+
+
+def test_candidate_setup_stays_under_the_fixed_bound(tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    binary(old, "0.0.1")
+    env = {"OUTERLOOP_CLAUDE_BIN": str(old), "OUTERLOOP_HARNESS_TIMEOUT_SECONDS": "0.2"}
+    monkeypatch.setattr(harness_cli, "probe", lambda *a: ("0.0.1", True))
+    monkeypatch.setattr(harness_cli.tempfile, "mkdtemp", lambda **kw: time.sleep(2))
+    with pytest.raises(TimeoutError, match="upgrade timed out"):
+        harness_cli.upgrade_one("claude", env, tmp_path / ".env", tmp_path)
+
+
+def test_output_progress_survives_idle_limit(tmp_path):
+    target = tmp_path / "candidate" / "claude"
+    script = tmp_path / "chatty.sh"
+    script.write_text(
+        'mkdir -p "$(dirname "$1")"\nfor _ in $(seq 1 20); do printf x; sleep 0.05; done\n'
+    )
+    # The script outlives the idle limit, but never pauses for it.
+    harness_cli.run_installer(script, target, dict(os.environ), 0.5, 60)
+
+
+def test_closed_output_does_not_spin_and_is_killed(tmp_path, monkeypatch):
+    target = tmp_path / "candidate" / "claude"
+    script = tmp_path / "closed.sh"
+    script.write_text("exec 1>&- 2>&-\nsleep 5\n")
+    real_read = os.read
+    reads = []
+
+    def counting(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(harness_cli.os, "read", counting)
+    with pytest.raises(TimeoutError, match="timed out"):
+        harness_cli.run_installer(script, target, dict(os.environ), 0.2, 60)
+    # EOF is read once; re-selecting the closed descriptor would spin on it.
+    assert len(reads) < 10
+
+
+def test_install_backstop_stops_an_install_that_keeps_progressing(tmp_path):
+    target = tmp_path / "candidate" / "claude"
+    script = tmp_path / "endless.sh"
+    script.write_text(
+        'mkdir -p "$(dirname "$1")"\nfor _ in $(seq 1 100); do printf x; sleep 0.05; done\n'
+    )
+    with pytest.raises(TimeoutError, match="backstop"):
+        harness_cli.run_installer(script, target, dict(os.environ), 1.0, 0.4)
+
+
+def test_backstop_interrupts_a_blocked_loop_and_cleans_up(tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    binary(old, "0.0.1")
+    env_file = tmp_path / ".env"
+    original = f"OUTERLOOP_CLAUDE_BIN={old}\n"
+    env_file.write_text(original)
+    # The installer keeps printing, but the loop blocks before its in-loop
+    # checks; only the SIGALRM backstop can end the install from there.
+    env = {"OUTERLOOP_CLAUDE_BIN": str(old), "OUTERLOOP_HARNESS_TIMEOUT_SECONDS": "0.3"}
+    script = tmp_path / "endless.sh"
+    pid_file = tmp_path / "pid"
+    script.write_text(
+        f'echo $$ > "{pid_file}"\n'
+        'mkdir -p "$(dirname "$1")"\n'
+        "for _ in $(seq 1 200); do printf x; sleep 0.05; done\n"
+    )
+
+    def blocked(*unused):
+        # Only the SIGALRM backstop can end the install from in here.
+        time.sleep(5)
+
+    real_installer = harness_cli.run_installer
+
+    def use_script(unused, target, install_env, idle_timeout, max_seconds):
+        real_installer(script, target, install_env, idle_timeout, max_seconds)
+
+    monkeypatch.setattr(harness_cli.select, "select", blocked)
+    monkeypatch.setattr(harness_cli, "run_installer", use_script)
+    monkeypatch.setattr(harness_cli, "MAX_INSTALL_SECONDS", 0.8)
+    monkeypatch.setattr(harness_cli, "probe", lambda *a: ("0.0.1", True))
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="backstop"):
+        harness_cli.upgrade_one("claude", env, env_file, tmp_path)
+    assert time.monotonic() - started < 3
+
+    # Same cleanup as a stall: previous install kept, candidate deleted,
+    # backoff recorded, and the installer's process group killed.
+    assert env_file.read_text() == original
+    assert not list((tmp_path / "harnesses").rglob("install-*"))
+    assert list((tmp_path / "cache" / "harness-failures").glob("claude-*.json"))
+    with pytest.raises(ValueError, match="backoff"):
+        harness_cli.upgrade_one("claude", env, env_file, tmp_path)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+def test_initial_verification_is_bounded(tmp_path, monkeypatch):
+    installed = []
+
+    def stuck(*unused):
+        time.sleep(1)
+
+    monkeypatch.setattr(harness_cli, "probe", stuck)
+    monkeypatch.setattr(harness_cli, "run_installer", lambda *a, **k: installed.append(a))
+    env = {"OUTERLOOP_HARNESS_TIMEOUT_SECONDS": "0.1"}
+    with pytest.raises(TimeoutError, match="upgrade timed out"):
+        harness_cli.upgrade_one("claude", env, tmp_path / ".env", tmp_path)
+    assert not installed
+
+
+def test_busy_upgrade_lock_names_the_other_upgrade(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(paths, "ENV_FILE", tmp_path / ".env")
+
+    def busy(*args):
+        raise BlockingIOError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(harness_cli.fcntl, "flock", busy)
+    assert harness_cli.main(["upgrade", "claude"]) == 1
+    err = capsys.readouterr().err
+    assert "another harness upgrade is running; retry when it finishes" in err
+    assert "Errno 11" not in err
 
 
 @pytest.mark.parametrize("name", ["claude", "codex"])
@@ -558,7 +680,7 @@ def test_manual_upgrade_root_precedence(tmp_path, monkeypatch, source, failure):
         monkeypatch.setenv("OUTERLOOP_ROOT", str(tmp_path / "env"))
     monkeypatch.setattr(harness_cli, "verified", lambda *a: True)
 
-    def fail(script, target, env):
+    def fail(script, target, env, *_):
         assert target.is_relative_to(tmp_path / source / "harnesses")
         if failure:
             raise OSError("test failure")
@@ -589,7 +711,9 @@ def test_invalid_retry_state_does_not_block_upgrade(tmp_path, monkeypatch, capsy
     env: dict[str, str] = {}
     monkeypatch.setattr(harness_cli, "verified", lambda *a: True)
     monkeypatch.setattr(
-        harness_cli, "run_installer", lambda script, target, env: binary(target, desired["version"])
+        harness_cli,
+        "run_installer",
+        lambda script, target, env, *_: binary(target, desired["version"]),
     )
     harness_cli.upgrade_one("claude", env, tmp_path / ".env", tmp_path)
     assert capsys.readouterr().err.count("ignoring unreadable/invalid retry state") == 1

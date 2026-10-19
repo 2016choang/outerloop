@@ -214,20 +214,20 @@ agents:
     max_runs_per_week: 6
 ```
 
-**Seats on Torch (the practical auth question — deferred until multi-agent
+**Seats on the cluster (the practical auth question — deferred until multi-agent
 testing is ready; round-1 decision 3).** Claude Code supports
 headless auth two ways: an API key (today's path, works), or a long-lived
 OAuth token minted by `claude setup-token` from a subscription seat —
 designed for CI, no browser on the cluster needed. Proposed flow: a maintainer runs
 `setup-token` locally once per seat, the token lands in
-`~/.config/outerloop/agents/<agent-id>/credential` (0600) on Torch, and
+`~/.config/outerloop/agents/<agent-id>/credential` (0600) on the cluster, and
 the harness's existing env-injection seam passes it as
 `CLAUDE_CODE_OAUTH_TOKEN` instead of `ANTHROPIC_API_KEY` — a per-agent
 config switch, no code restructuring. Seat limits then meter per-agent by
 construction, and the budget module tracks session-hours per agent id so a
 throttled seat backs off instead of erroring.
 
-Two honest caveats. *Isolation*: all agents run as one Unix UID on Torch, so
+Two honest caveats. *Isolation*: all agents run as one Unix UID on the cluster, so
 0600 separates agents from other users, not from each other — a session can
 read a sibling agent's credential file by absolute path. Per-agent isolation
 is therefore advisory until OS-level sandboxing lands (same residual risk,
