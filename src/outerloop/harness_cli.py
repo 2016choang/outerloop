@@ -179,73 +179,93 @@ def run_installer(
 
     Output is echoed as it arrives. Builds such as a venv can be silent while
     they unpack, so a change in size under the candidate also counts as
-    progress. The candidate is only walked every ``walk_interval`` seconds;
-    each iteration still checks both deadlines, because waiting for output is
-    bounded and at most one chunk is drained per iteration.
+    progress. The candidate is walked at most every
+    ``min(walk_interval, idle_timeout / 2)`` seconds, so a short stall limit
+    still sees growth before it expires.
+
+    A SIGALRM timer enforces ``max_seconds`` for the whole step, just as the
+    old fixed deadline did. The in-loop checks handle the idle limit, but a
+    blocked write, walk or drain could otherwise hang past the backstop
+    without ever reaching them.
+
+    The timer raises the same ``TimeoutError`` a stall raises, so the caller's
+    cleanup (kill the process group, back off, delete the candidate) runs.
     """
-    started = time.monotonic()
-    last_progress = started
-    last_walk = started
-    size = install_bytes(target.parent)
-    with subprocess.Popen(
-        ["bash", str(script), str(target)],
-        env=env,
-        start_new_session=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    ) as process:
-        assert process.stdout is not None
-        descriptor = process.stdout.fileno()
-        os.set_blocking(descriptor, False)
-        output = sys.stdout.buffer
+    walk_every = min(walk_interval, idle_timeout / 2)
 
-        def drain() -> bool:
-            """Echo one chunk; the caller bounds reads so deadlines still run."""
+    def backstop(signum: int, frame: object) -> None:
+        raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+
+    previous_handler = signal.signal(signal.SIGALRM, backstop)
+    signal.setitimer(signal.ITIMER_REAL, max_seconds)
+    try:
+        started = time.monotonic()
+        last_progress = started
+        last_walk = started
+        size = install_bytes(target.parent)
+        with subprocess.Popen(
+            ["bash", str(script), str(target)],
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        ) as process:
+            assert process.stdout is not None
+            descriptor = process.stdout.fileno()
+            os.set_blocking(descriptor, False)
+            output = sys.stdout.buffer
+
+            def drain() -> bool:
+                """Echo one chunk; the caller bounds reads so deadlines still run."""
+                try:
+                    chunk = os.read(descriptor, MAX_DRAIN_BYTES)
+                except BlockingIOError:
+                    return False
+                if not chunk:
+                    return False
+                output.write(chunk)
+                output.flush()
+                return True
+
             try:
-                chunk = os.read(descriptor, MAX_DRAIN_BYTES)
-            except BlockingIOError:
-                return False
-            if not chunk:
-                return False
-            output.write(chunk)
-            output.flush()
-            return True
-
-        try:
-            while process.poll() is None:
-                now = time.monotonic()
-                wait = min(
-                    OUTPUT_WAIT_SECONDS,
-                    walk_interval - (now - last_walk),
-                    idle_timeout - (now - last_progress),
-                    max_seconds - (now - started),
-                )
-                readable, _, _ = select.select([descriptor], [], [], max(0.0, wait))
-                now = time.monotonic()
-                progressed = bool(readable) and drain()
-                if now - last_walk >= walk_interval:
-                    current = install_bytes(target.parent)
-                    if current != size:
-                        size = current
-                        progressed = True
-                    last_walk = now
-                if progressed:
-                    last_progress = now
-                if now - last_progress >= idle_timeout:
-                    raise TimeoutError(
-                        f"install timed out after {idle_timeout:g} seconds without progress"
+                while process.poll() is None:
+                    now = time.monotonic()
+                    wait = min(
+                        OUTPUT_WAIT_SECONDS,
+                        walk_every - (now - last_walk),
+                        idle_timeout - (now - last_progress),
+                        max_seconds - (now - started),
                     )
-                if now - started >= max_seconds:
-                    raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
-            while drain():
-                pass
-            code = process.wait()
-            if code:
-                raise subprocess.CalledProcessError(code, process.args)
-        finally:
-            # Also reap descendants when the shell exits before its children.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+                    readable, _, _ = select.select([descriptor], [], [], max(0.0, wait))
+                    now = time.monotonic()
+                    progressed = bool(readable) and drain()
+                    if now - last_walk >= walk_every:
+                        current = install_bytes(target.parent)
+                        if current != size:
+                            size = current
+                            progressed = True
+                        last_walk = now
+                    if progressed:
+                        last_progress = now
+                    if now - last_progress >= idle_timeout:
+                        raise TimeoutError(
+                            f"install timed out after {idle_timeout:g} seconds without progress"
+                        )
+                    if now - started >= max_seconds:
+                        raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+                while drain():
+                    pass
+                code = process.wait()
+                if code:
+                    raise subprocess.CalledProcessError(code, process.args)
+            finally:
+                # Also reap descendants when the shell exits before its children.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+    finally:
+        # Verification re-arms its own fixed bound once the install is done.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def status(env: Mapping[str, str]) -> int:
