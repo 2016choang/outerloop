@@ -72,7 +72,7 @@ trap 'rm -rf "$tmp" "$staged"' EXIT
 # bounded so a stalled download can't eat the tick's own walltime: this runs
 # INSIDE the ~15-min tick job, so cap the fetch well under it (single attempt —
 # a transient failure is retried by the next tick, since the install is idempotent)
-curl -fsSL --connect-timeout 15 --max-time 120 --retry 0 "$url" -o "$tmp/claude"
+curl -fL --progress-bar --connect-timeout 15 --max-time 120 --retry 0 "$url" -o "$tmp/claude"
 # INTEGRITY GATE: verify the binary against the pin BEFORE installing or
 # executing anything from it.
 got_sha=$(sha256sum "$tmp/claude" | cut -d' ' -f1)
