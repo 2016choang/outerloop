@@ -228,12 +228,26 @@ author launches alike. A GPU benchmark needs its evals to dispatch (see
 without one the tick
 refuses to launch attempts on it. Local compute needs no lane, and a
 target entry in `OUTERLOOP_GPU_LANES` stands in for the fleet default.
-Multi-node evals are not supported, so
-the value is bounded at one node's worth.
+The value is per node; see `nodes`.
 
 - Type: integer
 - Constraint: between 0 and 8
 - Default: 0 (CPU)
+
+### `nodes`
+
+The nodes every dispatched job of this benchmark spreads over, with `gpus`
+on each. The command runs once per node with `NNODES`, `NODE_RANK`,
+`MASTER_ADDR`, `MASTER_PORT` and torchrun's `PET_*` defaults set, so a plain
+`torchrun train.py` joins one rendezvous. Node 0's output is the result, and
+budgets, sweep pacing and the operator's GPU ceiling count every node. Needs
+dispatched evals and an uncontained Slurm deployment; elsewhere the tick
+refuses to launch attempts on the contract. A contract that sets it fails to
+load on older kernels.
+
+- Type: integer
+- Constraint: between 1 and 64
+- Default: 1
 
 ### `baseline`
 
