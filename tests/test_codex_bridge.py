@@ -701,7 +701,7 @@ def test_bridge_upgrade_preserves_legacy_env_and_retries(tmp_path, monkeypatch):
     interrupted = True
     calls = []
 
-    def install(script, target, install_env):
+    def install(script, target, install_env, *_):
         calls.append(target)
         if interrupted:
             raise OSError("interrupted install")

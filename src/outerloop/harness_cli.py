@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -150,11 +151,94 @@ def installer_environment(env: Mapping[str, str], root: Path) -> dict[str, str]:
     return result
 
 
-def run_installer(script: Path, target: Path, env: dict[str, str]) -> None:
+MAX_INSTALL_SECONDS = 60 * 60
+INSTALL_WALK_SECONDS = 60.0
+OUTPUT_WAIT_SECONDS = 2.0
+MAX_DRAIN_BYTES = 8 * 1024
+
+
+def install_bytes(root: Path) -> int:
+    """Total size of a candidate install; a silent venv unpack still grows."""
+    total = 0
+    for directory, _, files in os.walk(root):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(directory, name)).st_size
+    return total
+
+
+def run_installer(
+    script: Path,
+    target: Path,
+    env: dict[str, str],
+    idle_timeout: float,
+    max_seconds: float,
+    walk_interval: float = INSTALL_WALK_SECONDS,
+) -> None:
+    """Run an installer, killing it once output and candidate growth both stop.
+
+    Output is echoed as it arrives. Builds such as a venv can be silent while
+    they unpack, so a change in size under the candidate also counts as
+    progress. The candidate is only walked every ``walk_interval`` seconds;
+    each iteration still checks both deadlines, because waiting for output is
+    bounded and at most one chunk is drained per iteration.
+    """
+    started = time.monotonic()
+    last_progress = started
+    last_walk = started
+    size = install_bytes(target.parent)
     with subprocess.Popen(
-        ["bash", str(script), str(target)], env=env, start_new_session=True
+        ["bash", str(script), str(target)],
+        env=env,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     ) as process:
+        assert process.stdout is not None
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        output = sys.stdout.buffer
+
+        def drain() -> bool:
+            """Echo one chunk; the caller bounds reads so deadlines still run."""
+            try:
+                chunk = os.read(descriptor, MAX_DRAIN_BYTES)
+            except BlockingIOError:
+                return False
+            if not chunk:
+                return False
+            output.write(chunk)
+            output.flush()
+            return True
+
         try:
+            while process.poll() is None:
+                now = time.monotonic()
+                wait = min(
+                    OUTPUT_WAIT_SECONDS,
+                    walk_interval - (now - last_walk),
+                    idle_timeout - (now - last_progress),
+                    max_seconds - (now - started),
+                )
+                readable, _, _ = select.select([descriptor], [], [], max(0.0, wait))
+                now = time.monotonic()
+                progressed = bool(readable) and drain()
+                if now - last_walk >= walk_interval:
+                    current = install_bytes(target.parent)
+                    if current != size:
+                        size = current
+                        progressed = True
+                    last_walk = now
+                if progressed:
+                    last_progress = now
+                if now - last_progress >= idle_timeout:
+                    raise TimeoutError(
+                        f"install timed out after {idle_timeout:g} seconds without progress"
+                    )
+                if now - started >= max_seconds:
+                    raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+            while drain():
+                pass
             code = process.wait()
             if code:
                 raise subprocess.CalledProcessError(code, process.args)
@@ -316,13 +400,16 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         raise TimeoutError(f"upgrade timed out after {timeout:g} seconds")
 
     handler = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
+        # The probe/verification of the existing install keeps the old fixed bound.
+        signal.setitimer(signal.ITIMER_REAL, timeout)
         previous = installed_path(name, env)
         have, ready = probe(name, previous)
         if ready and have == identity(name, desired) and verified(name, previous, desired):
             print(f"{name}: unchanged {have} at {previous}")
             return
+        # The install itself is bounded by the stall timeout instead.
+        signal.setitimer(signal.ITIMER_REAL, 0)
         parent = root / "harnesses" / name / identity(name, desired)
         parent.mkdir(parents=True, exist_ok=True)
         candidate = Path(tempfile.mkdtemp(prefix="install-", dir=parent))
@@ -330,7 +417,15 @@ def upgrade_one(name: str, env: dict[str, str], env_file: Path, root: Path) -> N
         script = Path(__file__).resolve().parents[2] / "scripts" / f"install_{name}.sh"
         if not script.is_file():
             script = Path(__file__).with_name("_installers") / script.name
-        run_installer(script, target, installer_environment(env, root))
+        run_installer(
+            script,
+            target,
+            installer_environment(env, root),
+            timeout,
+            MAX_INSTALL_SECONDS,
+        )
+        # Verification keeps the same fixed bound as before the stall timeout.
+        signal.setitimer(signal.ITIMER_REAL, timeout)
         got, complete = probe(name, target)
         if not complete or got != identity(name, desired) or not verified(name, target, desired):
             raise ValueError(
@@ -382,7 +477,12 @@ def main(argv: list[str] | None = None) -> int:
             return status(env)
         env_file.parent.mkdir(parents=True, exist_ok=True)
         with (env_file.parent / ".harness-upgrade.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValueError(
+                    "another harness upgrade is running; retry when it finishes"
+                ) from exc
             env = {**env_file_values(env_file, keys=CONFIG_KEYS), **os.environ}
             names = args.names or (used_harnesses(env) if args.used else list(NAMES))
             root = (

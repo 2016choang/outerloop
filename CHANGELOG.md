@@ -17,6 +17,14 @@ Versions follow [SemVer](https://semver.org).
 
 ### Changed
 
+- Harness upgrades kill an install only after `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`
+  without progress (installer output or candidate-directory growth), with a
+  one-hour overall backstop, so a slow venv build completes instead of dying
+  every tick; a busy upgrade lock now says another upgrade is running rather
+  than `[Errno 11]`. Upgrading: the variable keeps its name and default but now
+  means idle time, so an install that keeps progressing may run for up to an
+  hour.
+
 - The author verb `end` is renamed `stop` (`stop --report FILE`,
   `stop --withdraw REASON`), with no alias: agents read `end` as "end this
   turn" and called it when they meant to wait for results, so the refusals

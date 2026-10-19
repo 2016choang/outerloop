@@ -85,7 +85,7 @@ over the inherited environment even when it is empty.
 | [`OUTERLOOP_MAX_JOB_MINUTES`](#outerloop_max_job_minutes) | walltime cap for climb jobs | 360 |
 | [`OUTERLOOP_JOB_PARTITION`](#outerloop_job_partition) | partition the walltime cap is sized for | unset |
 | [`OUTERLOOP_DISPATCH_WAKE`](#outerloop_dispatch_wake) | `0` disarms dispatched wakes | armed |
-| [`OUTERLOOP_HARNESS_TIMEOUT_SECONDS`](#outerloop_harness_timeout_seconds) | deadline for one harness upgrade | 300 |
+| [`OUTERLOOP_HARNESS_TIMEOUT_SECONDS`](#outerloop_harness_timeout_seconds) | harness install stall timeout | 300 |
 | [`OUTERLOOP_NATIVE_LOG_MAX_BYTES`](#outerloop_native_log_max_bytes) | cap on a session's native log kept | 32 MiB |
 
 ## Placement and state
@@ -596,10 +596,12 @@ disarm comes from touching `<root>/DISARM_WAKE`.
 
 ### `OUTERLOOP_HARNESS_TIMEOUT_SECONDS`
 
-The deadline for one harness upgrade, installation and verification
-together. A longer install, such as the Hermes runtime, is cut off at this
-deadline. Probes in `outerloop harness status` use their own short fixed
-timeouts.
+How long a harness installation may make no progress before it is killed.
+Progress is new installer output or growth of the candidate installation
+directory, so a slow but working venv build is not cut off; a stalled
+download is. The same value still bounds verification. An install that keeps
+progressing is stopped by a one-hour overall backstop. Probes in
+`outerloop harness status` use their own short fixed timeouts.
 
 - Default: 300
 - Constraint: positive and finite

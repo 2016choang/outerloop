@@ -172,7 +172,7 @@ def test_status_and_upgrade_repair_legacy(tmp_path, monkeypatch, capsys, drift):
     )
     calls = []
 
-    def install(script, target, install_env):
+    def install(script, target, install_env, *_):
         calls.append(target)
         target.write_bytes(binary.read_bytes())
         target.chmod(0o755)
