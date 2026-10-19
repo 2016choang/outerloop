@@ -162,7 +162,8 @@ def install_bytes(root: Path) -> int:
     total = 0
     for directory, _, files in os.walk(root):
         for name in files:
-            with contextlib.suppress(OSError):
+            # Not OSError: the backstop's TimeoutError is an OSError and must propagate.
+            with contextlib.suppress(FileNotFoundError, PermissionError):
                 total += os.lstat(os.path.join(directory, name)).st_size
     return total
 
@@ -215,13 +216,18 @@ def run_installer(
             os.set_blocking(descriptor, False)
             output = sys.stdout.buffer
 
+            open_output = True
+
             def drain() -> bool:
                 """Echo one chunk; the caller bounds reads so deadlines still run."""
+                nonlocal open_output
                 try:
                     chunk = os.read(descriptor, MAX_DRAIN_BYTES)
                 except BlockingIOError:
                     return False
                 if not chunk:
+                    # EOF stays readable forever: stop selecting it, or the loop spins.
+                    open_output = False
                     return False
                 output.write(chunk)
                 output.flush()
@@ -230,21 +236,29 @@ def run_installer(
             try:
                 while process.poll() is None:
                     now = time.monotonic()
-                    wait = min(
-                        OUTPUT_WAIT_SECONDS,
-                        walk_every - (now - last_walk),
-                        idle_timeout - (now - last_progress),
-                        max_seconds - (now - started),
+                    wait = max(
+                        0.0,
+                        min(
+                            OUTPUT_WAIT_SECONDS,
+                            walk_every - (now - last_walk),
+                            idle_timeout - (now - last_progress),
+                            max_seconds - (now - started),
+                        ),
                     )
-                    readable, _, _ = select.select([descriptor], [], [], max(0.0, wait))
-                    now = time.monotonic()
+                    if open_output:
+                        readable, _, _ = select.select([descriptor], [], [], wait)
+                    else:
+                        readable = []
+                        time.sleep(wait)
                     progressed = bool(readable) and drain()
-                    if now - last_walk >= walk_every:
+                    if time.monotonic() - last_walk >= walk_every:
                         current = install_bytes(target.parent)
+                        # Stamp after the walk: a slow walk must not age the progress it found.
+                        last_walk = time.monotonic()
                         if current != size:
                             size = current
                             progressed = True
-                        last_walk = now
+                    now = time.monotonic()
                     if progressed:
                         last_progress = now
                     if now - last_progress >= idle_timeout:
@@ -253,6 +267,10 @@ def run_installer(
                         )
                     if now - started >= max_seconds:
                         raise TimeoutError(f"install exceeded the {max_seconds:g}-second backstop")
+                # The shell exited: stop any descendant still writing before the final
+                # drain, so a noisy leftover cannot hold a successful install open.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
                 while drain():
                     pass
                 code = process.wait()

@@ -736,3 +736,15 @@ def test_upgrade_used_continues_after_role_resolution_error(tmp_path, monkeypatc
     assert len(lines) == 1
     assert "skipping bridge detection" in lines[0]
     assert ("names no model" if role == "lens_model" else "unknown endpoint profile") in lines[0]
+
+
+def test_install_size_walk_lets_the_backstop_through(tmp_path, monkeypatch) -> None:
+    # TimeoutError is an OSError: the walk must not swallow the backstop alarm.
+    (tmp_path / "file").write_text("x")
+
+    def alarm(_path):
+        raise TimeoutError("install exceeded the backstop")
+
+    monkeypatch.setattr(harness_cli.os, "lstat", alarm)
+    with pytest.raises(TimeoutError):
+        harness_cli.install_bytes(tmp_path)
