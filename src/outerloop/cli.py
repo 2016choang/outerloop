@@ -96,7 +96,10 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_QOS",
     "OUTERLOOP_APPTAINER_BIN",
     "OUTERLOOP_IMAGE",
+    "OUTERLOOP_UNCONTAINED",
+    "OUTERLOOP_OPERATOR_HARNESSES",
     "OUTERLOOP_PANEL",
+    "OUTERLOOP_PANEL_UNCONTAINED",
     "OUTERLOOP_PANEL_KEY_FILE",
     "OUTERLOOP_PANEL_CODEX_KEY_FILE",
     "OUTERLOOP_PANEL_HERMES_KEY_FILE",
@@ -423,19 +426,28 @@ def _setting_of(key: str, values: Mapping[str, str], environ: Mapping[str, str])
     return (environ[key] if key in environ else values.get(key, "")).strip()
 
 
+def _tick_settings(
+    values: Mapping[str, str], environ: Mapping[str, str], mode: str
+) -> dict[str, str]:
+    """The settings the launched tick runs with, merged the way its launch mode passes
+    them on: the resident chain's deploy step lets a settings-file line win (even
+    empty); a local or login loop keeps the shell's value and fills only what is
+    missing from the file."""
+    return {**environ, **values} if mode == "slurm" else {**values, **environ}
+
+
 def _tick_image(values: Mapping[str, str], environ: Mapping[str, str], mode: str) -> str:
-    """The image the launched tick runs with, resolved the way its launch mode passes
-    settings on: the resident chain's deploy step lets a settings-file line win (even
-    empty, meaning no image); a local or login loop keeps the shell's value and fills
-    only what is missing from the file. Absent everywhere: the default image."""
+    """The image the launched tick runs with (`_tick_settings`; an empty value means
+    no image). Absent everywhere: the default image. OUTERLOOP_UNCONTAINED=1,
+    resolved the same way, means no image at all."""
+    from outerloop.image import uncontained_opt_in
     from outerloop.tick import _default_image
 
-    key = "OUTERLOOP_IMAGE"
-    first, second = (values, environ) if mode == "slurm" else (environ, values)
-    for source in (first, second):
-        if key in source:
-            return source[key].strip()
-    return _default_image()
+    settings = _tick_settings(values, environ, mode)
+    if uncontained_opt_in(settings):
+        return ""
+    image = settings.get("OUTERLOOP_IMAGE")
+    return _default_image() if image is None else image.strip()
 
 
 def missing_harness_binary(values: Mapping[str, str], environ: Mapping[str, str]) -> str:
@@ -656,11 +668,24 @@ def start(args: argparse.Namespace) -> int:
             sbatch_on_path=shutil.which("sbatch") is not None,
             cwd=Path.cwd(),
         )
+        from outerloop.attempt import author_config_error
         from outerloop.author_overrides import validate_overrides
 
         try:
-            # validate with the image the tick this start launches will actually run with
-            validate_overrides({**values, **os.environ}, _tick_image(values, os.environ, plan.mode))
+            # validate what the tick this start launches will actually run: its settings
+            # and image, every override, then the fleet default author it falls back to
+            settings = _tick_settings(values, os.environ, plan.mode)
+            image = _tick_image(values, os.environ, plan.mode)
+            if plan.mode == "local" and image and not Path(image).is_file():
+                image = ""  # the local loop runs without an image it cannot find
+            validate_overrides(settings, image)
+            backend = settings.get("OUTERLOOP_AUTHOR_BACKEND", "").strip() or "claude"
+            model = author_model_setting(
+                backend, settings.get("OUTERLOOP_AUTHOR_MODEL", "").strip(), settings
+            )
+            error = author_config_error(backend, model, image, environ=settings)
+            if error:
+                raise StartError(f"author: {error}")
         except ValueError as exc:
             raise StartError(str(exc)) from exc
     except (StartError, ValueError, OSError) as e:
