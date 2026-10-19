@@ -234,6 +234,8 @@ def run_installer(
                     if bool(readable) and drain():
                         last_progress = time.monotonic()
                     now = time.monotonic()
+                    if process.poll() is not None:
+                        break  # exited during the wait: report its exit code, not a stall
                     if now - last_progress >= idle_timeout:
                         raise TimeoutError(
                             f"install timed out after {idle_timeout:g} seconds without output"
