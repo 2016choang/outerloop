@@ -6,6 +6,30 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Upgrading
+
+Operator actions before upgrading (everything else needs no action; details
+in each entry):
+
+- Rename `autoresearch:*` labels on target repos to `outerloop:*` and update
+  workflow `if:` conditions that match them; old labels and comment markers
+  are no longer recognized.
+- Rename the contract key `climb_job_minutes` to `attempt_job_minutes`, and
+  finish or rebind runs parked on a commit whose contract still uses it.
+- Finish or rebind parked runs whose benchmark was renamed or removed.
+- Run `outerloop harness upgrade codex` (deploys that run harness upgrades do
+  this automatically).
+- The one-idea rule is no longer enforced; a repository that wants it writes
+  it into its guidance files.
+
+What changes for runs in flight: a parked run may get one tool-update note at
+its first wake; a measurement between infrastructure retries may get one extra
+retry; codex costs captured before the upgrade still overstate resumed
+sessions.
+
+Before rolling back: remove `regression` blocks from contracts, drain parked
+runs, and keep this kernel while self-reported claims exist.
+
 ### Documentation
 
 - The docs site is now a manual: getting started, task guides, concept pages
