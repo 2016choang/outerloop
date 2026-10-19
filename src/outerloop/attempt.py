@@ -62,8 +62,10 @@ from outerloop.github import (
     Workspace,
     contract_at,
     ensure_regular_git_dir,
+    forget_filter_overrides,
     git_identity,
     guidance_at,
+    handoff_git_dir,
 )
 from outerloop.harness import (
     ClaudeModelUnset,
@@ -137,6 +139,7 @@ from outerloop.syscall import (
     channel_dir,
     launch_task_ids,
     shipped_channel,
+    tool_digest,
     tool_update_note,
 )
 from outerloop.syscall import ensure_excluded as syscall_excluded
@@ -581,6 +584,7 @@ STAGE_RETAINED_KEYS = (
     "hypothesis",
     "message_counter",
     "message_delivery",
+    "tool_digest",
 )
 
 
@@ -592,6 +596,11 @@ def _message_stage(run_root: Path, record: RunRecord) -> dict[str, object]:
         stage.pop(key, None)
         if key in current.stage:
             stage[key] = current.stage[key]
+    # The tool digest is kernel bookkeeping written mid-leg by
+    # `_ensure_author_tool`; a record captured before the leg cannot know it,
+    # and losing it would re-announce the same tool at the next wake.
+    if "tool_digest" in current.stage:
+        stage["tool_digest"] = current.stage["tool_digest"]
     return stage
 
 
@@ -954,7 +963,7 @@ def _dispatch_settings(args: argparse.Namespace) -> DispatchSettings:
 # among the kernel's own pending jobs the priority order is ours: launches
 # carry this nice so a gate eval or a follow-up re-measure (nice 0) starts
 # first when the cap frees a slot. Sized above the factors that differ between
-# our jobs on Torch — age tops out at 1000 after a week, job size at 1000, the
+# our jobs on the cluster — age tops out at 1000 after a week, job size at 1000, the
 # per-GPU TRES share stays in the hundreds — so the order holds however long a
 # launch has waited. Other users' jobs and the group cap are untouched.
 LAUNCH_NICE = 5000
@@ -1343,6 +1352,55 @@ def save_meter(run_root: Path, run_id: str, launches: int, sleeps: int, hours: f
     )
 
 
+def _ensure_author_tool(
+    run_root: Path,
+    directory: Path,
+    workspace: Path,
+    record: RunRecord,
+    *,
+    messages: bool,
+    siblings: bool,
+    verification: str,
+) -> RunRecord:
+    """Install or refresh the author's tool and queue its update note once per
+    tool version. A wake owes the note when the stage's recorded digest differs
+    from this kernel's; a missing field means an older kernel installed the
+    tool, so it is owed too. The note is appended BEFORE the new digest is
+    saved: an interruption between the two leaves the key in the inbox, where
+    `append`'s dedup suppresses the retry's duplicate."""
+    syscall_excluded(workspace)
+    if not (workspace / channel_dir(workspace)).exists():
+        syscall_install_tool(workspace)
+    else:
+        syscall_refresh_tool(workspace)
+    digest = tool_digest()
+    if record.stage.get("tool_digest") == digest:
+        return record
+    append(
+        directory,
+        Message(
+            0,
+            "note",
+            "kernel",
+            thread_for(record),
+            time.time(),
+            f"tool:{digest}",
+            {
+                "text": tool_update_note(
+                    channel_dir(workspace),
+                    messages=messages,
+                    siblings=siblings,
+                    verification=verification,
+                )
+            },
+            origin=record.run_id,
+        ),
+    )
+    record = dc_replace(record, stage={**record.stage, "tool_digest": digest})
+    save_record(run_root, record, time.time())
+    return record
+
+
 def run_author_leg(
     config: RunConfig,
     contract_text: str,
@@ -1393,33 +1451,15 @@ def run_author_leg(
     owned = not shipped
     if shipped:
         log.warning("target ships a %s path; author syscalls disabled for this leg", shipped)
-    installed = changed = False
     if owned:
-        syscall_excluded(workspace)
-        installed = not (workspace / channel_dir(workspace)).exists()
-        if installed:
-            syscall_install_tool(workspace)
-        changed = syscall_refresh_tool(workspace)
-    if installed or changed:
-        append(
+        record = _ensure_author_tool(
+            run_root,
             directory,
-            Message(
-                0,
-                "note",
-                "kernel",
-                thread_for(record),
-                time.time(),
-                f"tool:{record.resume_session_id}:{record.inbox_seq}",
-                {
-                    "text": tool_update_note(
-                        channel_dir(workspace),
-                        messages=contract.channels.messages,
-                        siblings=contract.channels.siblings,
-                        verification=bench.verification,
-                    )
-                },
-                origin=record.run_id,
-            ),
+            workspace,
+            record,
+            messages=contract.channels.messages,
+            siblings=contract.channels.siblings,
+            verification=bench.verification,
         )
     launches = int(str(record.stage.get("launches_used", 0)))
     sleeps = int(str(record.stage.get("sleeps_used", 0)))
@@ -2900,12 +2940,13 @@ def _resume_run(
     )
     # A session reshaped .git (symlinked object store, gitdir file, FIFO) is
     # refused BEFORE anything writes through it: the exclude below opens
-    # .git/info/exclude, and every ws.git call re-checks. The refusal ENDS
+    # .git/info/exclude, and this hand-off check covers every kernel git call
+    # until the author session resumes. The refusal ENDS
     # the parked run with the tampering as its note — the tree cannot be
     # trusted, and a record left waiting would only be re-woken into the
     # same refusal.
     try:
-        ensure_regular_git_dir(workspace)
+        handoff_git_dir(workspace)
     except GitError as exc:
         return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
     # Discover CURRENT policy outside the author's object store before fetching
@@ -3735,6 +3776,9 @@ def build_panel_runner(
     )
 
     def runner(baseline: float, candidate: float, report: str) -> PanelVerdict:
+        # a hand-off back into kernel git: the gate's dispatched jobs ran
+        # since the author session ended
+        handoff_git_dir(ws.root)
         # the claim is author text (the report at submit, or the session's
         # last words): redacted before any lens sees it, like the record and
         # the PR body
@@ -3792,6 +3836,9 @@ def build_panel_runner(
                 ),
                 author=bot_login,
             )
+            # judge sessions run in worktrees of this repo: the git calls
+            # after them re-check
+            forget_filter_overrides(ws.root)
             return run_panel(
                 lenses, panel_ws, claim, contract_text, today, reads["n"], guidance=guidance
             )
@@ -4737,6 +4784,9 @@ def live_attempt(
             config.agent_id,
             auth=bot_auth,
         )
+        # the kernel→session hand-off: one check before the author runs, and
+        # the pre-session git calls reuse its filter listing
+        handoff_git_dir(workspace)
         # Build ON the requested PR base: the clone checks out the remote
         # DEFAULT branch, which need not be `base_branch` — the session must
         # edit, and the gate must measure, the tree the PR will land on.
@@ -4899,6 +4949,12 @@ def live_attempt(
             # launch ... -- <cmd>`; `... sleep`), never the raw ABI file —
             # install it plus the informational budget its `status` shows.
             syscall_install_tool(workspace)
+            # Record the version this run installed. A wake compares its own
+            # tool digest against it, so a wake under the same kernel sends no
+            # update note (a missing field belongs to an older kernel, so it
+            # does). The fresh climb itself has no note to send.
+            record = dc_replace(record, stage={**record.stage, "tool_digest": tool_digest()})
+            save_record(run_root, record, now)
             # AFTER install_tool: installing the tool recreates the channel
             # dir it owns, which would delete an archive written earlier
             _install_report_archive(workspace, reports)
@@ -5270,7 +5326,7 @@ MIN_ARM_S = 180
 def arm_self_deadline(job_minutes: int, margin_s: float = 120.0) -> int:
     """Arm our own end-of-walltime alarm; returns the armed seconds (0 = off).
 
-    Slurm delivers NO signal to our process on Torch before SIGKILL
+    Slurm delivers NO signal to our process on this cluster before SIGKILL
     (scancel and walltime timeout both signal the
     batch shell only) — so the only way to end a run richly before the
     wall is our own clock. SIGALRM fires `margin_s` before the job's

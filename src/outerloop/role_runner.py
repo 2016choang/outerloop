@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from outerloop.endpoints import resolve_endpoint
+from outerloop.github import forget_filter_overrides
 from outerloop.harness import (
     ClaudeCodeHarness,
     CodexHarness,
@@ -278,6 +279,10 @@ def run_role(
 
         brief_text = brief_text.replace("python .outerloop/syscall", tool_command(workspace))
     oom_before = _oom_kills()
+    # the session owns the workspace until it ends: any filter listing the
+    # last hand-off check remembered for it must not survive into the calls
+    # after the session
+    forget_filter_overrides(workspace)
     session = harness.run(brief_text, workspace, resume_session_id)
     if session.is_error:
         after = _oom_kills()

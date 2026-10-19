@@ -27,9 +27,9 @@ Package skeleton, CI gates, governance docs, architecture (ops+safety reviewed).
 
 ## Phase 3 — Harness
 
-- [x] **Gating spike** (2026-08-05, Torch): Claude Code 2.1.223 native binary
+- [x] **Gating spike** (2026-08-05, on the cluster): Claude Code 2.1.223 native binary
       (no node needed) checksum-installed to `~/.local/bin`; headless `-p
-      --output-format json` on a cpu_short compute node returns cost, usage,
+      --output-format json` on a cpu-short compute node returns cost, usage,
       session id, and stop reason — everything `SessionResult` needs. Two
       concurrent sessions (shared `$HOME`, separate workspaces, `--allowedTools
       Write --permission-mode acceptEdits`) both correct, no state corruption.
@@ -52,7 +52,7 @@ Package skeleton, CI gates, governance docs, architecture (ops+safety reviewed).
 - [ ] `budget`: per-run and weekly caps; session/token proxy metering for the
       subscription backend
 
-Torch pilot findings (2026-08-06, live on compute nodes): the full production
+Cluster pilot findings (2026-08-06, live on compute nodes): the full production
 session path works — redirected per-run HOME with env-key auth, brief on
 stdin, tool use, per-session cost/id in JSON out. Resume restores context
 across sessions AND across nodes (shared-FS state); a 3-tick self-resubmitting
@@ -61,7 +61,7 @@ GPU partitions (utilization floor), and wake prompts must explicitly lift any
 standing instruction they supersede — a resumed agent honors stale constraints
 (observed: it refused a wake task that contradicted its brief).
 
-## Phase 4 — Torch tick + compute
+## Phase 4 — Cluster tick + compute
 
 - [x] Wake delivery per the architecture's fail-safe layers: afterany
       dependency job (`compute.submit_after`; mechanism verified live
@@ -138,7 +138,7 @@ the research repos' porting timelines; mistakes are free; adversarial testing
       caches (#44), auto-merge armed only when a human review is required
       (#45), publish-time freshness (moved base merged + re-measured, #46),
       killed-climb endings (SIGTERM containment + implementing sweep, #49),
-      per-repo budget shaping + self-deadline (#51). Measured on Torch
+      per-repo budget shaping + self-deadline (#51). Measured on the cluster
       2026-08-08: Slurm delivers NO signal to job processes before SIGKILL —
       the sweep and the self-deadline are the real teardown paths
 - [x] `in-review` follow-up (followup.respond_once + CLI): merge/close →
@@ -154,7 +154,7 @@ the research repos' porting timelines; mistakes are free; adversarial testing
       report — negatives included — lands on the target's `research-log`
       branch with a pointer on a rolling issue (#170)
 - [x] First GPU target live (2026-08-28): gpt-speedrun (docs/design/headline.md)
-      — baseline reproduced on one H200 at the public log's crossing step,
+      — baseline reproduced on one large GPU at the public log's crossing step,
       9-run calibration → `min_delta: 256`, running at width 4 in auto mode
 
 Candidate second target (2026-08-06): a private toy-scale research repo —
@@ -187,7 +187,8 @@ open-ended sweep space.
 
 Research findings sync through GitHub; job state never leaves its cluster.
 Design note: design/multi-cluster.md (2026-09-15) fills in the tiers against
-the code and against Empire AI, NERSC and ALCF, and plans the Empire AI try-out.
+the code and against a second site, NERSC and ALCF, and plans that second-site
+try-out.
 
 - [x] Findings memory: every attempt fetches the target's `research-log`
       branch — the brief inlines the newest reports, the full archive lands
@@ -196,7 +197,7 @@ the code and against Empire AI, NERSC and ALCF, and plans the Empire AI try-out.
       reads the same branch.
 - [ ] Tier 1 (works now): one deployment per cluster, each with its own
       state root and tick chain; different targets, coordination through
-      GitHub. First candidate: EmpireAI as a warm-keeper deployment.
+      GitHub. First candidate: a second site as a warm-keeper deployment.
 - [ ] Tier 2 (same target from several clusters): per-site agent-slot and
       PR-branch namespacing; per-site pacing overrides so N kernels do not
       multiply `max_active_attempts`/`runs_per_week`.
@@ -256,6 +257,9 @@ the code and against Empire AI, NERSC and ALCF, and plans the Empire AI try-out.
       PR-quality bar is met
 - [ ] egolearn as second research target; second harness backend if volume warrants
 - [ ] API model tiering informed by pilot data; cloud burst if queues block
+- [ ] Model gateway (design/model-gateway.md), with the first cloud
+      integration (0.4): conformance check first, then the gateway as an
+      optional service; the per-session bridge goes once it is the default
 
 ## Meta: benchmarking autoresearch itself (maintainer direction 2026-08-08)
 
@@ -301,6 +305,10 @@ Roles/flow reference for this whole section: design/roles.md.
       a machine user with a fine-grained PAT stays the fallback
 - [ ] Storage interface: notebook-repo backend → walled multi-tenant store
 - [ ] Experiment-backend interface: consumer-side runners, verifiable rewards
+- [ ] Clouds without Slurm (design/compute-cloud.md, Part 2): region-agnostic
+      run-artifact store, the resident decoupled from where experiments run;
+      a direction, not scheduled. Part 1, Slurm on a cloud, is the 0.4
+      deployment
 
 ## Manual prerequisites (maintainer)
 
@@ -308,7 +316,7 @@ Roles/flow reference for this whole section: design/roles.md.
       the machine user + fine-grained PAT is the fallback, not a prerequisite
 - [ ] Subscription seat or lab-managed account for the pilot harness
 - [ ] API billing with hard spend caps + the separate reviewer key + a third capped key for the verification agent (before any category-2 target)
-- [ ] Choose the sponsoring Torch account for bot-submitted jobs
+- [ ] Choose the sponsoring cluster account for bot-submitted jobs
 - [ ] Decide transcript retention period and project-space location
 
 

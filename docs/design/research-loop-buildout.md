@@ -130,7 +130,7 @@ only when no author can resume to receive it. Sessions without the tool are
 still measured at finish and may end on that verdict. Submit requires no
 prior launch and no report. A resumable session with the tool that stops
 without submitting ends unmeasured, or returns to review if it has a PR.
-The `end` verb and review meter top-up follow in the second half.
+The `stop` verb and review meter top-up follow in the second half.
 
 ## What falls out for free
 
@@ -183,5 +183,5 @@ against fakes before that.)
 parked run with a PR is the author receiving messages and doing whatever is
 necessary, not hard-coded steps. The lifecycle note carries the design: three
 states, one park-and-wake engine, the inbox and its message kinds, the
-author's moves (launch, sleep, submit, reply, end), what stays rigid, what is
+author's moves (launch, sleep, submit, reply, stop), what stays rigid, what is
 deleted, the open decisions and the four-stage sequencing.

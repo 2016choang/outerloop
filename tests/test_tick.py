@@ -439,7 +439,7 @@ def test_pending_past_deadline_cancels_then_wakes(tmp_path: Path) -> None:
 def test_pending_past_deadline_on_a_queue_wait_extends_instead(tmp_path: Path) -> None:
     """A launch pending on a busy queue or on the account's own GPU cap is a
     wait, not an unschedulable job: no cancel, no wake, the deadline moves out
-    by one slack window (Torch 2026-09-06, four launches on QOSMaxGRESPerUser)."""
+    by one slack window (observed 2026-09-06: four launches on QOSMaxGRESPerUser)."""
     from outerloop.tick import BLIND_PARK_SLACK_MIN
 
     # one wait and one never reason: the reason strings only branch through
@@ -2109,7 +2109,7 @@ def test_panel_key_preflight_blocks_claim_and_launch(
     assert _panel_job_minutes(make(panel=""), limits) == 0
     wanted = limits.attempt_job_minutes + _panel_job_minutes(make(), limits)
     # the default path NEEDS the clamp (spec.max_job_minutes defaults to
-    # MAX_ATTEMPT_JOB_MINUTES = cpu_short's 6h MaxTime)
+    # MAX_ATTEMPT_JOB_MINUTES = the placement partition's 6h MaxTime)
     assert wanted > MAX_ATTEMPT_JOB_MINUTES
     submitted2: list[str] = []
 
@@ -2186,7 +2186,7 @@ def test_job_wake_dispatcher_submits_a_resume_job_after_the_eval_jobs(tmp_path, 
     spec = ServiceSpec(
         qos="priority",
         account="acct",
-        partition="cpu_short",
+        partition="cpu-short",
         run_root=tmp_path,
         image="/img/a.sif",
         home=tmp_path,
@@ -2212,7 +2212,7 @@ def test_job_wake_dispatcher_submits_a_resume_job_after_the_eval_jobs(tmp_path, 
     assert "outerloop.attempt" in joined and "--resume tsp-1" in joined
     assert "--dependency=afterany:501:502" in argv  # runs after the eval jobs
     assert "--panel verify,review" in joined  # the wake runs the verification panel
-    assert "--account=acct" in argv and "--partition=cpu_short" in argv
+    assert "--account=acct" in argv and "--partition=cpu-short" in argv
 
 
 def test_wake_dispatcher_is_live_by_default_and_disarms(tmp_path, monkeypatch, caplog):
@@ -2932,7 +2932,7 @@ roadmap: docs/roadmap.md
     compute = SlurmCompute(runner=runner)
     assert service_self_initiated(tmp_path, compute, spec(""), contract, NOW) is None
     assert submitted == []
-    assert service_self_initiated(tmp_path, compute, spec("h200"), contract, NOW) == (
+    assert service_self_initiated(tmp_path, compute, spec("gpu-large"), contract, NOW) == (
         "speedrun",
         "501",
     )
@@ -2966,7 +2966,7 @@ roadmap: docs/roadmap.md
         image="img.sif",
         home=tmp_path,
         steward_key_file="/k",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
     )
     submitted: list[list[str]] = []
 
@@ -3009,7 +3009,7 @@ roadmap: docs/roadmap.md
         )
 
     assert "speedrun" in _gpu_lane_error(contract, "tsp", spec(""))
-    assert _gpu_lane_error(contract, "tsp", spec("h200")) == ""
+    assert _gpu_lane_error(contract, "tsp", spec("gpu-large")) == ""
 
 
 def test_multi_node_benchmarks_need_an_uncontained_slurm_deployment(tmp_path: Path) -> None:
@@ -3040,7 +3040,7 @@ roadmap: docs/roadmap.md
             run_root=tmp_path,
             image=image,
             home=tmp_path,
-            gpu_partition="h200",
+            gpu_partition="gpu-large",
             has_lanes=has_lanes,
         )
 
@@ -3055,7 +3055,7 @@ def _wake_spec(tmp_path: Path):
     from outerloop.tick import ServiceSpec
 
     return ServiceSpec(
-        account="acct", partition="cpu_short", run_root=tmp_path, image="/img/a.sif", home=tmp_path
+        account="acct", partition="cpu-short", run_root=tmp_path, image="/img/a.sif", home=tmp_path
     )
 
 
@@ -3131,7 +3131,7 @@ def test_sweep_leaves_an_armed_pending_wake_alone_however_old(tmp_path: Path) ->
 
 
 def test_sweep_reaps_an_armed_wake_slurm_will_never_start(tmp_path: Path) -> None:
-    """Torch does not kill jobs whose dependency can never be satisfied: such a
+    """The cluster does not kill jobs whose dependency can never be satisfied: such a
     wake would hold the lease forever. The sweep cancels it, reaps the lease,
     and redelivers — in the same tick."""
     waiting_run(tmp_path)
@@ -3246,7 +3246,7 @@ def test_sync_is_serviced_even_without_followup_servicing(tmp_path: Path, monkey
     )
     spec = tick_mod.ServiceSpec(
         account="a",
-        partition="cpu_short",
+        partition="cpu-short",
         run_root=tmp_path,
         image="/img.sif",
         home=Path("/home/x/autoresearch"),
@@ -3561,7 +3561,7 @@ def test_loop_cadence_is_clamped_finite(monkeypatch: Any) -> None:
 
 
 def test_sweep_redelivers_an_armed_wake_the_site_moved_off_its_partition(tmp_path: Path) -> None:
-    """Torch can shift a pending job to a lower-tier catch-all partition where
+    """The site can shift a pending job to a lower-tier catch-all partition where
     it starves (2026-09-02: wake 16787511 sat on `all` for hours). A holder
     whose partition is not the recipe's is treated as lost: cancelled, lease
     reaped, redelivered onto the right partition — in the same tick."""
@@ -3572,7 +3572,7 @@ def test_sweep_redelivers_an_armed_wake_the_site_moved_off_its_partition(tmp_pat
     waiting_run(tmp_path)
     acquire_lease(tmp_path, "r1", "wake-job:55", "55", now=NOW - 60)
     write_wake_spec(
-        tmp_path, dc_replace(_wake_spec(tmp_path), partition="cpu_short", job_partition="")
+        tmp_path, dc_replace(_wake_spec(tmp_path), partition="cpu-short", job_partition="")
     )
     slurm = FakeSlurm(
         states={"100": "COMPLETED", "55": "PENDING"},
@@ -3616,7 +3616,7 @@ def test_sweep_redelivers_an_armed_wake_the_site_moved_off_its_partition(tmp_pat
     slurm2 = FakeSlurm(
         states={"200": "COMPLETED", "66": "PENDING"},
         reasons={"66": "Dependency"},
-        partitions={"66": "cpu_short"},
+        partitions={"66": "cpu-short"},
     )
     _report2, dispatcher2 = run_tick(tmp_path, slurm2, now=NOW + 1, min_tick_s=0)
     assert "66" not in slurm2.cancelled and dispatcher2.dispatched == []
@@ -3628,13 +3628,14 @@ def test_moved_off_partition_matches_lists_by_membership(tmp_path: Path) -> None
     from outerloop.tick import _moved_off_partition, write_wake_spec
 
     write_wake_spec(
-        tmp_path, dc_replace(_wake_spec(tmp_path), partition="cpu_short,cpu_prem", job_partition="")
+        tmp_path,
+        dc_replace(_wake_spec(tmp_path), partition="cpu-short,cpu-preempt", job_partition=""),
     )
-    slurm = FakeSlurm(partitions={"1": "cpu_short", "2": "cpu_short,all", "3": "all", "4": ""})
+    slurm = FakeSlurm(partitions={"1": "cpu-short", "2": "cpu-short,all", "3": "all", "4": ""})
     c = slurm.compute()
     assert _moved_off_partition(tmp_path, c, "1") is None  # holds one we asked for
     assert _moved_off_partition(tmp_path, c, "2") is None  # list overlaps
-    assert _moved_off_partition(tmp_path, c, "3") == ("all", "cpu_short,cpu_prem")
+    assert _moved_off_partition(tmp_path, c, "3") == ("all", "cpu-short,cpu-preempt")
     assert _moved_off_partition(tmp_path, c, "4") is None  # unknown is not moved
 
 
@@ -3729,7 +3730,7 @@ def _qrow(
         "name": name,
         "state": state,
         "elapsed": "0:00",
-        "partition": "h200",
+        "partition": "gpu-large",
         "submitted": "2026-09-06T00:00:00",
         "reason": reason,
         "gres": f"gres/gpu:{gpus}" if gpus else "N/A",

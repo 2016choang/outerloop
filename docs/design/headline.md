@@ -38,8 +38,8 @@ correction — interventions-per-accepted-step is measured per mode), under a
    comparability with Prime Intellect's agent record (2,930 steps vs the
    2,990 human baseline; ~14k H200-hours; ~100 human interventions) without
    requiring identical hardware. New target repo with an `.outerloop.yaml`
-   contract; wall-clock track is a stretch goal pending Torch's GPU shape
-   (OPEN: H100s per node, burnable budget).
+   contract; wall-clock track is a stretch goal pending the cluster's GPU shape
+   (OPEN: GPUs per node, burnable budget).
 2. **Comparability — the RSI exam.** A slice of AI4AI-Bench (frozen research
    repos, agent rewrites the training algorithm, rerun from scratch, scored
    by an evaluator hidden from the agent — philosophically identical to our
@@ -139,7 +139,7 @@ step · failure model (driver dies vs sweep heals).
    with metered GPU-hours; #178 `baseline: cached`). Calibration DONE:
    9 runs all cross at 9472 steps → `min_delta: 256`.
 7. **Speedrun target repo scaffold** — DONE (gpt-speedrun: modded-nanogpt
-   baseline reproduced on one H200 at the public log's crossing step).
+   baseline reproduced on one large GPU at the public log's crossing step).
 8. **Grid runs + baselines**, then the write-up. First autonomous attempts
    running 2026-08-28 (width 4, auto mode).
 
@@ -148,7 +148,7 @@ fork-PR exfiltration gap must close before any repo flips public.
 
 ## Open questions
 
-- Torch GPU shape and burnable budget (decides wall-clock ambitions).
+- Cluster GPU shape and burnable budget (decides wall-clock ambitions).
 - AI4AI-Bench slice size (how many of the 10 tasks).
 - Whether the public repo is this repo renamed or a fresh `outerloop` repo
   with this one as history (the merge-commit mirror rule constrains the

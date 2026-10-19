@@ -180,8 +180,8 @@ class TickReport:
 
 # The submitted walltime must never exceed the job partition's MaxTime —
 # sbatch REJECTS a longer request outright, which would ground every climb.
-# The DEFAULT matches cpu_short (6 h); an operator moving work jobs to a
-# longer partition (OUTERLOOP_JOB_PARTITION=cpu48) raises the cap with
+# The DEFAULT matches the placement partition's 6 h MaxTime; an operator moving work jobs to a
+# longer partition (OUTERLOOP_JOB_PARTITION=cpu-long) raises the cap with
 # OUTERLOOP_MAX_JOB_MINUTES. Code-side ceiling: the cap must stay under
 # STRANDED_RUNNING_S or the picker declares live runs stranded — jobs
 # longer than 10 h need that window made spec-aware first (named gap). The
@@ -1033,10 +1033,11 @@ def _armed_wake_lost(
     lost). Cancel it so the sweep redelivers; the lease is then reaped.
 
     A wake the SITE moved off the partition it was submitted to may be
-    starving there — on Torch a pending job can be shifted to a lower-tier
-    partition (2026-09-02, wake 16787511 sat on `all` for hours) — but
-    relocation alone is routine (jobs move to `cs` while still waiting on
-    their dependencies and start on time). So a relocated holder counts as
+    starving there — on our cluster a pending job can be shifted to a
+    lower-tier catch-all partition (2026-09-02, a wake sat on one for hours) —
+    but relocation alone is routine (jobs move to a sibling partition while
+    still waiting on their dependencies and start on time). So a relocated
+    holder counts as
     lost only once every job it waited on is terminal AND the grace window
     has run out without it starting; then it is cancelled and redelivered
     onto the requested partition."""
@@ -1840,7 +1841,7 @@ def _sweep_one(
         # Past the deadline with a job still queued. Ask Slurm WHY before
         # calling it unschedulable: a busy queue or the account's own cap is
         # a wait a scientist would sit out, so the deadline moves out by one
-        # slack window instead (Torch 2026-09-06: four launches pending on
+        # slack window instead (observed 2026-09-06: four launches pending on
         # QOSMaxGRESPerUser were about to be cancelled and re-launched into
         # the same cap). Local compute has no queue and no reasons.
         pending = [j for j, s in zip(job_ids, states, strict=True) if is_pending(s)]
@@ -2872,7 +2873,7 @@ def _climb_limit_argv(limits: EffectiveLimits, job_minutes: int) -> list[str]:
     walltime rides along (contract budget + any panel allowance, clamped at
     the partition cap — exactly what the JobSpec gets) so the climb arms its
     self-deadline against the real clock (Slurm delivers no signals to our
-    processes on Torch). The session shrinks to fit a
+    processes on the cluster). The session shrinks to fit a
     CAPPED job with the same rule limits.effective_limits applies to
     contract values — better a short session that ends cleanly than a full
     one the self-deadline kills mid-flight."""
@@ -3521,7 +3522,7 @@ def _wake_dispatcher_from_env(
 def _max_job_minutes_from_env() -> int:
     """OUTERLOOP_MAX_JOB_MINUTES, clamped into what the code can honor:
     at least the climb-job floor (an operator on a short-MaxTime partition
-    must be able to LOWER the cap below cpu_short's 6h, or every submit is
+    must be able to LOWER the cap below the partition's 6h default, or every submit is
     rejected), at most the ceiling the stranded window allows. A clamped
     value logs — a silently-changed cap would read as the partition
     rejecting jobs for no reason."""

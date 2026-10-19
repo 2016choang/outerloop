@@ -21,7 +21,7 @@ a rule: caches on the shared filesystem once filled the scratch inode quota
 dies with the job leaves nothing to reap.
 
 The cost shows on a torch target. A speedrun eval installs torch and its
-CUDA libraries, about 2.5 GB, on every job; on Torch's network that is a
+CUDA libraries, about 2.5 GB, on every job; on the cluster's network that is a
 minute; on a workstation, several minutes. The heavier the stack the worse it gets,
 and torch is the common case, not the exception.
 
@@ -44,7 +44,7 @@ the kernel, on a trusted host, and jobs only read it.
 job, the seed under `<state root>/eval-cache/<target>`.*
 
 - **The kernel warms one cache per target**, `<state root>/eval-cache/<target>`
-  on Torch and `~/.outerloop/eval-cache/<target>` in local mode, by running
+  on the cluster and `~/.outerloop/eval-cache/<target>` in local mode, by running
   `uv sync --frozen --no-install-project --no-build` into a throwaway
   environment on the tick host, with `UV_CACHE_DIR` pointing at that cache.
   `--no-build` is the trust line: the lockfile is target content, and a source

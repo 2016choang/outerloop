@@ -183,7 +183,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         from_file={
             "OUTERLOOP_ROOT": "/scratch/me/ar",
             "OUTERLOOP_ACCOUNT": "pr_1_general",
-            "OUTERLOOP_PARTITION": "cpu_short",
+            "OUTERLOOP_PARTITION": "cpu-short",
             "OUTERLOOP_CADENCE_MIN": "20",
             "OUTERLOOP_PAT_FILE": "/home/me/.config/autoresearch/bot_pat",
         },
@@ -196,7 +196,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         f"--time={DEFAULT_RESIDENT_MINUTES}",
         f"--job-name={job_name()}",
         "--account=pr_1_general",
-        "--partition=cpu_short",
+        "--partition=cpu-short",
         "--export=ALL",
         str(home / "scripts" / "tick_chain.sbatch"),
     ]
@@ -207,7 +207,7 @@ def test_slurm_composes_the_resident_submit(tmp_path: Path) -> None:
         "OUTERLOOP_ROOT": "/scratch/me/ar",
         "OUTERLOOP_ACCOUNT": "pr_1_general",
         "OUTERLOOP_RESIDENT_MINUTES": str(DEFAULT_RESIDENT_MINUTES),
-        "OUTERLOOP_PARTITION": "cpu_short",
+        "OUTERLOOP_PARTITION": "cpu-short",
         "OUTERLOOP_CADENCE_MIN": "20",
         "OUTERLOOP_PAT_FILE": "/home/me/.config/autoresearch/bot_pat",
     }
@@ -266,9 +266,9 @@ def test_slurm_requires_root_but_account_and_partition_are_optional(tmp_path: Pa
 def test_slurm_accepts_a_comma_list_partition(tmp_path: Path) -> None:
     # a multi-partition "a,b" now rides the inherited env, not the --export
     # delimiter, so it is accepted and passed through verbatim.
-    p = plan(tmp_path, root="/r", account="a", partition="cpu_short,cpu_long")
-    assert p.export_env()["OUTERLOOP_PARTITION"] == "cpu_short,cpu_long"
-    assert "--partition=cpu_short,cpu_long" in p.command()
+    p = plan(tmp_path, root="/r", account="a", partition="cpu-short,cpu-long")
+    assert p.export_env()["OUTERLOOP_PARTITION"] == "cpu-short,cpu-long"
+    assert "--partition=cpu-short,cpu-long" in p.command()
     # a newline would still corrupt the environment / sbatch argv.
     with pytest.raises(StartError, match="newline"):
         plan(tmp_path, root="/r", account="a", partition="cpu\nlong")
@@ -430,17 +430,17 @@ def test_slurm_start_submits_once_and_reports(
         "sbatch",
         f'printf "%s\\n" "$@" > {log}\n'
         f'printf "%s:%s" "$OUTERLOOP_RESIDENT" "$OUTERLOOP_HOME" > {envlog}\n'
-        'echo "4242;torch"\n',
+        'echo "4242;clusterx"\n',
     )
     shim(bin_dir, "squeue", "exit 0\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.chdir(home)
     rc = main(
-        ["start", "--root", "/scratch/me/ar", "--account", "acct", "--partition", "cpu_short"]
+        ["start", "--root", "/scratch/me/ar", "--account", "acct", "--partition", "cpu-short"]
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert "job 4242" in out and "cpu_short" in out and "PAUSE" in out
+    assert "job 4242" in out and "cpu-short" in out and "PAUSE" in out
     argv = log.read_text().split("\n")
     assert argv[0] == "--parsable" and f"--job-name={job_name()}" in argv
     assert "--dependency=singleton" in argv
@@ -770,7 +770,7 @@ def test_slurm_start_hands_the_installer_directory_to_the_resident_job(
     bin_dir = clean_env / "bin"
     bin_dir.mkdir()
     pathlog = clean_env / "sbatch.path"
-    shim(bin_dir, "sbatch", f'printf "%s" "$PATH" > {pathlog}\necho "4242;torch"\n')
+    shim(bin_dir, "sbatch", f'printf "%s" "$PATH" > {pathlog}\necho "4242;clusterx"\n')
     shim(bin_dir, "squeue", "exit 0\n")
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setattr(cli, "find_uv", lambda: ("/h/.local/bin/uv", "/h/.local/bin"))
@@ -1079,8 +1079,10 @@ def test_start_launches_with_resolved_author(clean_env, monkeypatch, backend, re
     monkeypatch.delenv(key)
     monkeypatch.setenv("PATH", str(clean_env) if not recorded else "")
     values = {"OUTERLOOP_AUTHOR_BACKEND": backend}
-    if backend == "codex":
-        values["OUTERLOOP_AUTHOR_MODEL"] = "gpt-x"  # start validates the default author
+    if backend == "codex":  # start validates the default author: a codex one runs contained
+        image = clean_env / "agent.sif"
+        image.write_text("")
+        values |= {"OUTERLOOP_AUTHOR_MODEL": "gpt-x", "OUTERLOOP_IMAGE": str(image)}
     if recorded:
         values[key] = str(binary)
     monkeypatch.setattr(
@@ -1106,10 +1108,12 @@ def test_missing_path_does_not_accept_a_cli_only_in_cwd(tmp_path, monkeypatch):
 def test_start_sees_steward_key_from_env_file(clean_env, monkeypatch, capsys):
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("OUTERLOOP_STEWARD_KEY_FILE", raising=False)
+    image = clean_env / "agent.sif"  # a codex author runs contained
+    image.write_text("")
     path = env_file(
         clean_env,
         "OUTERLOOP_AUTHOR_BACKEND=codex\nOUTERLOOP_AUTHOR_MODEL=gpt-x\n"
-        "OUTERLOOP_PANEL=\nOUTERLOOP_STEWARD_KEY_FILE=/keys/steward\n",
+        f"OUTERLOOP_PANEL=\nOUTERLOOP_STEWARD_KEY_FILE=/keys/steward\nOUTERLOOP_IMAGE={image}\n",
     )
     monkeypatch.setattr(cli, "ENV_FILE", path)
     exports = []

@@ -390,9 +390,9 @@ def test_gpu_jobs_get_nv_and_gpus(tmp_path):
     script = tmp_path / "job.sh"
     script.write_text("#!/bin/sh\n")
     spec = eval_job_spec(
-        script, job_name="e", account="a", partition="h200", eval_minutes=240, gpus=1
+        script, job_name="e", account="a", partition="gpu-large", eval_minutes=240, gpus=1
     )
-    # --gpus-per-node, not --gpus: Torch's submit plugin classifies a job by
+    # --gpus-per-node, not --gpus: the site's submit plugin classifies a job by
     # its per-node GRES and rejects a per-job --gpus on a GPU partition as
     # "CPU job setup is not valid" (the first fleet speedrun attempt died there)
     assert spec.gpus == 1 and "--gpus-per-node=1" in spec.to_argv()
@@ -449,7 +449,7 @@ def test_gpu_evals_are_sized_per_gpu(tmp_path):
     cpu = eval_job_spec(script, job_name="e", account="a", partition="p", eval_minutes=30)
     assert (cpu.cpus, cpu.mem) == (4, "8G")
     one = eval_job_spec(
-        script, job_name="e", account="a", partition="h200", eval_minutes=240, gpus=1
+        script, job_name="e", account="a", partition="gpu-large", eval_minutes=240, gpus=1
     )
     assert (one.cpus, one.mem) == (EVAL_CPUS_PER_GPU, f"{EVAL_MEM_GB_PER_GPU}G")
     eight = eval_job_spec(script, job_name="e", account="a", partition="p", eval_minutes=60, gpus=8)
@@ -624,7 +624,7 @@ def test_operator_placement_and_binary_reach_evals_and_launches(tmp_path, monkey
     from outerloop.measure import Measure
     from outerloop.syscall import Launch, SyscallRequest
 
-    monkeypatch.setenv("OUTERLOOP_QOS", "priority")
+    monkeypatch.setenv("OUTERLOOP_QOS", "my-qos")
     binary = "/apps/container tools/apptainer"
     monkeypatch.setenv("OUTERLOOP_APPTAINER_BIN", binary)
     argv = []
@@ -640,7 +640,7 @@ def test_operator_placement_and_binary_reach_evals_and_launches(tmp_path, monkey
             account="cpu",
             partition="short",
             gpu_account="gpu",
-            gpu_partition="h200",
+            gpu_partition="gpu-large",
         )
     )
     run = tmp_path / "run"
@@ -653,8 +653,8 @@ def test_operator_placement_and_binary_reach_evals_and_launches(tmp_path, monkey
     )
     assert len(argv) == 2
     for command in argv:
-        assert "--qos=priority" in command
-        assert f"--partition={'h200' if gpus else 'short'}" in command
+        assert "--qos=my-qos" in command
+        assert f"--partition={'gpu-large' if gpus else 'short'}" in command
         assert shlex.quote(binary) + " exec --containall" in Path(command[-1]).read_text()
 
 

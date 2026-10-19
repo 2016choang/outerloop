@@ -1805,7 +1805,7 @@ def test_explicit_end_uses_report_and_last_verdict(tmp_path, judged_note):
     class Author:
         def run(self, brief_text, workspace, resume_session_id=None):
             (workspace / "report.md").write_text("A useful negative finding.")
-            assert main(["end", "--report", "report.md"], root=workspace) == 0
+            assert main(["stop", "--report", "report.md"], root=workspace) == 0
             return ok_session("Final text is not the report.")
 
     judged = (
@@ -1890,7 +1890,7 @@ def test_review_topup_meter_file_brief_and_wake(tmp_path, added):
             else:
                 assert f"{ceilings[0]} experiment launches, {ceilings[1]} sleeps" in brief_text
                 assert f"{ceilings[2]:g} GPU-hours this run" in brief_text
-            assert main(["end"], root=workspace) == 0
+            assert main(["stop"], root=workspace) == 0
             return ok_session()
 
     for resume in ("", "s1"):
@@ -2171,7 +2171,7 @@ def test_withdraw_consumed_after_session_without_compute(tmp_path):
 
     class Author:
         def run(self, brief_text, workspace, resume_session_id=None):
-            assert main(["end", "--withdraw", "Superseded"], root=workspace) == 0
+            assert main(["stop", "--withdraw", "Superseded"], root=workspace) == 0
             assert not events
             events.append("session ended")
             return ok_session()
@@ -2455,7 +2455,7 @@ def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
                         else "session failed",
                     )
                 if retry == "explicit-end":
-                    _write_syscall(workspace, {"type": "end", "report": "abandoned"})
+                    _write_syscall(workspace, {"type": "stop", "report": "abandoned"})
                 if retry == "clean":
                     if self.calls == 4:
                         paths[:] = ["src/pilot/solvers/tsp.py"]
@@ -2660,6 +2660,8 @@ def test_scope_refusal_bounded_scope_and_prior_run_notes(tmp_path, history, larg
     assert not evaluator.calls
     note = pending(directory, 0)[-1].payload["text"]
     assert note.startswith("Refused:" if history == "none" else "Refused again:")
+    lead = "The kernel reported this result:\nQuoted data:"
+    assert f"{lead}\n```\n{note}\n```" in harness.prompts[1]
     scope = note.split("Authors may change: ", 1)[1]
     assert len(scope) <= 1001
     assert scope.endswith("….")
@@ -2747,7 +2749,7 @@ def test_scope_refusal_preserves_rejection_through_stop_callback(tmp_path, expli
             if self.calls == 1:
                 _write_syscall(workspace, {"submit": True, "report": "candidate"})
             elif explicit:
-                _write_syscall(workspace, {"type": "end"})
+                _write_syscall(workspace, {"type": "stop"})
             return ok_session()
 
     result, author, evaluator = run_climb(
@@ -3158,7 +3160,7 @@ def test_silent_stop_is_resumed_and_an_explicit_end_ends_the_run(tmp_path):
             self.calls.append((brief_text, resume_session_id))
             if len(self.calls) == 2:
                 assert "ended without a syscall" in brief_text
-                assert main(["end"], root=workspace) == 0
+                assert main(["stop"], root=workspace) == 0
             return ok_session()
 
     author = Author()

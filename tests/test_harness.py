@@ -263,7 +263,7 @@ def test_error_detail_carries_the_real_cause_when_subtype_is_success(tmp_path: P
     ("success"), leaving the real cause only in `result`. The parse must lift
     that machine "API Error ..." text into error_detail so the outage latch
     sees it (classifier AND throttle-duration read the detail), not "success".
-    Observed on Torch: a session hit the workspace usage cap this exact way."""
+    Observed on the cluster: a session hit the workspace usage cap this exact way."""
     payload = json.dumps(
         {
             "is_error": True,

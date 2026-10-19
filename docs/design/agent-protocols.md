@@ -62,7 +62,7 @@ built by different people. Outerloop has five.
 
 1. **Kernel to author session.** The kernel starts a harness session with a
    brief, the session works, stages requests through the syscall tool
-   (launch, sleep, submit, message, end), and ends its turn. The kernel runs the
+   (launch, sleep, submit, message, stop), and ends its turn. The kernel runs the
    rigid steps (launch jobs, measure, publish) and wakes the session with the
    results as messages in its inbox. On Slurm the session is a batch job with
    no inbound network; the channel is files in the workspace and under the

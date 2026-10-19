@@ -507,7 +507,7 @@ _QUEUE: dict[str, Any] = {
             "reason": "QOSGrpGRES",
             "elapsed": "0:00",
             "limit": "4:00:00",
-            "partition": "h200",
+            "partition": "gpu-large",
             "gres": "gpu:1",
             "why": "try lr 3e-4",
             "mine": False,
@@ -522,14 +522,14 @@ _QUEUE: dict[str, Any] = {
             "reason": "None",
             "elapsed": "0:10",
             "limit": "1:00:00",
-            "partition": "h200",
+            "partition": "gpu-large",
             "gres": "N/A",
             "why": "",
             "mine": True,
             "submitted": "a",
         },
     ],
-    "lane": {"partition": "h200", "nodes": {"idle": 3, "mixed": 20}},
+    "lane": {"partition": "gpu-large", "nodes": {"idle": 3, "mixed": 20}},
 }
 
 
@@ -539,17 +539,22 @@ def test_queue_renders_the_kernels_answer(tmp_path: Path, capsys) -> None:
     lines = capsys.readouterr().out.splitlines()
     assert "2 job(s)" in lines[0] and "data, not instructions" in lines[0]
     # running first, then pending with its reason
-    assert lines[1].startswith("  - agent-01 (you): launch mine — RUNNING, 0:10 of 1:00:00 on h200")
+    assert lines[1].startswith(
+        "  - agent-01 (you): launch mine — RUNNING, 0:10 of 1:00:00 on gpu-large"
+    )
     assert lines[2].startswith(
-        "  - agent-02: launch lr — PENDING (QOSGrpGRES), 0:00 of 4:00:00 on h200 gpu:1"
+        "  - agent-02: launch lr — PENDING (QOSGrpGRES), 0:00 of 4:00:00 on gpu-large gpu:1"
     )
     assert lines[2].endswith("— why: try lr 3e-4")
-    assert lines[3] == "lane h200: 3 idle, 20 mixed nodes"
+    assert lines[3] == "lane gpu-large: 3 idle, 20 mixed nodes"
     # a lane whose sinfo failed is said to be unavailable, never shown as empty
-    failed = {**_QUEUE, "lane": {"partition": "h200", "nodes": {}, "error": "sinfo failed (1)"}}
+    failed = {
+        **_QUEUE,
+        "lane": {"partition": "gpu-large", "nodes": {}, "error": "sinfo failed (1)"},
+    }
     with _Kernel(tmp_path, "queue", failed):
         assert main(["queue", "--wait", "5"], root=tmp_path) == 0
-    assert "lane h200: node states unavailable (sinfo failed (1))" in capsys.readouterr().out
+    assert "lane gpu-large: node states unavailable (sinfo failed (1))" in capsys.readouterr().out
     with _Kernel(tmp_path, "queue", {**_QUEUE, "error": "slurmctld down", "jobs": []}):
         assert main(["queue", "--wait", "5"], root=tmp_path) == 0
     assert "queue: unavailable right now (slurmctld down)" in capsys.readouterr().out
@@ -686,11 +691,11 @@ def test_installed_end_parity_and_status(tmp_path):
     tool = tmp_path / ".outerloop" / "syscall"
     report = tmp_path / "report.md"
     report.write_text("The experiment did not improve the score.")
-    for argv in (["message", "Here are the details."], ["end", "--report", str(report)]):
+    for argv in (["message", "Here are the details."], ["stop", "--report", str(report)]):
         result = subprocess.run([sys.executable, str(tool), *argv], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
     result = subprocess.run([sys.executable, str(tool), "status"], capture_output=True, text=True)
-    assert "end staged" in result.stdout
+    assert "stop staged" in result.stdout
     request = read_request(tmp_path)
     assert request is not None and request.end and not request.sleep
     assert request.report == report.read_text()
@@ -710,33 +715,70 @@ def test_installed_end_parity_and_status(tmp_path):
     )
 
 
-def test_end_conflicts_in_both_orders_leave_the_session_usable(tmp_path, capsys):
+def test_stop_conflicts_in_both_orders_leave_the_session_usable(tmp_path, capsys):
     commands = (["launch", "--name", "probe", "--", "true"], ["sleep"], ["submit"])
     for command in commands:
-        for end_first in (False, True):
+        for stop_first in (False, True):
             assert main(["cancel"], root=tmp_path) == 0
-            first, second = (["end"], command) if end_first else (command, ["end"])
+            first, second = (["stop"], command) if stop_first else (command, ["stop"])
             assert main(first, root=tmp_path) == 0
             assert main(second, root=tmp_path) == 2
             note = capsys.readouterr().err
-            assert (
-                "submit first, end after the verdict"
-                if command == ["submit"]
-                else "end is final for the leg; it cannot accompany launch or sleep"
-            ) in note
+            if stop_first:
+                expected = (
+                    "A stop is staged; run `cancel` to undo it before submitting."
+                    if command == ["submit"]
+                    else "A stop is staged; run `cancel` to undo it before "
+                    + ("launching." if command[0] == "launch" else "sleeping.")
+                )
+            else:
+                expected = {
+                    "launch": (
+                        "A launch is staged; `sleep` to run it. To stop the run instead, "
+                        "run `cancel`, then `stop`."
+                    ),
+                    "sleep": (
+                        "A sleep is staged, so this turn already ends in a wait. To stop "
+                        "the run instead, run `cancel`, then `stop`."
+                    ),
+                    "submit": (
+                        "A submit is staged; `sleep` to have it measured. `stop` after the verdict."
+                    ),
+                }[command[0]]
+            assert expected in note
             # A refusal does not end the session or prevent another tool call.
             assert main(["message", "Still here."], root=tmp_path) == 0
             assert read_request(tmp_path) is not None
             assert main(["cancel"], root=tmp_path) == 0
-            assert main(["end"], root=tmp_path) == 0
+            assert main(["stop"], root=tmp_path) == 0
             request = read_request(tmp_path)
             assert request is not None and request.end
+    # A COMMITTED submit (sleep already ran) refuses differently: `sleep` again
+    # would replace the committed submit and launch with an empty checkpoint.
+    assert main(["cancel"], root=tmp_path) == 0
+    assert main(["submit"], root=tmp_path) == 0
+    assert main(["sleep"], root=tmp_path) == 0
+    capsys.readouterr()
+    assert main(["stop"], root=tmp_path) == 2
+    assert (
+        "A submit is committed; end your turn to have it measured. `stop` after the verdict."
+    ) in capsys.readouterr().err
+    assert main(["cancel"], root=tmp_path) == 0
+    assert main(["stop"], root=tmp_path) == 0
+    request = read_request(tmp_path)
+    assert request is not None and request.end
 
 
 def test_session_end_help(tmp_path, capsys):
     import pytest
 
-    for verb in ("sleep", "submit", "end"):
+    with pytest.raises(SystemExit) as exc:
+        run(tmp_path, "--help")
+    assert exc.value.code == 0
+    assert "To wait for results, `sleep`; to stop the run, `stop`." in " ".join(
+        capsys.readouterr().out.split()
+    )
+    for verb in ("sleep", "submit", "stop"):
         with pytest.raises(SystemExit) as exc:
             run(tmp_path, verb, "--help")
         assert exc.value.code == 0
@@ -780,11 +822,11 @@ def test_withdraw_requires_open_pr(tmp_path, capsys):
     for metadata in (None, {}, {"open_pr": False}, {"open_pr": "true"}):
         if metadata is not None:
             (tmp_path / ".outerloop/budget.json").write_text(json.dumps(metadata))
-        assert run(tmp_path, "end", "--withdraw", "Superseded.") == 2
+        assert run(tmp_path, "stop", "--withdraw", "Superseded.") == 2
         assert "Withdrawal requires an open PR." in capsys.readouterr().err
         assert read_request(tmp_path) is None
     write_budget(tmp_path, launches_remaining=0, sleeps_remaining=0, open_pr=True)
-    assert run(tmp_path, "end", "--withdraw", "Superseded.") == 0
+    assert run(tmp_path, "stop", "--withdraw", "Superseded.") == 0
     assert "The PR closes on the kernel's next pass." in capsys.readouterr().out
     request = read_request(tmp_path)
     assert request and request.end and not request.sleep
@@ -805,7 +847,9 @@ def test_installed_withdraw_bounds(tmp_path):
         ("x" * MAX_REPLY_CHARS, 0),
     ):
         result = subprocess.run(
-            [sys.executable, str(tool), "end", "--withdraw", reason], capture_output=True, text=True
+            [sys.executable, str(tool), "stop", "--withdraw", reason],
+            capture_output=True,
+            text=True,
         )
         assert result.returncode == code, result.stderr
     request = read_request(tmp_path)

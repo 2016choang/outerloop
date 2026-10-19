@@ -1,0 +1,141 @@
+/*
+ * Inline SVG diagrams (docs/how-it-works.md, docs/storage.md), ported from the
+ * standalone schematics. Everything is scoped under .ol-fig so nothing leaks
+ * into the theme. The neutrals — background, text, muted text, plain boxes,
+ * fonts — are the shared lab tokens (lab-tokens.css, loaded before this
+ * file), which already follow the theme toggle, so they need no dark override
+ * here. Only the hues the tokens lack (kernel teal, sandbox brown, credit
+ * orange, and their fills) stay as figure variables, with a slate-scheme dark
+ * value. The SVG scales to the column width; below phone width it holds the
+ * drawn size and the figure scrolls horizontally.
+ */
+
+.ol-fig {
+  /* lab tokens */
+  --olfig-bg: var(--card-bg);
+  --olfig-fg: var(--fg);
+  --olfig-muted: var(--fg-muted);
+  --olfig-ext: var(--bg);
+  --olfig-ext-line: var(--mark);
+  /* figure-only hues */
+  --olfig-kernel: #ddeae5;
+  --olfig-kernel-line: #2e5e55;
+  --olfig-zone-k: #e9f1ee;
+  --olfig-sandbox: #f1ece3;
+  --olfig-sandbox-line: #8b7354;
+  --olfig-zone-sb: #f7f3ec;
+  --olfig-gate: #f4e3c3;
+  --olfig-credit: #b26a00;
+  display: block;
+  margin: 1.2em 0;
+  padding: 0.8rem;
+  background: var(--olfig-bg);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+[data-md-color-scheme="slate"] .ol-fig {
+  --olfig-kernel: #183029;
+  --olfig-kernel-line: #74b8a9;
+  --olfig-zone-k: #121f1c;
+  --olfig-sandbox: #262019;
+  --olfig-sandbox-line: #b79c77;
+  --olfig-zone-sb: #1b1814;
+  --olfig-gate: #3a2d14;
+  --olfig-credit: #f2b54e;
+}
+.ol-fig svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+/* Below phone width the schematic would shrink past legibility; hold it at
+   the drawn size and let the figure scroll horizontally instead. */
+@media screen and (max-width: 37.5em) {
+  .ol-fig svg { min-width: 60rem; }
+}
+.ol-fig figcaption {
+  margin: 0.6rem 0.2rem 0;
+  color: var(--olfig-muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+/* diagram strokes and fills */
+.ol-fig .zone-k { fill: var(--olfig-zone-k); stroke: var(--olfig-kernel-line); stroke-width: 1.5; }
+.ol-fig .zone-sb { fill: var(--olfig-zone-sb); stroke: var(--olfig-sandbox-line); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.ol-fig .bound { stroke: var(--olfig-muted); stroke-width: 1; stroke-dasharray: 2 4; }
+.ol-fig .rule { stroke: var(--olfig-kernel-line); stroke-opacity: 0.25; }
+.ol-fig .box { stroke-width: 1.4; }
+.ol-fig .box.k,
+.ol-fig .box.kh { fill: var(--olfig-kernel); stroke: var(--olfig-kernel-line); }
+.ol-fig .box.k2 { fill: var(--olfig-ext); stroke: var(--olfig-kernel-line); }
+.ol-fig .box.kc { fill: var(--olfig-gate); stroke: var(--olfig-credit); stroke-width: 2; }
+.ol-fig .box.sb { fill: var(--olfig-sandbox); stroke: var(--olfig-sandbox-line); stroke-dasharray: 5 4; }
+.ol-fig .box.x { fill: var(--olfig-ext); stroke: var(--olfig-ext-line); }
+.ol-fig .port { fill: var(--olfig-bg); stroke: var(--olfig-fg); stroke-width: 1.2; }
+.ol-fig .chip { fill: var(--olfig-gate); stroke: var(--olfig-credit); stroke-width: 1; }
+
+/* diagram text */
+.ol-fig text { fill: var(--olfig-fg); font-family: var(--serif, Georgia, serif); }
+.ol-fig .zt { font-size: 13px; font-weight: 700; letter-spacing: 0.1em; fill: var(--olfig-muted); }
+.ol-fig .bt { font-size: 15px; font-weight: 600; }
+.ol-fig .bl { font-size: 13.5px; fill: var(--olfig-fg); }
+.ol-fig .mono,
+.ol-fig .pn,
+.ol-fig .pa,
+.ol-fig .ct { font-family: var(--mono, monospace); }
+.ol-fig .mono { font-size: 13.5px; font-weight: 600; }
+.ol-fig .pn { font-size: 13px; font-weight: 600; }
+.ol-fig .pa { font-size: 11px; fill: var(--olfig-muted); }
+.ol-fig .ct { font-size: 11px; fill: var(--olfig-fg); }
+.ol-fig .pz { font-size: 12.5px; fill: var(--olfig-muted); font-style: italic; }
+.ol-fig .al { font-size: 12.5px; fill: var(--olfig-muted); paint-order: stroke; stroke: var(--olfig-bg); stroke-width: 4px; }
+.ol-fig .credit-t { fill: var(--olfig-credit); font-weight: 600; }
+
+/* connectors */
+.ol-fig .flow,
+.ol-fig .credit,
+.ol-fig .thin,
+.ol-fig .model { fill: none; stroke-linejoin: round; }
+.ol-fig .flow { stroke: var(--olfig-fg); stroke-width: 1.8; }
+.ol-fig .credit { stroke: var(--olfig-credit); stroke-width: 2.6; }
+.ol-fig .thin { stroke: var(--olfig-muted); stroke-width: 1.3; stroke-dasharray: 4 3; }
+.ol-fig .model { stroke: var(--olfig-ext-line); stroke-width: 1.4; stroke-dasharray: 1 4; stroke-linecap: round; }
+.ol-fig .ah-flow { fill: var(--olfig-fg); }
+.ol-fig .ah-credit { fill: var(--olfig-credit); }
+.ol-fig .ah-thin { fill: var(--olfig-muted); }
+.ol-fig .ah-model { fill: var(--olfig-ext-line); }
+
+/* full-window view (javascripts/figures.js) */
+.md-typeset .ol-fig { cursor: zoom-in; }
+.ol-fig-dialog {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  padding: 3rem 1rem 1rem;
+  border: 0;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: auto;
+}
+.ol-fig-dialog::backdrop { background: var(--bg); }
+.ol-fig-dialog .ol-fig { cursor: default; margin: 0 auto; max-width: 1600px; }
+.ol-fig-dialog .ol-fig svg { min-width: 60rem; }
+.ol-fig-close {
+  position: fixed;
+  top: 0.8rem;
+  right: 1rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.ol-fig-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Material sizes figures to their content, which shrinks a scaled SVG */
+.md-typeset figure.ol-fig { width: 100%; max-width: 100%; }
+.md-typeset .ol-fig figcaption { max-width: none; }

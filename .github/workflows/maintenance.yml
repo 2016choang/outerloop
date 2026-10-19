@@ -1,8 +1,8 @@
 name: maintenance
 # The kernel's own weekly maintenance digest (docs/design/reviewer-infra.md,
 # "Maintenance scan"): lens sessions over main, merged into one rolling issue.
-# Same backend and keys as the advisory reviewer. Any repository gets the same
-# by copying this file (docs/install.md).
+# Same backend and keys as the advisory reviewer. Other repositories copy the
+# example in docs/install.md, which tracks the v0 release tag instead of main.
 on:
   schedule:
     - cron: '17 6 * * 1'  # Mondays, 06:17 UTC

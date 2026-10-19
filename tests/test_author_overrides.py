@@ -496,11 +496,12 @@ def test_startup_validation_uses_the_image_the_tick_runs(monkeypatch):
 @pytest.mark.parametrize(
     ("mode", "env_value", "file_value", "expected"),
     [
-        ("local", None, None, "DEFAULT"),
+        ("local", None, None, ""),  # the default image is not on disk: the loop runs without
         ("local", "", None, ""),
         ("local", "/img.sif", None, "/img.sif"),
         ("local", "/inherited.sif", "", "/inherited.sif"),  # a local loop keeps the shell's value
         ("local", None, "/file.sif", "/file.sif"),
+        ("local", "?gone.sif", None, ""),  # a missing image is none to the local loop
         ("slurm", None, None, "DEFAULT"),
         ("slurm", "/inherited.sif", "", ""),  # the deploy step lets the settings file win
         ("slurm", "/inherited.sif", "/file.sif", "/file.sif"),
@@ -511,8 +512,19 @@ def test_start_validates_with_the_launched_tick_image(
     monkeypatch, tmp_path, mode, env_value, file_value, expected
 ):
     # outerloop start must validate overrides with exactly the image the tick it launches uses.
+    # "/name" is an image on disk, "?name" one that is missing.
     from outerloop import cli, tick
 
+    def path(value):
+        if not value or value[0] not in "/?":
+            return value
+        image = tmp_path / value[1:]
+        if value[0] == "/":
+            image.write_text("")
+        return str(image)
+
+    env_value, file_value = path(env_value), path(file_value)
+    expected = path(expected) if expected and expected[0] == "/" else expected
     seen = []
     monkeypatch.setattr(
         "outerloop.author_overrides.validate_overrides", lambda env, image: seen.append(image)
@@ -590,6 +602,46 @@ def test_start_refuses_a_default_author_that_needs_the_image(
     err = capsys.readouterr().err
     assert ("author: author-backend codex requires --image" in err) == uncontained
     assert (code == 2) == uncontained
+
+
+@pytest.mark.parametrize("mode", ["slurm", "local"])
+def test_start_reads_the_author_with_the_ticks_precedence(monkeypatch, tmp_path, capsys, mode):
+    # a shell that still exports a codex author over a settings-file claude author:
+    # the resident chain runs the file's claude (start agrees); a local loop keeps the
+    # shell's codex, which needs an image this uncontained deployment does not have
+    import contextlib
+
+    from outerloop import cli
+
+    env_file = tmp_path / "settings.env"
+    env_file.write_text(
+        "OUTERLOOP_UNCONTAINED=1\nOUTERLOOP_PANEL=\n"
+        "OUTERLOOP_AUTHOR_BACKEND=claude\nOUTERLOOP_AUTHOR_MODEL=claude-test\n"
+    )
+    env_file.chmod(0o600)
+    monkeypatch.setattr(cli, "ENV_FILE", env_file)
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(env_file))
+    for key in ("OUTERLOOP_COMPUTE", "OUTERLOOP_TICK_HOST", "OUTERLOOP_IMAGE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("OUTERLOOP_AUTHOR_OVERRIDES", raising=False)
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_BACKEND", "codex")
+    monkeypatch.setenv("OUTERLOOP_AUTHOR_MODEL", "gpt-5.6-terra")
+    real_which = cli.shutil.which
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name, *a, **k: (
+            ("/usr/bin/sbatch" if mode == "slurm" else None)
+            if name == "sbatch"
+            else real_which(name, *a, **k)
+        ),
+    )
+    code = None
+    with contextlib.suppress(SystemExit):
+        code = cli.main(["start", "--dry-run", "--root", str(tmp_path / "state")])
+    err = capsys.readouterr().err
+    refused = "author: author-backend codex requires --image" in err
+    assert refused == (mode == "local") and (code == 2) == refused
 
 
 @pytest.mark.parametrize(

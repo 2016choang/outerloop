@@ -129,7 +129,7 @@ def test_dispatched_but_vanished_fails_not_resubmits(tmp_path):
 
 def test_late_result_files_are_waited_for(tmp_path, monkeypatch):
     """A shared filesystem can show the scheduler's terminal state before the
-    job's files reach the reader (Empire AI Alpha, 2026-09-15: an improvement
+    job's files reach the reader (a second site, 2026-09-15: an improvement
     was read as "no result"). With a marker, no live job and no result, the
     measurer waits up to RESULT_SETTLE_S for the exit-code before it gives up."""
     from outerloop import measure as mod
@@ -484,20 +484,20 @@ def test_dispatch_settings_place_gpu_jobs_on_the_gpu_lane(tmp_path):
         image="/i.sif",
         account="acct",
         partition="cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
     )
-    assert with_lane.placement(1) == ("acct", "h200")
+    assert with_lane.placement(1) == ("acct", "gpu-large")
     m = with_lane.measurer(tmp_path, repo_root=tmp_path, eval_minutes=240, run_tag="r")
-    assert (m.account, m.partition, m.gpu_partition) == ("acct", "cpu", "h200")
+    assert (m.account, m.partition, m.gpu_partition) == ("acct", "cpu", "gpu-large")
     own_account = DispatchSettings(
         compute=cpu_only.compute,
         image="/i.sif",
         account="acct",
         partition="cpu",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         gpu_account="gpu-acct",
     )
-    assert own_account.placement(2) == ("gpu-acct", "h200")
+    assert own_account.placement(2) == ("gpu-acct", "gpu-large")
 
 
 def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
@@ -527,7 +527,7 @@ def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
         partition="cpu",
         eval_minutes=60,
         run_tag="r1",
-        gpu_partition="h200",
+        gpu_partition="gpu-large",
         gpu_account="gpu-acct",
     )
     plan = plan_measures(
@@ -546,7 +546,7 @@ def test_mixed_suite_places_each_measure_on_its_own_lane(tmp_path):
         assert "--partition=cpu" in argv and "--account=acct" in argv
         assert not any(a.startswith("--gpus") for a in argv)
     for argv in gpu_jobs:
-        assert "--partition=h200" in argv and "--account=gpu-acct" in argv
+        assert "--partition=gpu-large" in argv and "--account=gpu-acct" in argv
         assert "--gpus-per-node=1" in argv
     # the GPU measures' job scripts carry --nv; the CPU ones do not
     scripts = {n: Path(a[-1]).read_text() for n, a in by_job.items()}
@@ -662,24 +662,53 @@ def test_legacy_slot_is_miss_and_redispatch_is_idempotent(
 
 
 @pytest.mark.parametrize("name", ["baseline", "sib-tsp-base", "candidate"])
-def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_no_result_baseline_retries_then_parks_for_an_operator(
+    tmp_path, name, interrupt, monkeypatch
+):
     """A dispatched baseline, suite baseline, or cleanly completed candidate
     that ends with no result is an infrastructure failure, not a negative
     result: two uncharged re-dispatches — the count survives restarts, and a
     repeated delivery of one job counts once — then a park whose note names
     the file an operator deletes."""
+    from outerloop.operator_limits import CapacityError
+
     measure = Measure(name, "sha", "cmd", "r2")
     submitted: list = []
     states = {"100": "COMPLETED"}
     m = _measurer(tmp_path, submitted, states=states)
     _dispatched(m, measure, job="100")  # the original dispatch, no journal
+    write_text = Path.write_text
+    marker = m._ev(measure) / "submitted"
+
+    def interrupted_write(path, *args, **kwargs):
+        if path == marker:
+            raise KeyboardInterrupt
+        return write_text(path, *args, **kwargs)
+
+    def rejected_submit(spec):
+        raise CapacityError("submission unavailable")
+
     for retry in (1, 2):
         m = _measurer(tmp_path, submitted, states=states)  # a fresh process per wake
         states[str(100 + retry)] = "PENDING"  # the retry job is in queue
-        with pytest.raises(MeasurementPending) as caught:
-            m.results([measure])
-        assert caught.value.capacity_wait  # an infra retry is not charged
-        assert caught.value.job_ids == (str(100 + retry),)
+        with monkeypatch.context() as patch:
+            patch.setattr(m.compute, "submit", rejected_submit)
+            with pytest.raises(MeasurementPending) as waiting:
+                m.results([measure])
+            assert waiting.value.capacity_wait
+        assert len(submitted) == retry - 1
+
+        if interrupt:
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "write_text", interrupted_write)
+                with pytest.raises(KeyboardInterrupt):
+                    m.results([measure])
+        else:
+            with pytest.raises(MeasurementPending) as caught:
+                m.results([measure])
+            assert caught.value.capacity_wait  # an infra retry is not charged
+            assert caught.value.job_ids == (str(100 + retry),)
         # a repeated delivery while the retry job is live spends nothing
         live = {m._job_name(measure): str(100 + retry)}
         with pytest.raises(MeasurementPending) as repeat:
@@ -697,6 +726,7 @@ def test_no_result_baseline_retries_then_parks_for_an_operator(tmp_path, name):
         _measurer(tmp_path, submitted, states=states).results([measure])
     assert len(submitted) == 2  # the original dispatch plus exactly two retries
     # a journal that cannot be written parks the run; it never aborts it
+    _dispatched(m, measure, job="102")
     infra = m._infra_retry_path(measure)
     infra.unlink()  # the operator cleared the journal…
     infra.mkdir()  # …but the path cannot hold a file, so every write fails
@@ -738,7 +768,7 @@ def test_multi_node_measures_dispatch_on_every_node(tmp_path):
     from dataclasses import replace
 
     submitted: list = []
-    m = replace(_measurer(tmp_path, submitted), image="", gpu_partition="h200")
+    m = replace(_measurer(tmp_path, submitted), image="", gpu_partition="gpu-large")
     with pytest.raises(MeasurementPending):
         m.results(plan_measures("c", "m", "b" * 40, "c" * 40, gpus=8, nodes=2))
     assert len(submitted) == 2

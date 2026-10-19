@@ -6,7 +6,7 @@ LLM APIs and GPU hours. Its history may go public with a release.
 ## Never commit
 
 - The bot's PAT, LLM API keys, or any credential. They live as env vars or 0600
-  credential files on the orchestrator host (Torch home dir), with one sanctioned
+  credential files on the orchestrator host (its home directory), with one sanctioned
   exception: the reviewer role's separate, spend-capped API key in GitHub Actions
   secrets (fork PRs run without secrets). Agent sessions never see the PAT or
   billing keys (scrubbed environment); transcripts are secret-scanned before

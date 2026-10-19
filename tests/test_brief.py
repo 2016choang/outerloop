@@ -332,15 +332,15 @@ def test_end_is_described_only_when_the_tool_is_offered() -> None:
     resume) must not be told to use a verb it does not have."""
     off = render(build_brief(make_inputs(syscalls=False, launch_budget=0), created="t"))
     on = render(build_brief(make_inputs(syscalls=True, launch_budget=0), created="t"))
-    assert "`end [--report <file>]`" not in off
-    assert "`end [--report <file>]`" in on
+    assert "`stop [--report <file>]`" not in off
+    assert "`stop [--report <file>]`" in on
 
 
 def test_memory_guidance_at_every_session_boundary() -> None:
     text = render(
         build_brief(make_inputs(line_ref="agents/agent-07", memory="findings"), created="t")
     )
-    assert "A session ends whenever you stage a launch, a sleep, a submit or an end" in text
+    assert "A session ends whenever you stage a launch, a sleep, a submit or a stop" in text
     assert "as you learn them" in text
     assert "before each of those" in text
     assert "agent_memory/<topic>.md" in text

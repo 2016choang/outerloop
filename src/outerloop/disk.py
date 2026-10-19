@@ -4,7 +4,7 @@ Quota exhaustion is INVISIBLE on some clusters until a write fails: user
 quotas on VAST/NFS homes are not exposed through statvfs (df reports the
 whole filesystem), and rquota RPCs may be administratively blocked — the
 first symptom is EDQUOT from a write that already lost data. (Verified on
-Torch 2026-08-07, the day a full home quota crashed a live climb and its
+the cluster, 2026-08-07, the day a full home quota crashed a live climb and its
 error handling with it.)
 
 So the preflight is built on two honest signals:

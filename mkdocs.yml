@@ -1,0 +1,135 @@
+# Public docs site, built from docs/ by scripts/docs/build.sh
+# (mkdocs build --strict). Staging by default until the launch: noindex plus
+# robots.txt, both off with OUTERLOOP_DOCS_STAGING=false (scripts/docs/hooks.py).
+site_name: Outerloop
+site_url: https://docs.outerloop.science/
+site_description: Autoresearch agents that improve your benchmark.
+
+repo_url: https://github.com/outerloop-science/outerloop
+repo_name: outerloop-science/outerloop
+edit_uri: edit/main/docs/
+
+
+hooks:
+  - scripts/docs/hooks.py
+
+watch:
+  - README.md
+  - CHANGELOG.md
+  - CONTRIBUTING.md
+  - SECURITY.md
+  - RELEASING.md
+  - scripts/docs/hooks.py
+
+# Design notes and validation logs stay in the repo; links to them go to GitHub.
+exclude_docs: |
+  design/
+  validation/
+
+theme:
+  name: material
+  custom_dir: overrides
+  font: false
+  favicon: assets/outerloop-favicon.svg
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+    - content.action.edit
+    - content.action.view
+    - content.code.copy
+  icon:
+    search: bi/search
+  # Same three-state theme cycle as agenticlearning.ai: system, light, dark.
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: bi/circle-half
+        name: "Theme: system (switch to light)"
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: blue
+      toggle:
+        icon: bi/sun
+        name: "Theme: light (switch to dark)"
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: blue
+      toggle:
+        icon: bi/moon
+        name: "Theme: dark (switch to system)"
+
+extra_css:
+  - https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap
+  - https://agenticlearning.ai/css/lab-tokens.css
+  - https://agenticlearning.ai/css/lab-mkdocs.css
+  - stylesheets/site.css
+  - stylesheets/figures.css
+
+extra_javascript:
+  - javascripts/figures.js
+
+extra:
+  generator: false
+  social:
+    - icon: lab/github
+      link: https://github.com/outerloop-science/outerloop
+      name: GitHub
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Getting started: getting-started.md
+  - Guides:
+    - Install: install.md
+    - Operating runs: operate.md
+    - Writing a contract: contract.md
+    - Model endpoints: endpoints.md
+    - PR reviewer and digest: reviewer.md
+    - Session capture: session-capture.md
+    - Community channels: community.md
+  - Concepts:
+    - How it works: how-it-works.md
+    - Storage: storage.md
+    - Messages: messages.md
+    - Concurrency: concurrency.md
+  - Reference:
+    - Contract fields: reference/contract.md
+    - Operator CLI: reference/cli.md
+    - Agent syscalls: reference/syscalls.md
+    - Inbox message format: reference/inbox.md
+    - Environment variables: reference/environment.md
+  - Project:
+    - Roadmap: roadmap.md
+    - Changelog: changelog.md
+    - Contributing: contributing.md
+    - Security and repo hygiene: security.md
+    - Releasing: releasing.md

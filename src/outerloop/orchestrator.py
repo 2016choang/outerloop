@@ -42,6 +42,7 @@ from outerloop.contract import (
     normalize_path,
     path_is_forbidden,
 )
+from outerloop.github import forget_filter_overrides, handoff_git_dir
 from outerloop.harness import Harness, SessionResult, budget_exhausted, outage, redact
 from outerloop.inbox import (
     AUTHOR_PROTOCOL,
@@ -295,6 +296,9 @@ class SubprocessEvaluator:
         import os
         import signal
 
+        # agent-written code runs with this workspace as its cwd: any filter
+        # listing the last hand-off remembered for it must not be reused
+        forget_filter_overrides(workspace)
         if self.container_image:
             # per evaluation, and gone with the cache dir the caller removes
             workdir = cache_dir / "work"
@@ -1556,6 +1560,9 @@ def attempt_once(
                 workspace,
                 resume_session_id=resume_session_id,
             )
+        # back in kernel hands: the session owned .git until here, so the
+        # hand-off check runs once before any kernel git call
+        handoff_git_dir(workspace)
         if role_result.ok:
             _ack(messages)
     else:
@@ -1613,6 +1620,7 @@ def attempt_once(
             )
         with _watched():
             role_result = run_role(spec, harness, prompt, workspace)
+        handoff_git_dir(workspace)  # the session owned .git until here
         if role_result.ok:
             _ack(messages)
     session = role_result.session
@@ -1716,6 +1724,7 @@ def attempt_once(
                 wake_result = run_role(
                     spec, harness, prompt, workspace, resume_session_id=session.session_id
                 )
+            handoff_git_dir(workspace)  # the session owned .git until here
         except EndpointUnavailable as exc:
             from outerloop.endpoint_wait import run_context, unavailable
 
@@ -1832,9 +1841,9 @@ def attempt_once(
                         {
                             "text": (
                                 "Your session ended without a syscall: nothing was staged "
-                                "(no launch, sleep, submit or end), so nothing ran and your "
+                                "(no launch, sleep, submit or stop), so nothing ran and your "
                                 "run is still open. Continue the work. If you are done, "
-                                "stage `end --report FILE` and end your turn."
+                                "stage `stop --report FILE` and end your turn."
                             ),
                         },
                         origin=inbox_dir.name,
@@ -1846,7 +1855,7 @@ def attempt_once(
             # Refresh ancestry before deriving the paths admitted below.
             no_backend = (
                 "sleep is not available here: this run has no compute backend for "
-                "launches; end your leg instead"
+                "launches; `stop` instead"
                 if launcher is None
                 and not (
                     (on_stop and request.submit)

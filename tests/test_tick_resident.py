@@ -80,7 +80,7 @@ def _env(home: Path, root: Path, bindir: Path, **extra: str) -> dict[str, str]:
         "OUTERLOOP_HOME": str(home),
         "OUTERLOOP_ROOT": str(root),
         "OUTERLOOP_ACCOUNT": "acct",
-        "OUTERLOOP_PARTITION": "cpu_short",
+        "OUTERLOOP_PARTITION": "cpu-short",
         "HOME": str(home),
     }
     env.pop("OUTERLOOP_PAT_FILE", None)
@@ -112,7 +112,7 @@ def test_per_cadence_chain_queues_two_successors_and_execs_the_tick(tmp_path: Pa
     for line in sbatch:
         assert ("--qos=priority" in line) == bool(qos)
         assert "--dependency=singleton" in line and "--begin=" in line
-        assert "--partition=cpu_short" in line and "--deadline" not in line
+        assert "--partition=cpu-short" in line and "--deadline" not in line
         assert "afterany" not in line
     assert (shimlog / "ticks").read_text().count("tick") == 1
     log = next(root.joinpath("logs").glob("tick-*.log")).read_text()
@@ -768,7 +768,7 @@ exit 0
     for flag in (
         "--dependency=afterany:42,singleton",
         "--account=acct",
-        "--partition=cpu_short",
+        "--partition=cpu-short",
         "--qos=priority",
         "--export=ALL",
     ):

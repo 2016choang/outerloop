@@ -2,10 +2,11 @@
 # .github/workflows/review.yml to get an AI code review on every pull request.
 #
 # It posts advisory findings as a PR review. It NEVER approves, never blocks
-# your CI, and never runs your PR's code — it only reads the diff. It reviews
-# pull requests from branches in THIS repository; PRs from forks are skipped
-# (fork-PR review is a planned addition). The model key lives only in a
-# read-only, write-tokenless job.
+# your CI, and never fails your build. The session runs on an ephemeral
+# runner: it may run code while investigating, but its only secret is the
+# reviewer's model key, and the write token lives in a separate posting job.
+# It reviews pull requests from branches in THIS repository; PRs from forks
+# are skipped. The model key lives only in the read-only session job.
 #
 # Setup (see docs/reviewer.md): (1) have a bot account whose PRs are skipped,
 # (2) add this file, (3) set the ANTHROPIC_REVIEWER_KEY repo secret.
@@ -22,16 +23,18 @@ jobs:
     if: >-
       github.event.action != 'labeled'
       || github.event.label.name == 'outerloop:review'
-    # Pin a release (or a commit SHA): this job hands your reviewer key to the
-    # workflow, so never point it at a moving branch. Keep reviewer_ref on the
-    # same release.
-    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0.3.0
+    # Track the v0 release tag: maintainers move it to each final release, never
+    # on a push to main, so the code that receives your reviewer key changes only
+    # with a release. Keep reviewer_ref on the same ref. A tag trusts whoever
+    # can push tags here; for code that cannot change under you, pin a full
+    # commit SHA in both places instead. Never a branch.
+    uses: outerloop-science/outerloop/.github/workflows/advisory-review-agent.yml@v0
     with:
-      reviewer_ref: v0.3.0
+      reviewer_ref: v0
       # PRs authored by this login are never reviewed (so the bot never
       # reviews its own PRs). Use your own bot/app login.
       bot_login: your-bot-login
       backend: claude          # claude | hermes | codex
-      # model: claude-opus-5   # optional; the backend default is used if unset
+      model: claude-sonnet-5-5   # required for claude: it has no default model
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
