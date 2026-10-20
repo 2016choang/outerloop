@@ -6,6 +6,8 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Upgrading
 
 Operator actions before upgrading (everything else needs no action; details
