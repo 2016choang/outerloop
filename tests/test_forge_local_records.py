@@ -234,6 +234,18 @@ def test_a_merge_made_outside_the_kernel_is_recorded(tmp_path, forge) -> None:
     assert ff["state"] == "closed"
 
 
+def test_merge_pull_lands_nothing_when_the_head_was_merged_outside_after_the_read(
+    tmp_path, forge
+) -> None:
+    fashion, repo, bare = forge
+    head = _commit(bare, tmp_path / "topic", "topic", "main", {"notes.txt": "one\n"})
+    fashion.create_pull(repo, "Raced", "topic", "main", "body")
+    outside = _external_merge(bare, tmp_path / "merge", "topic", "main", {"m.txt": "m\n"})
+    assert fashion.merge_pull(repo, 1, "merge", expected_head=head) is False
+    assert fashion.branch_sha(repo, "main") == outside  # no second merge commit
+    assert fashion.get_pull_request(repo, 1)["merge_commit_sha"] == outside
+
+
 def test_a_merged_record_keeps_the_head_the_merge_landed(tmp_path, forge) -> None:
     fashion, repo, bare = forge
     merged_head = _commit(bare, tmp_path / "topic", "topic", "main", {"notes.txt": "one\n"})
