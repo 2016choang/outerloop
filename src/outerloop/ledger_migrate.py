@@ -47,7 +47,7 @@ def migrate_ledger(
         )
         for name, entry in source.items()
     }
-    table = render_markdown(entries, target)
+    table = render_markdown(entries, target, forge=github)
     patch = {
         LEADER_FILE: json.dumps(
             {name: ledger_record(entry) for name, entry in sorted(entries.items())}, indent=2

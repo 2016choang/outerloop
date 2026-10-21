@@ -22,6 +22,15 @@ class LedgerGitHub:
     def clone_url(self, target):
         return f"https://github.com/{target}.git"
 
+    def ref_for(self, repo, kind, ident):
+        segment = {
+            "pull": "pull",
+            "commit": "commit",
+            "blob": "blob",
+            "tree": "tree",
+        }.get(kind, "issues")
+        return f"{repo}#{ident}", f"https://github.com/{repo}/{segment}/{ident}"
+
     def credential(self):
         return None
 

@@ -17,6 +17,7 @@ import urllib.parse
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from outerloop.harness import Harness, backend_id
 from outerloop.markers import marker
@@ -25,6 +26,9 @@ from outerloop.review import DEFAULT_SYSCALL_CMD, Finding, ReviewResult, sanitiz
 from outerloop.review_agent import emit_envelope
 from outerloop.role_runner import run_role
 from outerloop.rolespec import RoleSpec
+
+if TYPE_CHECKING:
+    from outerloop.forge import Forge
 
 log = logging.getLogger(__name__)
 
@@ -175,22 +179,25 @@ _CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 _LABEL = {"question": "**Decision.** ", "note": "*Note.* "}
 
 
-def _item(finding: Finding, repo: str, ref: str) -> str:
+def _item(finding: Finding, repo: str, ref: str, forge: Forge | None = None) -> str:
     # backticks stripped: a file value containing one would close the code
     # span and render model markdown inline (same rule as the review body)
     safe_file = finding.file.replace("`", "")
     where = f"`{safe_file}`" + (f":{finding.line}" if finding.line else "")
-    link = (
-        f"https://github.com/{repo}/blob/{urllib.parse.quote(ref)}/{urllib.parse.quote(safe_file)}"
-    )
-    if finding.line:
+    ident = f"{urllib.parse.quote(ref)}/{urllib.parse.quote(safe_file)}"
+    if forge is None:
+        link = f"https://github.com/{repo}/blob/{ident}"
+    else:
+        _, link = forge.ref_for(repo, "blob", ident)
+    if finding.line and link:
         link += f"#L{finding.line}"
     summary = finding.summary.rstrip(".!?…")
     if summary.count("`") % 2:
         summary += "`"
     detail = finding.detail + ("`" if finding.detail.count("`") % 2 else "")
     label = _LABEL.get(finding.kind, "")
-    return f"- {label}**{summary}.** {detail} ([{where}]({link}); {finding.confidence})"
+    located = f"[{where}]({link})" if link else where
+    return f"- {label}**{summary}.** {detail} ({located}; {finding.confidence})"
 
 
 def digest_title(today: str) -> str:
@@ -208,6 +215,7 @@ def render_digest(
     ref: str,
     today: str,
     reviewed_by: str,
+    forge: Forge | None = None,
 ) -> str:
     """The rolling issue's body: marker first, the header and the advisory
     line, the counts, the scan's own summary, then one section per category
@@ -249,7 +257,7 @@ def render_digest(
             continue
         items.sort(key=lambda f: (_KIND_ORDER.get(f.kind, 2), _CONFIDENCE_ORDER[f.confidence]))
         lines += [f"### {section}", ""]
-        lines += [_item(f, repo, ref) for f in items]
+        lines += [_item(f, repo, ref, forge) for f in items]
         lines.append("")
     lines.append(
         "_Each scan replaces this body; earlier digests are in the edit history. "

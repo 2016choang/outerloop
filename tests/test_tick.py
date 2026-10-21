@@ -2359,6 +2359,15 @@ class LedgerGitHub:
     def ensure_branch(self, repo, branch):
         return True
 
+    def ref_for(self, repo, kind, ident):
+        segment = {
+            "pull": "pull",
+            "commit": "commit",
+            "blob": "blob",
+            "tree": "tree",
+        }.get(kind, "issues")
+        return f"{repo}#{ident}", f"https://github.com/{repo}/{segment}/{ident}"
+
     def put_file(self, repo, path, content, branch, message):
         if not self.put_ok:
             return ""

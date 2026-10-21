@@ -90,7 +90,7 @@ def post_digest(
             return "skip-stub"
         data = envelope.get("data")
         result = result_from_data(data if isinstance(data, dict) else {})
-        body = render_digest(result, repo=repo, ref=ref, today=today, reviewed_by=who)
+        body = render_digest(result, repo=repo, ref=ref, today=today, reviewed_by=who, forge=client)
         if number is None:
             number = client.create_issue(repo, digest_title(today), body)
             log.info("opened the digest issue %s#%s", repo, number)

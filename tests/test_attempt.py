@@ -6343,7 +6343,19 @@ def test_tick_snapshot_uses_kernel_auth(
 
     def git(args, env, timeout=None):
         if "fetch" in args or "push" in args:
-            calls.append(any("Authorization: Basic " in v for v in env.values()))
+            # the kernel's credential rides an env-injected config pair; the
+            # sandbox's own proxy settings in the environment are not counted
+            count = int(env.get("GIT_CONFIG_COUNT", "0"))
+            pairs = {
+                env.get(f"GIT_CONFIG_KEY_{i}", ""): env.get(f"GIT_CONFIG_VALUE_{i}", "")
+                for i in range(count)
+            }
+            calls.append(
+                any(
+                    key.endswith(".extraheader") and "Authorization: Basic " in value
+                    for key, value in pairs.items()
+                )
+            )
         return real_git(args, env, timeout)
 
     monkeypatch.setattr(github_mod, "_run_git", git)
@@ -6368,19 +6380,15 @@ def test_tick_snapshot_uses_kernel_auth(
         assert calls == []
         assert load_record(state, record.run_id).state == "parked"
         return
-    assert calls == ([True, True] if has_auth else [])
+    # A path URL is a transport on its own: without a credential the local
+    # push runs, unauthenticated (no Authorization header is sent).
+    assert calls == ([True, True] if has_auth else [False, False])
     logs = [r.message for r in caplog.records if "line snapshot" in r.message]
     assert len(logs) == 1
-    assert f"auth={has_auth}" in logs[0]
+    assert "transport=True" in logs[0]
     assert "run=tick-ending line=agents/agent-07" in logs[0]
     assert "sealed=" in logs[0]
-    if has_auth:
-        assert (
-            _git(target_repo_lines, "show", "agents/agent-07:AGENT_MEMORY.md")
-            == "deadline memory\n"
-        )
-    else:
-        assert "snapshot skipped: no GitHub auth" in logs[0]
+    assert _git(target_repo_lines, "show", "agents/agent-07:AGENT_MEMORY.md") == "deadline memory\n"
 
 
 @pytest.mark.parametrize("operation", ["fetch", "push", "record", "cleanup"])
@@ -6432,7 +6440,7 @@ def test_line_snapshot_failures_do_not_retry(tmp_path, target_repo, monkeypatch,
     logs = [r.message for r in caplog.records if "failed:" in r.message]
     assert len(logs) == 1
     assert (
-        f"line snapshot {operation} run=failure-run line=agents/agent-07 auth=True sealed="
+        f"line snapshot {operation} run=failure-run line=agents/agent-07 transport=True sealed="
         in logs[0]
     )
     assert "GitError: denied" in logs[0]
