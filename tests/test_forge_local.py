@@ -205,6 +205,25 @@ def test_a_local_workspace_pushes_its_line_snapshot(tmp_path, forge, monkeypatch
     )
 
 
+def test_bootstrap_takes_a_sha256_source_and_refuses_an_empty_one(tmp_path) -> None:
+    source = tmp_path / "sha256"
+    subprocess.run(
+        ["git", "init", "-q", "--object-format=sha256", "-b", "main", str(source)], check=True
+    )
+    (source / "a.txt").write_text("x")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(source, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed")
+    bootstrap_local_repo(tmp_path / "forge", "org/wide", source)
+    fashion = LocalForge(tmp_path / "forge")
+    assert fashion.ensure_branch("org/wide", "research-log")
+    assert len(fashion.branch_sha("org/wide", "research-log")) == 64
+
+    empty = tmp_path / "empty"
+    subprocess.run(["git", "init", "-q", str(empty)], check=True)
+    with pytest.raises(ValueError, match="no commits"):
+        bootstrap_local_repo(tmp_path / "forge", "org/empty", empty)
+
+
 def test_inherited_git_settings_neither_redirect_nor_reauthor_a_write(
     tmp_path, forge, monkeypatch
 ) -> None:

@@ -6,10 +6,10 @@ This module implements the refs-and-files and transport half of the `Forge`
 protocol; pull requests, threads and issues arrive in step 3 and raise
 `NotImplementedError` until then.
 
-Everything is written with git plumbing on the bare repository: blobs through
-``hash-object``, trees through ``mktree`` (nested trees are built bottom-up),
-commits through ``commit-tree``, and every ref move is a compare-and-swap
-``update-ref``. A commit therefore either lands whole or not at all, and a
+The backend writes with Git's low-level commands on the bare repository:
+blobs through ``hash-object``, trees through ``mktree`` (nested trees are
+built bottom-up), commits through ``commit-tree``, and every ref move is a
+compare-and-swap ``update-ref``. A commit therefore either lands whole or not at all, and a
 writer that lost a race retries against the new tip exactly as it does on
 GitHub.
 """
@@ -33,7 +33,6 @@ from outerloop.github import (
 
 log = logging.getLogger(__name__)
 
-ZERO_SHA = "0" * 40
 DEFAULT_BRANCH_CONFIG = "outerloop.defaultBranch"
 DEFAULT_LOCAL_IDENTITY = "outerloop"
 
@@ -53,6 +52,12 @@ def _split_target(target: str) -> tuple[str, str]:
     if not _TARGET_PART.fullmatch(owner) or not _TARGET_PART.fullmatch(name):
         raise ValueError(f"forge target is not a safe repository name: {target!r}")
     return owner, name
+
+
+def _zero(sha: str) -> str:
+    """The "must not exist" old value for `update-ref`, as long as `sha`
+    (40 hex digits in a SHA-1 repository, 64 in a SHA-256 one)."""
+    return "0" * len(sha)
 
 
 def local_repo_path(root: Path, target: str) -> Path:
@@ -107,8 +112,12 @@ def _entry_at(repo: Path, ref: str, path: str) -> tuple[str, str, str] | None:
     path yields None: git lists its children, none of them named `path`. A
     missing ref is None too; any other git failure raises, so a broken or
     unreadable repository is not mistaken for an absent file."""
-    if _git(repo, ["rev-parse", "--verify", "--quiet", f"{ref}^{{tree}}"], check=False).returncode:
+    found = _git(repo, ["rev-parse", "--verify", "--quiet", f"{ref}^{{tree}}"], check=False)
+    if found.returncode == 1:  # --quiet: the ref does not resolve
         return None
+    if found.returncode:
+        detail = found.stderr.decode(errors="replace").strip()
+        raise GitError(f"git rev-parse failed: {detail}", returncode=found.returncode)
     result = _git(repo, ["ls-tree", "-z", ref, "--", path])
     for record in result.stdout.split(b"\0"):
         if not record:
@@ -368,7 +377,7 @@ class LocalForge:
             return
         if not ref.startswith("refs/"):
             raise GitHubError(422, ref, "ref must start with refs/")
-        result = _git(self.repo_path(repo), ["update-ref", ref, sha, ZERO_SHA], check=False)
+        result = _git(self.repo_path(repo), ["update-ref", ref, sha, _zero(sha)], check=False)
         if result.returncode != 0:
             detail = result.stderr.decode(errors="replace").strip()
             raise GitHubError(422, ref, detail or "ref already exists")
@@ -590,6 +599,9 @@ def bootstrap_local_repo(
     dest = local_repo_path(Path(root), target)
     if dest.exists():
         raise FileExistsError(f"a forge repository already exists at {dest}")
+    if source is not None and not _git(None, ["ls-remote", "--heads", str(source)]).stdout.strip():
+        # a bare clone of it would have a default branch with no ref behind it
+        raise ValueError(f"source repository has no commits: {source}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     identity = list(git_identity(bot_login))
     if source is not None:
@@ -607,7 +619,7 @@ def bootstrap_local_repo(
             .stdout.strip()
             .decode()
         )
-        _git(dest, ["update-ref", "refs/heads/main", commit, ZERO_SHA])
+        _git(dest, ["update-ref", "refs/heads/main", commit, _zero(commit)])
         branch = "main"
     _git(dest, ["symbolic-ref", "HEAD", f"refs/heads/{branch}"])
     _git(dest, ["config", DEFAULT_BRANCH_CONFIG, branch])
