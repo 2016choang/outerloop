@@ -8,6 +8,7 @@ Versions follow [SemVer](https://semver.org).
 
 - Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
+- Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.
 
 ## [0.4.0] - 2026-10-20
 

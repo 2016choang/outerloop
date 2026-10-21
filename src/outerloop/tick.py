@@ -721,7 +721,10 @@ def _merge_blessed_pr(
                 not contains_base,
                 f"the head {head[:8]} does not contain the base tip {tip[:8]}",
             ),
-            (pr.get("mergeable_state") != "clean", f"GitHub says {pr.get('mergeable_state')}"),
+            (
+                pr.get("mergeable_state") != "clean",
+                f"{getattr(github, 'name', '') or 'GitHub'} says {pr.get('mergeable_state')}",
+            ),
             (dial != "auto", "the base contract is not auto"),
         )
         return next((reason for failed, reason in checks if failed), "")

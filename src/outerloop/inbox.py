@@ -264,8 +264,11 @@ def header_fragment(value: str, limit: int = 64) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
-def party(source: str, origin: str, reader: str, association: str = "") -> str:
-    """Name a party relative to the reader, without exposing run ids."""
+def party(
+    source: str, origin: str, reader: str, association: str = "", forge: str = "GitHub"
+) -> str:
+    """Name a party relative to the reader, without exposing run ids. The
+    forge name comes from the message (GitHub unless the local backend)."""
     if source in ("agent", "author"):
         if reader and origin == reader:
             return "you"
@@ -274,7 +277,7 @@ def party(source: str, origin: str, reader: str, association: str = "") -> str:
     origin = header_fragment(origin)
     if source == "human":
         association = header_fragment(association.lower())
-        return f"{origin} (GitHub{', ' + association if association else ''})"
+        return f"{origin} ({forge}{', ' + association if association else ''})"
     if source == "job":
         return f"job {origin}"
     if source == "ci":
@@ -317,7 +320,11 @@ def write_messages(
                 "seq": m.seq,
                 "kind": m.kind,
                 "sender": party(
-                    m.source, m.origin, run_dir.name, str(m.payload.get("association") or "")
+                    m.source,
+                    m.origin,
+                    run_dir.name,
+                    str(m.payload.get("association") or ""),
+                    str(m.payload.get("forge") or "GitHub"),
                 ),
                 "recipient": party("agent", m.to or run_dir.name, run_dir.name)
                 if m.kind == "agent-message"
@@ -428,7 +435,7 @@ def _legacy_base_moved(text: str) -> bool:
             .replace(sentinel, _SHA.pattern)
             .replace("BASEBASE", _REFNAME.pattern)
         )
-        if re.fullmatch(pattern + r"( GitHub reports conflicts with the base\.)?", text):
+        if re.fullmatch(pattern + r"( (?:GitHub|Local) reports conflicts with the base\.)?", text):
             return True
     return False
 
@@ -505,7 +512,13 @@ def render_inbox(
         sender = (
             "kernel"
             if kernel
-            else party(message.source, message.origin, reader, str(p.get("association") or ""))
+            else party(
+                message.source,
+                message.origin,
+                reader,
+                str(p.get("association") or ""),
+                str(p.get("forge") or "GitHub"),
+            )
         )
         recipient = (
             party("agent", message.to or reader, reader)
@@ -746,6 +759,7 @@ def gather_github_messages(
 ) -> None:
     """Persist messages before advancing independent GitHub collections."""
     number = int(record.pr_url.rstrip("/").split("/")[-1])
+    forge = str(getattr(github, "name", "") or "GitHub")
     positions = github_positions(directory)
     collections = {
         "comment": github.list_comments(record.target, number),
@@ -769,6 +783,7 @@ def gather_github_messages(
                     messages[comment["id"]] = {"author": author, "body": body, "context_only": True}
         for cid, payload in sorted(messages.items()):
             payload["association"] = associations[cid]
+            payload["forge"] = forge
             try:
                 stored = append(
                     directory,
@@ -808,7 +823,7 @@ def gather_github_messages(
     if stale:
         text = base_moved_text(tip, base_ref)
         if pr.get("mergeable_state") == "dirty":
-            text += " GitHub reports conflicts with the base."
+            text += f" {forge} reports conflicts with the base."
         append(
             directory,
             Message(
