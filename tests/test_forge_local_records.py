@@ -156,6 +156,17 @@ def test_pull_record_lifecycle(tmp_path, forge) -> None:
     assert missing.value.status == 404
 
 
+def test_merge_pull_refuses_a_draft(tmp_path, forge) -> None:
+    fashion, repo, bare = forge
+    main = fashion.branch_sha(repo, "main")
+    head = _commit(bare, tmp_path / "topic", "topic", "main", {"notes.txt": "one\n"})
+    fashion.create_pull(repo, "Not yet", "topic", "main", "body", draft=True)
+    assert fashion.merge_pull(repo, 1, "merge", expected_head=head) is False
+    assert fashion.branch_sha(repo, "main") == main
+    fashion.mark_ready_for_review(repo, 1, expected_head=head)
+    assert fashion.merge_pull(repo, 1, "merge", expected_head=head) is True
+
+
 def test_merge_pull_is_one_transaction_and_refuses_a_moved_head(tmp_path, forge) -> None:
     fashion, repo, bare = forge
     main = fashion.branch_sha(repo, "main")

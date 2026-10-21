@@ -1106,6 +1106,13 @@ def pr(args: argparse.Namespace) -> int:
         if args.pr_command == "merge":
             pull = forge.get_pull_request(target, number)
             head = str((pull.get("head") or {}).get("sha") or "")
+            if pull.get("draft"):
+                print(
+                    f"outerloop pr: #{number} is still a draft; it becomes mergeable "
+                    "once it is marked ready for review",
+                    file=sys.stderr,
+                )
+                return 1
             if not forge.merge_pull(target, number, "merge", expected_head=head):
                 print(
                     f"outerloop pr: could not merge #{number}; it is not open at head "

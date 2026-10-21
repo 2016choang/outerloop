@@ -260,6 +260,14 @@ try-out.
 - [ ] Model gateway (design/model-gateway.md), with the first cloud
       integration (0.4): conformance check first, then the gateway as an
       optional service; the per-session bridge goes once it is the default
+- [x] Local forge (design/forge.md, #540–#544): deployments and studies run
+      without GitHub on a bare repository with pull requests, threads and
+      the kernel's issues as records in git (`OUTERLOOP_FORGE=local`,
+      `outerloop init --forge local`, `outerloop pr`)
+- [ ] Local forge follow-ups: human work orders (issue intake, the steward
+      lane) on the local backend; a live local deployment run
+- [ ] Personal-token mode: the adopter's own GitHub login instead of a
+      GitHub App, with kernel posts told apart by their marker (#488)
 
 ## Meta: benchmarking autoresearch itself (maintainer direction 2026-08-08)
 

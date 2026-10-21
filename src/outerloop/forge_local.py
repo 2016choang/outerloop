@@ -1306,6 +1306,9 @@ class LocalForge:
             if record.get("merged") or str(record.get("state") or "open") != "open":
                 log.warning("merge of %s#%s failed: pull request is not open", repo, number)
                 return False
+            if record.get("draft"):  # GitHub's merge API refuses a draft too
+                log.warning("merge of %s#%s refused: still a draft", repo, number)
+                return False
             head_ref = str((record.get("head") or {}).get("ref") or "")
             base_ref = str((record.get("base") or {}).get("ref") or "")
             if not head_ref or not base_ref:
