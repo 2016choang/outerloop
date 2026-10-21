@@ -43,7 +43,7 @@ from outerloop.compute import (
 )
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.endpoint_wait import EndpointWaitReason
-from outerloop.forge import Forge, forge_from_env
+from outerloop.forge import LOCAL, Forge, forge_from_env, forge_identity, forge_name
 from outerloop.gpu_lanes import GpuLane, gpu_lanes_from_env
 from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
 from outerloop.housekeeping import shed_ended_workspaces
@@ -3635,9 +3635,14 @@ def startup_image() -> str:
 def _service_spec_from_env(
     root: Path, *, gpu_lanes: dict[str, GpuLane] | None = None
 ) -> tuple[Forge | None, ServiceSpec | None]:
-    """GitHub client + ServiceSpec from the chain environment, or Nones when
-    the environment is incomplete (the tick then runs without parked
-    servicing, and logs what is absent)."""
+    """The deployment's forge + ServiceSpec from the chain environment, or
+    Nones when the environment is incomplete (the tick then runs without
+    parked servicing, and logs what is absent).
+
+    A home, a target and an image are required on every backend. The
+    credential and bot-login gate is GitHub's: a local deployment reads its
+    bare repository under the state root, and its kernel identity comes from
+    the factory (`outerloop`, unless OUTERLOOP_BOT_LOGIN says otherwise)."""
     lanes = gpu_lanes_from_env() if gpu_lanes is None else gpu_lanes
     pat_file = os.environ.get("OUTERLOOP_PAT_FILE", "")
     app_file = os.environ.get("OUTERLOOP_GITHUB_APP_FILE", "")
@@ -3651,8 +3656,10 @@ def _service_spec_from_env(
     # does for the resident. Local compute has no placement at all.
     target = os.environ.get("OUTERLOOP_TARGET", "")
     # no default identity (#298): every own-comment and own-PR filter keys on
-    # this login, and a wrong one is worse than none
+    # this login, and a wrong one is worse than none. GitHub requires it; the
+    # local forge supplies its own when the variable is unset.
     bot_login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
+    local = forge_name() == LOCAL
     image_ok = Path(image).is_file()
     panel = os.environ.get("OUTERLOOP_PANEL", "verify,review")
     uncontained = uncontained_opt_in()
@@ -3684,9 +3691,10 @@ def _service_spec_from_env(
         # the jobs must not inherit a path to an image that is not there
         os.environ.pop("OUTERLOOP_IMAGE", None)
         image, image_ok = "", True
-    if (pat_file or app_file) and home and target and bot_login and image_ok:
+    credential_ok = local or bool((pat_file or app_file) and bot_login)
+    if credential_ok and home and target and image_ok:
         try:
-            github = forge_from_env(pat_file, app_file)
+            github = forge_from_env(pat_file, app_file, root=root)
             service_spec = ServiceSpec(
                 account=account,
                 qos=qos,
@@ -3694,6 +3702,7 @@ def _service_spec_from_env(
                 run_root=root,
                 image=image,
                 home=Path(home),
+                bot_login=bot_login or forge_identity(github),
                 pat_file=pat_file,
                 github_app_file=app_file,
                 target=target,
@@ -3711,16 +3720,14 @@ def _service_spec_from_env(
         except Exception as exc:
             log.warning("parked servicing disabled: %s", exc)
             return None, None
-    absent = [
-        name
-        for name, value in [
-            ("OUTERLOOP_PAT_FILE or _GITHUB_APP_FILE", pat_file or app_file),
-            ("OUTERLOOP_HOME", home),
-            ("OUTERLOOP_TARGET", target),
-            ("OUTERLOOP_BOT_LOGIN", bot_login),
-        ]
-        if not value
+    required = [
+        ("OUTERLOOP_HOME", home),
+        ("OUTERLOOP_TARGET", target),
     ]
+    if not local:
+        required[0:0] = [("OUTERLOOP_PAT_FILE or _GITHUB_APP_FILE", pat_file or app_file)]
+        required.append(("OUTERLOOP_BOT_LOGIN", bot_login))
+    absent = [name for name, value in required if not value]
     if not image_ok:
         absent.append(f"image:{image} (or OUTERLOOP_UNCONTAINED=1)")
     log.info("parked servicing disabled (missing: %s)", ", ".join(absent))

@@ -392,6 +392,27 @@ def test_concurrent_record_writers_retry_without_losing_a_write(forge, monkeypat
     assert [i["number"] for i in first.list_open_issues(repo)] == [1, 2]
 
 
+def test_a_write_reads_only_the_records_it_changes(forge, monkeypatch) -> None:
+    """A record write names the blobs it needs; it must not load every record
+    in the tree (the cost grows with the deployment's history)."""
+    fashion, repo, _ = forge
+    for number in range(1, 4):
+        fashion.create_issue(repo, f"issue {number}", "body")
+    reads: list[set[str]] = []
+    original = LocalForge._blobs
+
+    def blobs(self, repo_name, shas):
+        reads.append(set(shas))
+        return original(self, repo_name, shas)
+
+    monkeypatch.setattr(LocalForge, "_blobs", blobs)
+    fashion.close_issue(repo, 2)
+    assert reads == [{"issues/2.json"}]
+    reads.clear()
+    assert fashion.create_issue(repo, "another", "body") == 4
+    assert reads == [{"counters.json"}]
+
+
 def test_mergeable_state_is_clean_behind_or_dirty(tmp_path, forge) -> None:
     fashion, repo, bare = forge
     _commit(bare, tmp_path / "topic", "topic", "main", {"notes.txt": "topic\n"})
@@ -433,6 +454,26 @@ def test_shared_number_sequence_and_issue_shape(tmp_path, forge) -> None:
     with pytest.raises(GitHubError) as missing:
         fashion.close_issue(repo, 99)
     assert missing.value.status == 404
+
+
+def test_list_open_issues_honors_max_pages(forge, monkeypatch) -> None:
+    """GitHub returns at most `max_pages` pages of 100, oldest first; the local
+    reader must not hand back more than that."""
+    fashion, repo, _ = forge
+    records = {
+        f"issues/{number}.json": {
+            "number": number,
+            "state": "open",
+            "user": {"login": "outerloop"},
+        }
+        for number in range(1, 126)
+    }
+    monkeypatch.setattr(LocalForge, "_ref_head", lambda self, repo_name, ref: "tip")
+    monkeypatch.setattr(
+        LocalForge, "_json_records", lambda self, repo_name, ref, directory: records
+    )
+    assert [i["number"] for i in fashion.list_open_issues(repo, max_pages=1)] == list(range(1, 101))
+    assert [i["number"] for i in fashion.list_open_issues(repo, max_pages=2)] == list(range(1, 126))
 
 
 def test_list_directory_raises_on_a_damaged_repository(forge) -> None:

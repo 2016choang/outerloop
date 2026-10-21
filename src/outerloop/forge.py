@@ -10,8 +10,10 @@ same verbs over a bare repository.
 `forge_from_env` is the one factory every entry point (the tick, the attempt
 and steward jobs, the ledger migration, the CLI) builds its forge through.
 Selection is `OUTERLOOP_FORGE`, read like `OUTERLOOP_COMPUTE` in `compute.py`:
-`github` (the default) is the only backend implemented so far; `local` is
-refused with a message naming the setting.
+`github` (the default) talks to a hosted repository, and `local` reads and
+writes a bare repository under `<OUTERLOOP_ROOT>/forge` (`docs/design/forge.md`).
+The factory also supplies the kernel identity for backends that carry one, so
+callers never fall back to an empty git author.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from outerloop.markers import marker
@@ -165,16 +168,37 @@ def forge_name() -> str:
     return os.environ.get(FORGE_ENV, "").strip().lower() or GITHUB
 
 
+def forge_identity(forge: Forge) -> str:
+    """The login the kernel commits and posts as on this forge.
+
+    The local backend carries its own (`outerloop`, or `OUTERLOOP_BOT_LOGIN`);
+    GitHub keeps reading the chain's environment, exactly as before."""
+    login = getattr(forge, "bot_login", "")
+    if isinstance(login, str) and login.strip():
+        return login.strip()
+    from outerloop.github import bot_login_from_env
+
+    return bot_login_from_env()
+
+
 def forge_from_env(
     pat_file: str = "",
     app_file: str = "",
     *,
     dry_run: bool = False,
     backend: str = "",
+    root: str | Path | None = None,
+    bot_login: str = "",
 ) -> Forge:
     """The deployment's forge, built from the credential paths and
     `OUTERLOOP_FORGE`. `backend` overrides the environment for callers that
-    read settings from the operator's .env rather than an exported variable."""
+    read settings from the operator's .env rather than an exported variable.
+
+    `root` is the state root a local forge lives under; omitted, it comes from
+    `OUTERLOOP_ROOT`, which the tick sets before building and every job
+    inherits. It is resolved to an absolute path, because a workspace resolves
+    the local clone URL from its own directory. The credentials are GitHub's
+    and are ignored locally."""
     name = (backend or forge_name()).strip().lower()
     if name == GITHUB:
         from outerloop.appauth import resolve_bot_auth
@@ -182,7 +206,22 @@ def forge_from_env(
 
         return GitHubClient(auth=resolve_bot_auth(pat_file, app_file), dry_run=dry_run)
     if name == LOCAL:
-        raise NotImplementedError(
-            f"{FORGE_ENV}=local is not implemented yet; only {FORGE_ENV}=github is supported"
+        from outerloop.forge_local import DEFAULT_LOCAL_IDENTITY, LocalForge
+
+        raw_root = str(root) if root not in (None, "") else os.environ.get("OUTERLOOP_ROOT", "")
+        if not raw_root.strip():
+            raise ValueError(
+                f"{FORGE_ENV}=local needs a state root: set OUTERLOOP_ROOT or pass one"
+            )
+        # an explicit login (the CLI reads it from the .env too) wins over the env
+        login = (
+            bot_login.strip()
+            or os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
+            or DEFAULT_LOCAL_IDENTITY
         )
-    raise ValueError(f"{FORGE_ENV}={name!r} is not a known forge; use 'github'")
+        # Absolute before the forge is built: jobs inherit an absolute root and
+        # a workspace resolves the clone URL from its own directory, so a
+        # relative `--root` would point each of them somewhere else.
+        state_root = Path(raw_root).expanduser().resolve()
+        return LocalForge(state_root / "forge", bot_login=login, dry_run=dry_run)
+    raise ValueError(f"{FORGE_ENV}={name!r} is not a known forge; use 'github' or 'local'")

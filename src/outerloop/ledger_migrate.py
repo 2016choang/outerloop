@@ -101,6 +101,10 @@ def migrate(args: argparse.Namespace) -> int:
             settings.get("OUTERLOOP_PAT_FILE", ""),
             settings.get("OUTERLOOP_GITHUB_APP_FILE", ""),
             backend=settings.get(FORGE_ENV, ""),
+            # the file, not just the shell, may be where a local forge's root
+            # is configured; forge_from_env would otherwise read the empty
+            # process environment and reject it
+            root=settings.get("OUTERLOOP_ROOT", ""),
         )
         table = migrate_ledger(
             github, args.target, args.main_sha, force=args.force, dry_run=args.dry_run

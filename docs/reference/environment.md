@@ -21,6 +21,7 @@ over the inherited environment even when it is empty.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | [`OUTERLOOP_COMPUTE`](#outerloop_compute) | run the local loop instead of the Slurm chain | unset |
+| [`OUTERLOOP_FORGE`](#outerloop_forge) | the code host | `github` |
 | [`OUTERLOOP_ROOT`](#outerloop_root) | state root | `~/.outerloop` |
 | [`OUTERLOOP_HOME`](#outerloop_home) | the kernel source checkout to deploy from | start directory |
 | [`OUTERLOOP_ACCOUNT`](#outerloop_account) | Slurm account for the tick | unset |
@@ -101,10 +102,24 @@ even where `sbatch` exists. Any other value runs the Slurm chain where
 - Values: `local` or anything else
 - Default: unset
 
+### `OUTERLOOP_FORGE`
+
+The code host. `github` uses a hosted repository and the App or PAT
+credential. `local` uses a bare repository under
+`<OUTERLOOP_ROOT>/forge/<owner>/<repo>.git`; no credential or GitHub bot login
+is needed, and the kernel commits and posts as `OUTERLOOP_BOT_LOGIN` or
+`outerloop`. Pull requests, threads and the kernel's issues are commits on
+`refs/outerloop/records` in that repository. The local backend needs Git 2.38
+or newer.
+
+- Values: `github` or `local`
+- Default: `github`
+
 ### `OUTERLOOP_ROOT`
 
 The state root: runs, workspaces, logs and the tick lease live under it. On
-Slurm it must sit on the shared filesystem, and start refuses without it.
+Slurm it must sit on the shared filesystem, and start refuses without it. A
+local forge keeps its repositories under `<root>/forge`.
 
 - Default: `~/.outerloop`
 - Required: on Slurm, from the flag, the environment or the settings file

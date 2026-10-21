@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -430,6 +431,95 @@ def test_init_force_overwrites_an_existing_env(tmp_path: Path, monkeypatch) -> N
     )
     assert rc == 0
     assert "OUTERLOOP_TARGET=o/r" in (tmp_path / ".env").read_text()
+
+
+def test_init_local_forge_bootstraps_without_github_credentials(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`--forge local` seeds a bare repository under the state root and writes
+    no GitHub credential. Re-running init never replaces an existing forge."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "README.md").write_text("seed\n")
+    git = ["git", "-C", str(seed)]
+    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run(
+        [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"], check=True
+    )
+    state = tmp_path / "state"
+    argv = [
+        "--yes",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--root",
+        str(state),
+        "--forge",
+        "local",
+        "--forge-source",
+        str(seed),
+        "--claude-model",
+        "claude-x",
+    ]
+    assert init.main(argv) == 0
+    env = (tmp_path / "config" / ".env").read_text()
+    assert "OUTERLOOP_FORGE=local" in env
+    assert f"OUTERLOOP_ROOT={state}" in env
+    assert "OUTERLOOP_PAT_FILE" not in env and "OUTERLOOP_GITHUB_APP_FILE" not in env
+    repository = state / "forge" / "o" / "r.git"
+    assert repository.is_dir()
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # a re-run refreshes the settings and leaves the forge repository alone
+    assert init.main([*argv, "--force"]) == 0
+    assert "left unchanged" in capsys.readouterr().out
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == head
+    )
+
+
+def test_init_local_forge_writes_the_state_root_it_bootstrapped_under(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`OUTERLOOP_ROOT` from the environment may be the only root the bootstrap
+    sees; the config must record it, or a later start without the variable
+    opens a different root than the forge repository lives under."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    state = tmp_path / "state"
+    monkeypatch.setenv("OUTERLOOP_ROOT", str(state))
+    rc = init.main(
+        [
+            "--yes",
+            "--compute",
+            "local",
+            "--target",
+            "o/r",
+            "--forge",
+            "local",
+            "--claude-model",
+            "claude-x",
+        ]
+    )
+    assert rc == 0
+    env = (tmp_path / "config" / ".env").read_text()
+    assert f"OUTERLOOP_ROOT={state.resolve()}" in env
+    assert (state / "forge" / "o" / "r.git").is_dir()
+    # the variable was only the bootstrap's source; the file now carries it
+    monkeypatch.delenv("OUTERLOOP_ROOT")
+    assert f"OUTERLOOP_ROOT={state.resolve()}" in (tmp_path / "config" / ".env").read_text()
 
 
 def test_init_interactive_declined_overwrite_keeps_the_config(tmp_path: Path, monkeypatch) -> None:
@@ -1039,6 +1129,57 @@ def test_focused_github_app_preserves_deployment_env(tmp_path, monkeypatch, comp
         assert result.get(key) == value, key
     assert "OUTERLOOP_PAT_FILE" not in result
     assert result["OUTERLOOP_GITHUB_APP_FILE"] == str(app_json)
+
+
+def test_focused_github_app_drops_a_preserved_local_forge(tmp_path, monkeypatch):
+    """`--github-app` means GitHub: updating a local deployment must not keep
+    OUTERLOOP_FORGE=local beside the GitHub credentials it writes."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    path = tmp_path / ".env"
+    path.write_text(
+        "OUTERLOOP_COMPUTE=local\n"
+        "OUTERLOOP_TARGET=o/r\n"
+        "OUTERLOOP_ROOT=/shared/state\n"
+        "OUTERLOOP_FORGE=local\n"
+        "OUTERLOOP_CLAUDE_MODEL=claude-x\n"
+    )
+    app_json = tmp_path / "github_app.myapp.json"
+    app_json.write_text(json.dumps({"app_id": 1, "installation_id": 7, "private_key": "/k.pem"}))
+    monkeypatch.setattr("outerloop.appauth.app_provider_from_file", lambda path: object())
+    monkeypatch.setattr(
+        init, "app_permission_gaps", lambda *a: init.AppPermissionGaps((), "", "", "", known=True)
+    )
+    assert init.main(["--yes", "--force", "--github-app"]) == 0
+    result = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    assert "OUTERLOOP_FORGE" not in result
+    assert result["OUTERLOOP_GITHUB_APP_FILE"] == str(app_json)
+
+
+def test_init_local_forge_records_the_configured_kernel_login(tmp_path, monkeypatch):
+    """The bootstrap reads OUTERLOOP_BOT_LOGIN; the .env must carry it too, or
+    once the shell variable is gone the tick posts as the default `outerloop`."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setenv("OUTERLOOP_BOT_LOGIN", "lab-kernel")
+    state = tmp_path / "state"
+    rc = init.main(
+        [
+            "--yes",
+            "--compute",
+            "local",
+            "--target",
+            "o/r",
+            "--root",
+            str(state),
+            "--forge",
+            "local",
+            "--claude-model",
+            "claude-x",
+        ]
+    )
+    assert rc == 0
+    assert "OUTERLOOP_BOT_LOGIN=lab-kernel" in (tmp_path / "config" / ".env").read_text()
+    monkeypatch.delenv("OUTERLOOP_BOT_LOGIN")
+    assert "OUTERLOOP_BOT_LOGIN=lab-kernel" in (tmp_path / "config" / ".env").read_text()
 
 
 def test_whitespace_claude_model_prompts(tmp_path, monkeypatch):

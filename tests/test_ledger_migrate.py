@@ -124,6 +124,29 @@ def test_cli_dispatch_and_redaction(monkeypatch, capsys):
     assert "secret-token" not in capsys.readouterr().out
 
 
+def test_cli_passes_the_configured_state_root_to_a_local_forge(monkeypatch, capsys):
+    """A local forge configured only in the .env carries its root there; the
+    process environment need not export it."""
+    monkeypatch.delenv("OUTERLOOP_ROOT", raising=False)
+    monkeypatch.delenv("OUTERLOOP_FORGE", raising=False)
+    monkeypatch.setattr(
+        "outerloop.ledger_migrate.env_file_values",
+        lambda **kw: {"OUTERLOOP_FORGE": "local", "OUTERLOOP_ROOT": "/srv/state"},
+    )
+    seen = {}
+
+    def build(*args, **kwargs):
+        seen.update(kwargs)
+        return fake()
+
+    monkeypatch.setattr("outerloop.ledger_migrate.forge_from_env", build)
+    argv = ["migrate-ledger", "--target", "org/repo", "--main-sha", PIN, "--dry-run"]
+    assert main(argv) == 0
+    assert seen["backend"] == "local"
+    assert seen["root"] == "/srv/state"
+    assert "provenance unknown" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("error", [ValueError, LedgerReadError, LedgerWriteError])
 def test_cli_reports_local_errors(monkeypatch, capsys, error):
     monkeypatch.setattr("outerloop.ledger_migrate.env_file_values", lambda **kw: {})

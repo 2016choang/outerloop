@@ -22,6 +22,7 @@ world-writable, or it is refused.
 | [`harness`](#harness) | inspect or upgrade harness installations |
 | [`tick`](#tick) | run one tick now, or keep ticking in the foreground |
 | [`status`](#status) | show local runs and endpoint outages, read-only |
+| [`pr`](#pr) | list, comment on, merge or close local forge pull requests |
 | [`limits`](#limits) | show live operator ceilings and fleet GPU usage |
 | [`message`](#message) | leave a note in a run's inbox, delivered at its next wake |
 | [`end`](#end) | request an operator ending at the next tick |
@@ -66,6 +67,7 @@ files. See [the install guide](../install.md) for the whole procedure.
 
 ```
 outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
+              [--forge {github,local}] [--forge-source FORGE_SOURCE]
               [--account ACCOUNT] [--partition PARTITION] [--pat-file PAT_FILE]
               [--github-app] [--app-name APP_NAME] [--org ORG]
               [--author-backend AUTHOR_BACKEND] [--no-install-harness]
@@ -78,7 +80,9 @@ outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
 | --- | --- | --- |
 | `--compute` | prompted | `slurm` or `local` |
 | `--target` | prompted | the repo the agents work on, `owner/repo` |
-| `--root` | prompted | Slurm state root on the shared filesystem |
+| `--root` | prompted | state root; on Slurm it must be on the shared filesystem |
+| `--forge` | prompted | `github`, or `local` for a bare repository under the state root |
+| `--forge-source` | empty | with `--forge local`: a repository path or URL to seed from |
 | `--account` | blank | Slurm account; blank bills your default association |
 | `--partition` | blank | Slurm partition; blank is Slurm's default, `a,b` a list |
 | `--pat-file` | prompted | path to an existing file holding a PAT |
@@ -161,6 +165,32 @@ outerloop status [--root ROOT] [--json]
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--json` | off | print structured JSON instead of text |
+
+## pr
+
+Reviews and merges pull requests on a local deployment
+(`OUTERLOOP_FORGE=local`). It reads the settings the way `status` does, and
+refuses on a GitHub deployment: use GitHub there.
+
+```
+outerloop pr list   [--root ROOT] [--target TARGET]
+outerloop pr show   N [--root ROOT] [--target TARGET]
+outerloop pr comment N [TEXT ...] [--file FILE] [--root ROOT] [--target TARGET]
+outerloop pr merge  N [--root ROOT] [--target TARGET]
+outerloop pr close  N [--root ROOT] [--target TARGET]
+```
+
+| Subcommand | What it does |
+| --- | --- |
+| `list` | pull requests in number order, with state, head, base and title |
+| `show N` | the record and its comment thread |
+| `comment N` | append a comment written as you, with owner standing |
+| `merge N` | merge at the current head, refusing if it moved or conflicts |
+| `close N` | close the pull request |
+
+`--root` defaults to `OUTERLOOP_ROOT`, then the settings file, then
+`~/.outerloop`. `--target` defaults to `OUTERLOOP_TARGET`. The command needs
+access to the shared filesystem that holds the bare repository.
 
 ## limits
 

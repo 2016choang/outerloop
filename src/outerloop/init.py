@@ -31,7 +31,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from outerloop.cli import ENV_FILE, StartError, env_file_values, operator_env_file
+from outerloop.cli import (
+    ENV_FILE,
+    StartError,
+    default_local_root,
+    env_file_values,
+    operator_env_file,
+)
 from outerloop.harness import HARNESS_INSTALL, default_binary
 from outerloop.hermes_install import hermes_ready
 from outerloop.image import ensure_image
@@ -50,6 +56,7 @@ AUTHOR_BACKENDS = ("claude", "codex", "hermes")
 class InitAnswers:
     compute: str  # "slurm" | "local"
     target: str  # "owner/repo"
+    forge: str = "github"  # "github" | "local"
     root: str = ""  # Slurm state root on the shared filesystem
     account: str = ""  # Slurm account (optional; unset -> the default association)
     partition: str = ""  # Slurm partition (optional; unset -> Slurm default)
@@ -78,6 +85,10 @@ def render_env(
     target → auth → author to read top-to-bottom like the setup itself. Auth is
     an App file (`--github-app`) or a PAT file, never both."""
     lines = [f"OUTERLOOP_COMPUTE={a.compute}"]
+    if a.forge == "local":
+        # github is the default and stays unwritten, so an existing .env that
+        # never named a forge keeps reading the same way
+        lines.append("OUTERLOOP_FORGE=local")
     if a.compute == "slurm":
         lines.append(f"OUTERLOOP_ROOT={a.root}")
         if a.account:  # optional: unset bills the caller's default association
@@ -87,6 +98,10 @@ def render_env(
         # the checkout stays put until the operator upgrades; `release` follows
         # the release tags, `main` every merge (docs/install.md)
         lines.append("OUTERLOOP_AUTO_UPDATE=off")
+    elif a.root:
+        # a local forge repository lives under the state root; recording an
+        # explicit one keeps `start` looking where `init` bootstrapped
+        lines.append(f"OUTERLOOP_ROOT={a.root}")
     if a.image:
         lines.append(f"OUTERLOOP_IMAGE={a.image}")
     elif a.uncontained:
@@ -272,7 +287,12 @@ def write_author_key(backend: str, key: str, *, config_dir: Path = CONFIG_DIR) -
 
 
 def write_config(
-    a: InitAnswers, token: str, pat_file: str, *, config_dir: Path = CONFIG_DIR
+    a: InitAnswers,
+    token: str,
+    pat_file: str,
+    *,
+    config_dir: Path = CONFIG_DIR,
+    bot_login: str = "",
 ) -> tuple[Path, Path | None]:
     """Write the PAT file (only when a token is pasted) and the `.env`, both
     owner-only (0600) — `start`/`tick_deploy` refuse a group/world-readable
@@ -288,7 +308,7 @@ def write_config(
         written_pat = pat_path
         pat_file = str(pat_path)
     env_path = operator_env_file(config_dir / ENV_FILE.name)
-    write_private(env_path, render_env(a, pat_file))
+    write_private(env_path, render_env(a, pat_file, bot_login=bot_login))
     return env_path, written_pat
 
 
@@ -522,14 +542,26 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
                 preserved[key] = os.environ[key]
         if args.author_key_file:
             preserved.pop(author_key_env(backend), None)
-        for key in ("OUTERLOOP_PAT_FILE", "OUTERLOOP_GITHUB_APP_FILE", "OUTERLOOP_BOT_LOGIN"):
+        for key in (
+            "OUTERLOOP_PAT_FILE",
+            "OUTERLOOP_GITHUB_APP_FILE",
+            "OUTERLOOP_BOT_LOGIN",
+            # the App path means GitHub: a preserved local selection would
+            # leave the deployment on the local forge while writing GitHub
+            # credentials
+            "OUTERLOOP_FORGE",
+        ):
             preserved.pop(key, None)
     compute = args.compute or (_ask("Compute: slurm or local", "slurm") if interactive else "slurm")
     compute = compute.lower()
     target = args.target or (_ask("Target repo (owner/repo)", required=True) if interactive else "")
-    root = account = partition = ""
+    # The choice is asked with the auth question in main: a supplied PAT or
+    # App implies GitHub, and the local forge has no credential to collect.
+    forge = (args.forge or "github").strip().lower()
+    root = args.root or ""
+    account = partition = ""
     if compute == "slurm":
-        root = args.root or (
+        root = root or (
             _ask("Slurm state root (shared filesystem)", required=True) if interactive else ""
         )
         account = args.account or (
@@ -562,6 +594,7 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
     answers = InitAnswers(
         compute=compute,
         target=target,
+        forge=forge,
         root=root,
         account=account,
         partition=partition,
@@ -801,7 +834,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--compute", choices=["slurm", "local"], help="where the loop runs")
     parser.add_argument("--target", help="the repo the agents work on, owner/repo")
-    parser.add_argument("--root", help="Slurm state root on the shared filesystem")
+    parser.add_argument(
+        "--forge",
+        choices=["github", "local"],
+        help="code host: github (default), or local for a bare repository on this filesystem",
+    )
+    parser.add_argument(
+        "--forge-source",
+        dest="forge_source",
+        help="with --forge local: a repository path or URL to seed the bare repository from "
+        "(default: start empty)",
+    )
+    parser.add_argument(
+        "--root",
+        help="state root (on Slurm, on the shared filesystem; a local forge lives under it)",
+    )
     parser.add_argument(
         "--account", help="Slurm account (optional; unset bills your default association)"
     )
@@ -900,6 +947,15 @@ def main(argv: list[str] | None = None) -> int:
             f"outerloop init: author backend must be one of {', '.join(AUTHOR_BACKENDS)}",
             file=sys.stderr,
         )
+        return 2
+    if answers.forge not in ("github", "local"):
+        print("outerloop init: --forge must be github or local", file=sys.stderr)
+        return 2
+    if answers.forge != "github" and args.github_app:
+        print("outerloop init: --github-app needs the github forge", file=sys.stderr)
+        return 2
+    if args.forge_source and answers.forge != "local":
+        print("outerloop init: --forge-source needs --forge local", file=sys.stderr)
         return 2
     if not answers.claude_model and not args.github_app:
         # The focused --github-app run preserves existing deployment settings;
@@ -1071,6 +1127,67 @@ def main(argv: list[str] | None = None) -> int:
         if error:
             print(f"outerloop init: {error}; configure Hermes and rerun init", file=sys.stderr)
             return 2
+
+    if not args.forge and not args.github_app and not pat_file and interactive:
+        # The code host is asked with the credential question it replaces; a
+        # supplied PAT or App already says GitHub.
+        choice = _ask(
+            "Code host — [github] GitHub, or [local] a bare repository on this filesystem",
+            "github",
+        ).lower()
+        if choice.startswith("l"):
+            answers.forge = "local"
+
+    if answers.forge == "local":
+        # A local deployment has no GitHub credential: it reads and writes a
+        # bare repository under the state root. Bootstrap it now, before
+        # writing settings, so a bad source leaves the deployment untouched.
+        from outerloop.forge_local import (
+            DEFAULT_LOCAL_IDENTITY,
+            bootstrap_local_repo,
+            local_repo_path,
+        )
+        from outerloop.github import GitError
+
+        configured_root = answers.root or os.environ.get("OUTERLOOP_ROOT", "").strip()
+        state_root = (
+            Path(configured_root).expanduser()
+            if configured_root
+            else default_local_root(os.environ)
+        ).resolve()
+        # Record the root the forge was bootstrapped under: `OUTERLOOP_ROOT`
+        # from the environment set up this run, and a later start without it
+        # must not open some other root.
+        answers.root = str(state_root)
+        forge_root = state_root / "forge"
+        repository = local_repo_path(forge_root, answers.target)
+        # the bootstrap needs an identity; a configured one is also recorded so
+        # the tick keeps posting as it once the shell variable is gone
+        login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
+        if repository.exists():
+            print(f"forge repository already at {repository}; left unchanged")
+        else:
+            try:
+                bootstrap_local_repo(
+                    forge_root,
+                    answers.target,
+                    args.forge_source or None,
+                    bot_login=login or DEFAULT_LOCAL_IDENTITY,
+                )
+            except (OSError, ValueError, GitError) as exc:
+                print(
+                    f"outerloop init: could not create the forge repository: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            print(f"created forge repository at {repository}")
+        env_path, _ = write_config(answers, "", "", config_dir=_env_path().parent, bot_login=login)
+        print(f"wrote {env_path}")
+        _claude_model_hint(answers)
+        _author_key_hint(answers)
+        _harness_hint(answers)
+        print("next: outerloop start")
+        return 0
 
     # The App is the recommended credential (scoped, revocable, no plaintext
     # token); the PAT is the fallback. Offer it first when interactive.

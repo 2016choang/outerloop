@@ -146,19 +146,6 @@ def _entry_at(repo: Path, ref: str, path: str) -> tuple[str, str, str] | None:
     return None
 
 
-def _flat_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
-    """Every entry of a tree by path (recursive)."""
-    result = _git(repo, ["ls-tree", "-r", "-z", "--full-tree", tree])
-    entries: dict[str, tuple[str, str, str]] = {}
-    for record in result.stdout.split(b"\0"):
-        if not record:
-            continue
-        meta, _, name = record.partition(b"\t")
-        mode, kind, sha = meta.decode().split(" ")
-        entries[os.fsdecode(name)] = (mode, kind, sha)
-    return entries
-
-
 def _direct_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
     """One tree's direct children by name."""
     result = _git(repo, ["ls-tree", "-z", tree])
@@ -680,19 +667,28 @@ class LocalForge:
                 raise GitError(f"record {name} is not UTF-8 text") from exc
         return files
 
-    def _files_at(self, repo: str, ref: str) -> dict[str, str]:
-        """Every file in `ref`'s tree as text; {} for a missing ref. A broken
-        ref or unreadable blob raises rather than reading as an empty tree.
-        (Record writes need the whole set; reads take only their paths.)"""
-        if not ref:
+    def _files_for(self, repo: str, ref: str, paths: Sequence[str]) -> dict[str, str]:
+        """Only the named files in `ref`'s tree as text; {} for a missing ref
+        or an absent path. A broken ref or unreadable blob raises rather than
+        reading as an empty tree. A record write names the records its
+        `mutate` reads, so it never loads every record in the tree."""
+        if not ref or not paths:
             return {}
+        wanted = set(paths)
         path = self.repo_path(repo)
         tree = self._tree_at(repo, ref)
-        shas = {
-            name: sha
-            for name, (_mode, kind, sha) in _flat_tree(path, tree).items()
-            if kind == "blob"
-        }
+        found = _git(path, ["ls-tree", "-z", tree, "--", *sorted(wanted)])
+        shas: dict[str, str] = {}
+        for record in found.stdout.split(b"\0"):
+            if not record:
+                continue
+            meta, _, raw_name = record.partition(b"\t")
+            name = os.fsdecode(raw_name)
+            if name not in wanted:
+                continue
+            _mode, kind, sha = meta.decode().split(" ")
+            if kind == "blob":
+                shas[name] = sha
         return self._blobs(repo, shas)
 
     def _blob_at(self, repo: str, ref: str, path: str) -> str | None:
@@ -751,18 +747,21 @@ class LocalForge:
         repo: str,
         message: str,
         mutate: Callable[[dict[str, str]], dict[str, str] | None],
+        paths: Sequence[str],
     ) -> None:
         """Apply `mutate` to the records as ONE compare-and-swap commit.
 
-        `mutate` receives the current files and returns the files to write
-        (or None for no change). A lost race re-reads the new tip and runs
-        `mutate` again, a few times, before failing: no writer's change is
-        silently dropped."""
+        `paths` names every record `mutate` reads (and `counters.json` when it
+        allocates a number or a comment id); only those blobs are read, never
+        the whole tree. `mutate` receives the current files and returns the
+        files to write (or None for no change). A lost race re-reads the new
+        tip and runs `mutate` again, a few times, before failing: no writer's
+        change is silently dropped."""
         if self.dry_run:
             return
         for _ in range(RECORDS_WRITE_ATTEMPTS):
             head = self._ref_head(repo, RECORDS_REF)
-            changes = mutate(self._files_at(repo, head))
+            changes = mutate(self._files_for(repo, head, paths))
             if changes is None:
                 return
             commit = self._commit_files(repo, changes, head, message)
@@ -1018,7 +1017,7 @@ class LocalForge:
                 self._remember_head(record, head_sha)
             return {self._pull_path(number): self._dump(self._with_merge(record, sha))}
 
-        self._update_records(repo, f"records: merge #{number}", mutate)
+        self._update_records(repo, f"records: merge #{number}", mutate, [self._pull_path(number)])
 
     # -- pull requests -------------------------------------------------------
 
@@ -1075,7 +1074,7 @@ class LocalForge:
                 self._pull_path(number): self._dump(record),
             }
 
-        self._update_records(repo, "records: open pull request", mutate)
+        self._update_records(repo, "records: open pull request", mutate, [COUNTERS_FILE])
         return self.ref_for(repo, "pull", created["number"])[1]
 
     def get_pull_request(self, repo: str, number: int) -> dict[str, Any]:
@@ -1122,6 +1121,20 @@ class LocalForge:
                 return pull
         return None
 
+    def list_pulls(self, repo: str) -> list[dict[str, Any]]:
+        """Every pull-request record, open, merged or closed, in number order.
+
+        Read through `get_pull_request` so a merge made outside the kernel is
+        recorded on first sight, exactly as a run's own read does."""
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return []
+        numbers = sorted(
+            int(record.get("number") or 0)
+            for record in self._json_records(repo, head, "pulls").values()
+        )
+        return [self.get_pull_request(repo, number) for number in numbers if number]
+
     def update_candidate_row(
         self, repo: str, number: int, candidate: float, digits: int | None = None
     ) -> bool:
@@ -1145,7 +1158,9 @@ class LocalForge:
             outcome["rewritten"] = True
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: candidate row on #{number}", mutate)
+        self._update_records(
+            repo, f"records: candidate row on #{number}", mutate, [self._pull_path(number)]
+        )
         return outcome.get("rewritten", True)
 
     def append_pull_body(self, repo: str, number: int, addendum: str) -> None:
@@ -1165,7 +1180,7 @@ class LocalForge:
             self._stamp_head(repo, record)
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: edit #{number}", mutate)
+        self._update_records(repo, f"records: edit #{number}", mutate, [self._pull_path(number)])
 
     def mark_ready_for_review(self, repo: str, number: int, expected_head: str = "") -> None:
         """Mark a draft ready, honoring `expected_head` like the client: a
@@ -1199,7 +1214,9 @@ class LocalForge:
                 self._remember_head(record, live)
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: ready for review #{number}", mutate)
+        self._update_records(
+            repo, f"records: ready for review #{number}", mutate, [self._pull_path(number)]
+        )
 
     def arm_auto_merge_when_review_required(self, repo: str, number: int) -> bool:
         """Nothing is armed locally; the auto dial merges through merge_pull."""
@@ -1361,7 +1378,12 @@ class LocalForge:
                 return {path: self._dump(record)}
             raise GitHubError(404, str(number), "issue or pull request not found")
 
-        self._update_records(repo, f"records: close #{number}", mutate)
+        self._update_records(
+            repo,
+            f"records: close #{number}",
+            mutate,
+            [self._pull_path(number), self._issue_path(number)],
+        )
 
     # -- threads -------------------------------------------------------------
 
@@ -1376,7 +1398,31 @@ class LocalForge:
         return ordered[: max_pages * 100]  # GitHub's cap: max_pages pages of 100, oldest first
 
     def comment(self, repo: str, issue_number: int, body: str) -> None:
-        """Append one comment to an issue's or pull request's thread."""
+        """Append one kernel comment to an issue's or pull request's thread."""
+        self._append_comment(repo, issue_number, body, self.bot_login, "NONE")
+
+    def comment_as(
+        self,
+        repo: str,
+        issue_number: int,
+        body: str,
+        *,
+        author: str,
+        association: str = "OWNER",
+    ) -> None:
+        """Append a comment written by a person (`outerloop pr comment`).
+
+        Records carry the author's standing, so the inbox delivers it to the
+        author as a person's comment: locally only people with write access to
+        the forge directory can reach this path."""
+        author = author.strip()
+        if not author:
+            raise ValueError("a person's comment needs an author")
+        self._append_comment(repo, issue_number, body, author, association)
+
+    def _append_comment(
+        self, repo: str, issue_number: int, body: str, author: str, association: str
+    ) -> None:
         if self.dry_run:
             log.info("[dry-run] comment on %s#%s (%d chars)", repo, issue_number, len(body))
             return
@@ -1392,9 +1438,9 @@ class LocalForge:
             counters["comment"] = comment_id
             record = {
                 "id": comment_id,
-                "user": {"login": self.bot_login},
+                "user": {"login": author},
                 "body": body,
-                "author_association": "NONE",
+                "author_association": association,
                 "created_at": self._now(),
             }
             return {
@@ -1402,7 +1448,12 @@ class LocalForge:
                 self._comment_path(issue_number, comment_id): self._dump(record),
             }
 
-        self._update_records(repo, f"records: comment on #{issue_number}", mutate)
+        self._update_records(
+            repo,
+            f"records: comment on #{issue_number}",
+            mutate,
+            [COUNTERS_FILE, self._pull_path(issue_number), self._issue_path(issue_number)],
+        )
 
     # -- issues --------------------------------------------------------------
 
@@ -1421,7 +1472,8 @@ class LocalForge:
             if wanted and login.casefold() != wanted:
                 continue
             issues.append(record)
-        return sorted(issues, key=lambda i: int(i.get("number") or 0))
+        # GitHub's page cap, in its order: open issues oldest first.
+        return sorted(issues, key=lambda i: int(i.get("number") or 0))[: max_pages * 100]
 
     def create_issue(self, repo: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
         """Open an issue on the shared number sequence; returns its number."""
@@ -1450,7 +1502,7 @@ class LocalForge:
                 self._issue_path(number): self._dump(record),
             }
 
-        self._update_records(repo, "records: open issue", mutate)
+        self._update_records(repo, "records: open issue", mutate, [COUNTERS_FILE])
         return created["number"]
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]:
@@ -1498,6 +1550,10 @@ def bootstrap_local_repo(
             None,
             ["clone", "--bare", "--no-local", str(source), str(dest)],
         )
+        # the seed URL may carry a credential in its userinfo, and every
+        # state-root user can read this config; the forge never fetches from
+        # its seed again
+        _git(dest, ["remote", "remove", "origin"])
         head = _git(dest, ["symbolic-ref", "--short", "HEAD"], check=False)
         branch = head.stdout.strip().decode() or "main"
     else:
