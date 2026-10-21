@@ -8,9 +8,9 @@ import os
 import re
 from dataclasses import replace
 
-from outerloop.appauth import resolve_bot_auth
 from outerloop.cli import env_file_values
-from outerloop.github import GitHubClient, GitHubError
+from outerloop.forge import FORGE_ENV, Forge, forge_from_env
+from outerloop.github import GitHubError
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH, LedgerWriteError
 from outerloop.progress import (
     LEADER_FILE,
@@ -23,7 +23,7 @@ from outerloop.progress import (
 
 
 def migrate_ledger(
-    github: GitHubClient,
+    github: Forge,
     target: str,
     main_sha: str,
     *,
@@ -97,11 +97,10 @@ def migrate_ledger(
 def migrate(args: argparse.Namespace) -> int:
     try:
         settings = {**env_file_values(keys=None), **os.environ}
-        github = GitHubClient(
-            auth=resolve_bot_auth(
-                settings.get("OUTERLOOP_PAT_FILE", ""),
-                settings.get("OUTERLOOP_GITHUB_APP_FILE", ""),
-            )
+        github = forge_from_env(
+            settings.get("OUTERLOOP_PAT_FILE", ""),
+            settings.get("OUTERLOOP_GITHUB_APP_FILE", ""),
+            backend=settings.get(FORGE_ENV, ""),
         )
         table = migrate_ledger(
             github, args.target, args.main_sha, force=args.force, dry_run=args.dry_run

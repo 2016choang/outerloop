@@ -30,7 +30,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -250,6 +250,8 @@ class GitHubClient:
     transport: Transport = field(default=_default_transport)
     raw_transport: Callable[[urllib.request.Request], str] = field(default=_raw_transport)
     dry_run: bool = False
+    # Default branches seen by this client; the tick builds one client per tick.
+    _default_branches: dict[str, str] = field(default_factory=dict, repr=False)
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         request = urllib.request.Request(
@@ -264,6 +266,26 @@ class GitHubClient:
         )
         return self.transport(request)
 
+    def clone_url(self, target: str) -> str:
+        """The canonical HTTPS clone URL for `owner/repo` — the one source of
+        truth for where a run's git pushes go, never the session-writable
+        `remote.origin.url`."""
+        return f"https://github.com/{target}.git"
+
+    def credential(self) -> TokenProvider:
+        """The credential a `Workspace` uses for its network git calls."""
+        return self.auth
+
+    def secrets(self) -> tuple[str, ...]:
+        """Values to redact from logs, records and public text."""
+        token = self.auth.token()
+        return (token,) if token else ()
+
+    def ref_for(self, repo: str, kind: str, ident: int | str) -> tuple[str, str]:
+        """A stable reference for a record and its link on this forge."""
+        segment = "pull" if kind == "pull" else "issues"
+        return f"{repo}#{ident}", f"https://github.com/{repo}/{segment}/{ident}"
+
     @staticmethod
     def _expect_dict(data: Any, path: str) -> dict[str, Any]:
         if not isinstance(data, dict):
@@ -271,8 +293,11 @@ class GitHubClient:
         return data
 
     def default_branch(self, repo: str) -> str:
-        path = f"/repos/{urllib.parse.quote(repo)}"
-        return str(self._expect_dict(self._request("GET", path), path)["default_branch"])
+        if repo not in self._default_branches:
+            path = f"/repos/{urllib.parse.quote(repo)}"
+            data = self._expect_dict(self._request("GET", path), path)
+            self._default_branches[repo] = str(data["default_branch"])
+        return self._default_branches[repo]
 
     def branch_sha(self, repo: str, branch: str) -> str:
         """Read the current branch tip, independently of a PR's recorded base."""
@@ -342,23 +367,6 @@ class GitHubClient:
         if data.get("encoding") != "base64":
             raise GitHubError(200, api_path, f"unreadable encoding {data.get('encoding')!r}")
         return base64.b64decode(data["content"]).decode()
-
-    def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> int | None:
-        if self.dry_run:
-            log.info("[dry-run] create PR %s: %s <- %s (%r)", repo, base, head, title)
-            return None
-        path = f"/repos/{urllib.parse.quote(repo)}/pulls"
-        data = self._expect_dict(
-            self._request("POST", path, {"title": title, "head": head, "base": base, "body": body}),
-            path,
-        )
-        if "number" not in data:
-            raise GitHubError(200, path, f"no PR number in response: {data.get('message')}")
-        return int(data["number"])
-
-    def get_issue(self, repo: str, number: int) -> dict[str, Any]:
-        path = f"/repos/{urllib.parse.quote(repo)}/issues/{number}"
-        return self._expect_dict(self._request("GET", path), path)
 
     def list_open_issues(
         self, repo: str, max_pages: int = 3, creator: str = ""
@@ -724,23 +732,6 @@ class GitHubClient:
         )
         return self.raw_transport(request)
 
-    def get_pull_request_files(
-        self, repo: str, number: int, max_pages: int = 5
-    ) -> list[dict[str, Any]]:
-        """Changed files of a PR (filename, status), following pagination."""
-        out: list[dict[str, Any]] = []
-        for page in range(1, max_pages + 1):
-            path = (
-                f"/repos/{urllib.parse.quote(repo)}/pulls/{number}/files?per_page=100&page={page}"
-            )
-            data = self._request("GET", path)
-            if not isinstance(data, list) or not data:
-                break
-            out.extend(item for item in data if isinstance(item, dict))
-            if len(data) < 100:
-                break
-        return out
-
     def list_directory(self, repo: str, path: str, ref: str) -> list[dict[str, Any]]:
         """Entries of a directory at a ref ([] when absent or not a dir).
 
@@ -835,27 +826,6 @@ class GitHubClient:
                 break
         return items
 
-    def upsert_comment(self, repo: str, issue_number: int, marker: str, body: str) -> None:
-        """Post the comment, or edit the existing one carrying `marker`.
-
-        Keeps the reviewer to one thread per PR however many times it runs.
-        """
-        if self.dry_run:
-            log.info("[dry-run] upsert comment on %s#%s (%d chars)", repo, issue_number, len(body))
-            return
-        for comment in self.list_comments(repo, issue_number):
-            # Only ever edit a bot's own comment: a human who quote-replies
-            # copies the marker, and overwriting their text would be worse
-            # than posting a second thread.
-            author_type = str((comment.get("user") or {}).get("type", ""))
-            if author_type.casefold() != "bot":
-                continue
-            if marker in str(comment.get("body", "")):
-                path = f"/repos/{urllib.parse.quote(repo)}/issues/comments/{int(comment['id'])}"
-                self._request("PATCH", path, {"body": body})
-                return
-        self.comment(repo, issue_number, body)
-
     def create_pr_review(
         self,
         repo: str,
@@ -888,15 +858,19 @@ class GitHubClient:
             payload,
         )
 
-    def create_issue(self, repo: str, title: str, body: str) -> int:
-        """Open an issue; returns its number (0 in dry-run)."""
+    def create_issue(self, repo: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
+        """Open an issue; returns its number (0 in dry-run). Labels are sent
+        only when given, so the plain call is unchanged."""
         if self.dry_run:
             log.info("[dry-run] issue on %s: %s", repo, title)
             return 0
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = list(labels)
         data = self._request(
             "POST",
             f"/repos/{urllib.parse.quote(repo)}/issues",
-            {"title": title, "body": body},
+            payload,
         )
         return int(data.get("number", 0)) if isinstance(data, dict) else 0
 

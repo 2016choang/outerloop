@@ -24,9 +24,9 @@ import logging
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
-from outerloop.appauth import add_credential_args, resolve_bot_auth
+from outerloop.appauth import add_credential_args
 from outerloop.attempt import (
     AttemptOutcome,
     Terminated,
@@ -38,8 +38,8 @@ from outerloop.attempt import (
 )
 from outerloop.contract import Contract, contract_text_in_tree, load_contract
 from outerloop.dispatch import image_file_arg
+from outerloop.forge import Forge, forge_from_env
 from outerloop.github import (
-    GitHubClient,
     TokenProvider,
     Workspace,
     bot_login_from_env,
@@ -374,7 +374,7 @@ def live_steward(
     run_id: str,
     harness: Harness,
     evaluator: StewardEvaluator,
-    github: GitHubClient,
+    github: Forge,
     bot_auth: TokenProvider,
     now: float,
     created: str,
@@ -435,7 +435,7 @@ def live_steward(
     tree_hashes: list[str] = []
     try:
         ws = Workspace.clone_for_channels(
-            f"https://github.com/{config.target}.git",
+            github.clone_url(config.target),
             workspace,
             config.target,
             base_branch,
@@ -828,7 +828,8 @@ def main() -> int:
         parser.error("--image is required (or pass --uncontained explicitly, dev only)")
 
     api_key = role_key(args.key_file)  # steward runs the claude backend
-    bot_auth = resolve_bot_auth(args.pat_file, args.github_app_file)
+    forge = forge_from_env(args.pat_file, args.github_app_file)
+    bot_auth = cast(TokenProvider, forge.credential())
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_id = f"steward-{args.benchmark}-{stamp}"
 
@@ -859,11 +860,11 @@ def main() -> int:
             ),
             spec=spec,
             evaluator=SubprocessEvaluator(container_image=args.image),
-            github=GitHubClient(auth=bot_auth),
+            github=forge,
             bot_auth=bot_auth,
             now=time.time(),
             created=datetime.now(UTC).isoformat(),
-            secrets=(api_key, bot_auth.token()),
+            secrets=(api_key, *forge.secrets()),
             issue_number=args.issue,
             author_key_file=str(Path(args.key_file).expanduser()),
             author_model=args.model,

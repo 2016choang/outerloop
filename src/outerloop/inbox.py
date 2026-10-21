@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outerloop.brief import MAX_COMMENT_CHARS, cap, code_fence
-from outerloop.github import GitHubClient, GitHubError, is_own_login
+from outerloop.forge import Forge
+from outerloop.github import GitHubError, is_own_login
 from outerloop.harness import redact
 from outerloop.markers import has_marker
 from outerloop.verifier import VERIFY_MARKER
@@ -738,7 +739,7 @@ def base_moved_text(tip: str, base: str) -> str:
 def gather_github_messages(
     directory: Path,
     record: RunRecord,
-    github: GitHubClient,
+    github: Forge,
     bot_login: str,
     now: float,
     pr: dict,
@@ -831,7 +832,7 @@ def gather_github_messages(
                 from outerloop.init import app_permission_gaps
 
                 guidance = "App needs checks: read permission"
-                auth = getattr(github, "auth", None)
+                auth = github.credential()
                 if isinstance(auth, AppInstallationTokenProvider):
                     gaps = app_permission_gaps(auth, record.target)
                     if gaps.edit_url and gaps.accept_url:
@@ -857,9 +858,12 @@ def gather_github_messages(
             # the job too and wins when present
             found = re.search(r"/job/(\d+)", str(check.get("details_url") or ""))
             job_id = int(found.group(1)) if found else int(check["id"])
+            # An Actions check run is GitHub-only; a backend without job logs
+            # has none (the local forge's list_check_runs returns nothing).
+            job_log_tail = getattr(github, "job_log_tail", None)
             tail = (
-                github.job_log_tail(record.target, job_id, MAX_COMMENT_CHARS)
-                if app == "github-actions"
+                str(job_log_tail(record.target, job_id, MAX_COMMENT_CHARS))
+                if app == "github-actions" and callable(job_log_tail)
                 else ""
             )
             outcome = "failed" if conclusion == "failure" else f"completed with {conclusion}"

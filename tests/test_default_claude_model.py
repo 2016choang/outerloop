@@ -90,10 +90,10 @@ def _stop(*args, **kwargs):
 
 
 def _run_author_cli(monkeypatch, argv: list[str]) -> argparse.Namespace:
-    """Run the author CLI on argv up to its first side effect (bot auth) and
+    """Run the author CLI on argv up to its first side effect (forge auth) and
     return the namespace as main resolved it."""
     monkeypatch.setattr(attempt, "arm_sigterm_containment", lambda: None)
-    monkeypatch.setattr(attempt, "resolve_bot_auth", _stop)
+    monkeypatch.setattr(attempt, "forge_from_env", _stop)
     captured: dict[str, argparse.Namespace] = {}
 
     def capture(parser, *args, **kwargs):
@@ -388,7 +388,15 @@ def test_resume_cli_uses_pinned_model_without_deployment_model(
     monkeypatch.setattr(attempt, "_attach_run_log", lambda *a: None)
     monkeypatch.setattr(attempt, "_lease_held_by_another_job", lambda *a: "")
     monkeypatch.setattr("outerloop.tick.dispatch_wake_armed", lambda *a: True)
-    monkeypatch.setattr(attempt, "resolve_bot_auth", lambda *a: SimpleNamespace(token=lambda: ""))
+    monkeypatch.setattr(
+        attempt,
+        "forge_from_env",
+        lambda *a: SimpleNamespace(
+            credential=lambda: SimpleNamespace(token=lambda: ""),
+            secrets=lambda: (),
+            clone_url=lambda target: f"https://github.com/{target}.git",
+        ),
+    )
     monkeypatch.setattr(
         runstate,
         "load_record",

@@ -206,7 +206,13 @@ def test_binding_survives_setting_change(deployment, monkeypatch, backend, queue
         )
     seen: dict[str, Any] = {}
     monkeypatch.setattr(
-        attempt, "resolve_bot_auth", lambda *a: SimpleNamespace(token=lambda: "bot")
+        attempt,
+        "forge_from_env",
+        lambda *a: SimpleNamespace(
+            credential=lambda: SimpleNamespace(token=lambda: "bot"),
+            secrets=lambda: ("bot",),
+            clone_url=lambda target: f"https://github.com/{target}.git",
+        ),
     )
     monkeypatch.setattr(attempt, "_dispatch_settings", lambda *a: None)
     monkeypatch.setattr(

@@ -1236,6 +1236,9 @@ def test_branch_is_kept_and_recorded_after_pr_failure(tmp_path, target_repo) -> 
 
     @dataclass
     class FailingGitHub2:
+        def clone_url(self, target) -> str:
+            return f"https://github.com/{target}.git"
+
         def create_pull(self, *a, **k) -> str:
             raise RuntimeError("boom")
 
@@ -2491,7 +2494,7 @@ def _write_parked_candidate(
     monkeypatch.setattr(DispatchSettings, "measurer", lambda self, *a, **k: fake)
     # the wake pushes to the canonical target URL (never the ws git config);
     # point that at this run's local bare so the improved-wake test can push.
-    monkeypatch.setattr("outerloop.attempt.target_clone_url", lambda target: str(bare))
+    monkeypatch.setattr(FakeGitHub, "clone_url", lambda self, target: str(bare))
     return state, run_id
 
 
@@ -3562,7 +3565,7 @@ def _write_parked_author_sleep(
     monkeypatch.setattr(DispatchSettings, "measurer", lambda self, *a, **k: fake)
     # the wake pushes to the canonical target URL (never the ws git config);
     # point that at this run's local bare so an improved wake can push
-    monkeypatch.setattr("outerloop.attempt.target_clone_url", lambda target: str(bare))
+    monkeypatch.setattr(FakeGitHub, "clone_url", lambda self, target: str(bare))
     return state, run_id, wsroot, json_mod
 
 
@@ -5302,7 +5305,7 @@ def _write_parked_line_candidate(tmp_path, monkeypatch, *, values, run_id="tsp-l
     save_record(state, record, 1_000_000.0)
     fake = _FakeMeasurer(values=values)
     monkeypatch.setattr(DispatchSettings, "measurer", lambda self, *a, **k: fake)
-    monkeypatch.setattr("outerloop.attempt.target_clone_url", lambda target: str(bare))
+    monkeypatch.setattr(FakeGitHub, "clone_url", lambda self, target: str(bare))
     return state, run_id
 
 
@@ -6345,8 +6348,12 @@ def test_tick_snapshot_uses_kernel_auth(
 
     monkeypatch.setattr(github_mod, "_run_git", git)
     caplog.set_level("INFO", logger="outerloop.attempt")
-    monkeypatch.setattr(climb_mod, "target_clone_url", lambda target: str(target_repo_lines))
-    github = SimpleNamespace(auth=NoAuth() if has_auth else None)
+    auth = NoAuth() if has_auth else None
+    github = SimpleNamespace(
+        auth=auth,
+        credential=lambda: auth,
+        clone_url=lambda target: str(target_repo_lines),
+    )
     report = sweep(
         state,
         _fake_dispatch().compute,
@@ -6899,7 +6906,7 @@ def test_rewound_base_checkpoints_instead_of_gating(tmp_path, monkeypatch, wake)
     from outerloop.roles import author_spec
 
     target = _seed_target(tmp_path, monkeypatch, CONTRACT_SYSCALLS)
-    monkeypatch.setattr(climb_mod, "target_clone_url", lambda target: str(tmp_path / "origin.git"))
+    monkeypatch.setattr(FakeGitHub, "clone_url", lambda self, target: str(tmp_path / "origin.git"))
     seed = tmp_path / "seed"
     tip = _git(seed, "rev-parse", "HEAD").strip()
     _git(

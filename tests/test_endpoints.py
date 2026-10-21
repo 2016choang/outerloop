@@ -534,7 +534,13 @@ def test_new_kernel_wakes_missing_route_record(tmp_path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        attempt, "resolve_bot_auth", lambda *args: SimpleNamespace(token=lambda: "bot-secret")
+        attempt,
+        "forge_from_env",
+        lambda *args: SimpleNamespace(
+            credential=lambda: SimpleNamespace(token=lambda: "bot-secret"),
+            secrets=lambda: ("bot-secret",),
+            clone_url=lambda target: f"https://github.com/{target}.git",
+        ),
     )
     monkeypatch.setattr(attempt, "_lease_held_by_another_job", lambda *args: "")
     monkeypatch.setattr("outerloop.tick.dispatch_wake_armed", lambda *args: True)

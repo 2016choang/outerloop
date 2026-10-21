@@ -43,6 +43,7 @@ from outerloop.compute import (
 )
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.endpoint_wait import EndpointWaitReason
+from outerloop.forge import Forge, forge_from_env
 from outerloop.gpu_lanes import GpuLane, gpu_lanes_from_env
 from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
 from outerloop.housekeeping import shed_ended_workspaces
@@ -511,9 +512,7 @@ def contract_alarm(
 
 def _client_secrets(github: Any) -> tuple[str, ...]:
     try:
-        token = github.auth.token()
-        if token:
-            return (token,)
+        return tuple(github.secrets())
     except Exception as exc:
         # degraded redaction must not be silent: the error text goes to a
         # public issue, and a renamed auth surface would no-op the redact
@@ -576,8 +575,17 @@ def _base_dial(
     it applies only to a main-based PR of that same target — any other
     target or base is fetched from the PR's own coordinates, and unreadable
     or unparsable means "manual" (never arm on doubt)."""
-    base_ref = str((pr.get("base") or {}).get("ref", "")) or "main"
-    if base_ref == "main" and target == main_target:
+    base_ref = str((pr.get("base") or {}).get("ref", ""))
+    default = ""
+    if not base_ref or target == main_target:  # only these need the default branch
+        try:
+            default = github.default_branch(target)
+        except Exception as exc:
+            log.warning("default-branch read failed for %s: %s", target, exc)
+            if not base_ref:
+                return "manual"
+    base_ref = base_ref or default
+    if default and base_ref == default and target == main_target:
         return str(getattr(main_contract, "merge", "manual"))
     try:
         from outerloop.contract import load_contract
@@ -1619,7 +1627,8 @@ def _sweep_running(
                 now,
                 # an operator ending tells the requesting issue, like every other path
                 github if requested else None,
-                auth=getattr(github, "auth", None),
+                forge=github,
+                auth=github.credential() if github is not None else None,
                 bot_login=bot_login,
             )
             # every ending produces a report — but never clobber one the
@@ -1766,7 +1775,8 @@ def _sweep_one(
                 STUCK,
                 f"{record.wake_attempts} wake attempts without progress",
                 now,
-                auth=getattr(github, "auth", None),
+                forge=github,
+                auth=github.credential() if github is not None else None,
                 bot_login=bot_login,
             )
         stuck.append(record.run_id)
@@ -2060,7 +2070,9 @@ def tick(
             try:
                 from outerloop.contract import load_contract
 
-                raw = _contract_text(github, service_spec.target, "main")
+                raw = _contract_text(
+                    github, service_spec.target, github.default_branch(service_spec.target)
+                )
                 if raw is not None:
                     contract = load_contract(raw, service_spec.target)
                     contract_error = None
@@ -2180,8 +2192,6 @@ def service_syncs(
     URL (never the workspace's mutable remote config) and only refs/remotes
     are written — safe next to the session's local git use. Best-effort per
     run; a failure leaves the request standing for the next cycle."""
-    from outerloop.appauth import resolve_bot_auth
-    from outerloop.attempt import target_clone_url
     from outerloop.github import Workspace
     from outerloop.syscall import mark_synced, sync_requested
 
@@ -2197,14 +2207,11 @@ def service_syncs(
         if requested_at is None:
             continue
         try:
+            forge = forge_from_env(spec.pat_file, spec.github_app_file)
             ws = Workspace(
                 root=workspace,
-                auth=(
-                    resolve_bot_auth(spec.pat_file, spec.github_app_file)
-                    if (spec.pat_file or spec.github_app_file)
-                    else None
-                ),
-                url=target_clone_url(record.target),
+                auth=(forge.credential() if (spec.pat_file or spec.github_app_file) else None),
+                url=forge.clone_url(record.target),
             )
             ws.configure_channels(record.channels, record.agent_id)
             ws.fetch_origin()
@@ -3227,7 +3234,7 @@ def service_intake(
         return None
     try:
         if contract is None:
-            contract_raw = _contract_text(github, target, "main")
+            contract_raw = _contract_text(github, target, github.default_branch(target))
             if contract_raw is None:
                 return None
             contract = load_contract(contract_raw, target)
@@ -3615,7 +3622,7 @@ def startup_image() -> str:
 
 def _service_spec_from_env(
     root: Path, *, gpu_lanes: dict[str, GpuLane] | None = None
-) -> tuple[Any, ServiceSpec | None]:
+) -> tuple[Forge | None, ServiceSpec | None]:
     """GitHub client + ServiceSpec from the chain environment, or Nones when
     the environment is incomplete (the tick then runs without parked
     servicing, and logs what is absent)."""
@@ -3666,11 +3673,8 @@ def _service_spec_from_env(
         os.environ.pop("OUTERLOOP_IMAGE", None)
         image, image_ok = "", True
     if (pat_file or app_file) and home and target and bot_login and image_ok:
-        from outerloop.appauth import resolve_bot_auth
-        from outerloop.github import GitHubClient
-
         try:
-            github = GitHubClient(auth=resolve_bot_auth(pat_file, app_file))
+            github = forge_from_env(pat_file, app_file)
             service_spec = ServiceSpec(
                 account=account,
                 qos=qos,

@@ -80,7 +80,13 @@ def test_attempt_builds_effective_hermes_author(hermes_config, monkeypatch, tmp_
         argv += ["--author-backend", "hermes", "--target", "o/r", "--benchmark", "b"]
     monkeypatch.setattr("sys.argv", argv)
     monkeypatch.setattr(
-        attempt, "resolve_bot_auth", lambda *a: SimpleNamespace(token=lambda: "bot")
+        attempt,
+        "forge_from_env",
+        lambda *a: SimpleNamespace(
+            credential=lambda: SimpleNamespace(token=lambda: "bot"),
+            secrets=lambda: ("bot",),
+            clone_url=lambda target: f"https://github.com/{target}.git",
+        ),
     )
     monkeypatch.setattr(attempt, "model_key", lambda *a: "author-key")
     monkeypatch.setattr(attempt, "_lease_held_by_another_job", lambda *a: "")
