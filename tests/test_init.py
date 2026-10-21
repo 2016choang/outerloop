@@ -491,6 +491,37 @@ def test_init_local_forge_bootstraps_without_github_credentials(
     )
 
 
+def test_init_local_forge_writes_the_state_root_it_bootstrapped_under(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`OUTERLOOP_ROOT` from the environment may be the only root the bootstrap
+    sees; the config must record it, or a later start without the variable
+    opens a different root than the forge repository lives under."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    state = tmp_path / "state"
+    monkeypatch.setenv("OUTERLOOP_ROOT", str(state))
+    rc = init.main(
+        [
+            "--yes",
+            "--compute",
+            "local",
+            "--target",
+            "o/r",
+            "--forge",
+            "local",
+            "--claude-model",
+            "claude-x",
+        ]
+    )
+    assert rc == 0
+    env = (tmp_path / "config" / ".env").read_text()
+    assert f"OUTERLOOP_ROOT={state.resolve()}" in env
+    assert (state / "forge" / "o" / "r.git").is_dir()
+    # the variable was only the bootstrap's source; the file now carries it
+    monkeypatch.delenv("OUTERLOOP_ROOT")
+    assert f"OUTERLOOP_ROOT={state.resolve()}" in (tmp_path / "config" / ".env").read_text()
+
+
 def test_init_interactive_declined_overwrite_keeps_the_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     (tmp_path / ".env").write_text(KEEP)

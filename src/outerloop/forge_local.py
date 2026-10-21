@@ -146,19 +146,6 @@ def _entry_at(repo: Path, ref: str, path: str) -> tuple[str, str, str] | None:
     return None
 
 
-def _flat_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
-    """Every entry of a tree by path (recursive)."""
-    result = _git(repo, ["ls-tree", "-r", "-z", "--full-tree", tree])
-    entries: dict[str, tuple[str, str, str]] = {}
-    for record in result.stdout.split(b"\0"):
-        if not record:
-            continue
-        meta, _, name = record.partition(b"\t")
-        mode, kind, sha = meta.decode().split(" ")
-        entries[os.fsdecode(name)] = (mode, kind, sha)
-    return entries
-
-
 def _direct_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
     """One tree's direct children by name."""
     result = _git(repo, ["ls-tree", "-z", tree])
@@ -680,19 +667,28 @@ class LocalForge:
                 raise GitError(f"record {name} is not UTF-8 text") from exc
         return files
 
-    def _files_at(self, repo: str, ref: str) -> dict[str, str]:
-        """Every file in `ref`'s tree as text; {} for a missing ref. A broken
-        ref or unreadable blob raises rather than reading as an empty tree.
-        (Record writes need the whole set; reads take only their paths.)"""
-        if not ref:
+    def _files_for(self, repo: str, ref: str, paths: Sequence[str]) -> dict[str, str]:
+        """Only the named files in `ref`'s tree as text; {} for a missing ref
+        or an absent path. A broken ref or unreadable blob raises rather than
+        reading as an empty tree. A record write names the records its
+        `mutate` reads, so it never loads every record in the tree."""
+        if not ref or not paths:
             return {}
+        wanted = set(paths)
         path = self.repo_path(repo)
         tree = self._tree_at(repo, ref)
-        shas = {
-            name: sha
-            for name, (_mode, kind, sha) in _flat_tree(path, tree).items()
-            if kind == "blob"
-        }
+        found = _git(path, ["ls-tree", "-z", tree, "--", *sorted(wanted)])
+        shas: dict[str, str] = {}
+        for record in found.stdout.split(b"\0"):
+            if not record:
+                continue
+            meta, _, raw_name = record.partition(b"\t")
+            name = os.fsdecode(raw_name)
+            if name not in wanted:
+                continue
+            _mode, kind, sha = meta.decode().split(" ")
+            if kind == "blob":
+                shas[name] = sha
         return self._blobs(repo, shas)
 
     def _blob_at(self, repo: str, ref: str, path: str) -> str | None:
@@ -751,18 +747,21 @@ class LocalForge:
         repo: str,
         message: str,
         mutate: Callable[[dict[str, str]], dict[str, str] | None],
+        paths: Sequence[str],
     ) -> None:
         """Apply `mutate` to the records as ONE compare-and-swap commit.
 
-        `mutate` receives the current files and returns the files to write
-        (or None for no change). A lost race re-reads the new tip and runs
-        `mutate` again, a few times, before failing: no writer's change is
-        silently dropped."""
+        `paths` names every record `mutate` reads (and `counters.json` when it
+        allocates a number or a comment id); only those blobs are read, never
+        the whole tree. `mutate` receives the current files and returns the
+        files to write (or None for no change). A lost race re-reads the new
+        tip and runs `mutate` again, a few times, before failing: no writer's
+        change is silently dropped."""
         if self.dry_run:
             return
         for _ in range(RECORDS_WRITE_ATTEMPTS):
             head = self._ref_head(repo, RECORDS_REF)
-            changes = mutate(self._files_at(repo, head))
+            changes = mutate(self._files_for(repo, head, paths))
             if changes is None:
                 return
             commit = self._commit_files(repo, changes, head, message)
@@ -1018,7 +1017,7 @@ class LocalForge:
                 self._remember_head(record, head_sha)
             return {self._pull_path(number): self._dump(self._with_merge(record, sha))}
 
-        self._update_records(repo, f"records: merge #{number}", mutate)
+        self._update_records(repo, f"records: merge #{number}", mutate, [self._pull_path(number)])
 
     # -- pull requests -------------------------------------------------------
 
@@ -1075,7 +1074,7 @@ class LocalForge:
                 self._pull_path(number): self._dump(record),
             }
 
-        self._update_records(repo, "records: open pull request", mutate)
+        self._update_records(repo, "records: open pull request", mutate, [COUNTERS_FILE])
         return self.ref_for(repo, "pull", created["number"])[1]
 
     def get_pull_request(self, repo: str, number: int) -> dict[str, Any]:
@@ -1159,7 +1158,9 @@ class LocalForge:
             outcome["rewritten"] = True
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: candidate row on #{number}", mutate)
+        self._update_records(
+            repo, f"records: candidate row on #{number}", mutate, [self._pull_path(number)]
+        )
         return outcome.get("rewritten", True)
 
     def append_pull_body(self, repo: str, number: int, addendum: str) -> None:
@@ -1179,7 +1180,7 @@ class LocalForge:
             self._stamp_head(repo, record)
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: edit #{number}", mutate)
+        self._update_records(repo, f"records: edit #{number}", mutate, [self._pull_path(number)])
 
     def mark_ready_for_review(self, repo: str, number: int, expected_head: str = "") -> None:
         """Mark a draft ready, honoring `expected_head` like the client: a
@@ -1213,7 +1214,9 @@ class LocalForge:
                 self._remember_head(record, live)
             return {self._pull_path(number): self._dump(record)}
 
-        self._update_records(repo, f"records: ready for review #{number}", mutate)
+        self._update_records(
+            repo, f"records: ready for review #{number}", mutate, [self._pull_path(number)]
+        )
 
     def arm_auto_merge_when_review_required(self, repo: str, number: int) -> bool:
         """Nothing is armed locally; the auto dial merges through merge_pull."""
@@ -1375,7 +1378,12 @@ class LocalForge:
                 return {path: self._dump(record)}
             raise GitHubError(404, str(number), "issue or pull request not found")
 
-        self._update_records(repo, f"records: close #{number}", mutate)
+        self._update_records(
+            repo,
+            f"records: close #{number}",
+            mutate,
+            [self._pull_path(number), self._issue_path(number)],
+        )
 
     # -- threads -------------------------------------------------------------
 
@@ -1440,7 +1448,12 @@ class LocalForge:
                 self._comment_path(issue_number, comment_id): self._dump(record),
             }
 
-        self._update_records(repo, f"records: comment on #{issue_number}", mutate)
+        self._update_records(
+            repo,
+            f"records: comment on #{issue_number}",
+            mutate,
+            [COUNTERS_FILE, self._pull_path(issue_number), self._issue_path(issue_number)],
+        )
 
     # -- issues --------------------------------------------------------------
 
@@ -1459,7 +1472,8 @@ class LocalForge:
             if wanted and login.casefold() != wanted:
                 continue
             issues.append(record)
-        return sorted(issues, key=lambda i: int(i.get("number") or 0))
+        # GitHub's page cap, in its order: open issues oldest first.
+        return sorted(issues, key=lambda i: int(i.get("number") or 0))[: max_pages * 100]
 
     def create_issue(self, repo: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
         """Open an issue on the shared number sequence; returns its number."""
@@ -1488,7 +1502,7 @@ class LocalForge:
                 self._issue_path(number): self._dump(record),
             }
 
-        self._update_records(repo, "records: open issue", mutate)
+        self._update_records(repo, "records: open issue", mutate, [COUNTERS_FILE])
         return created["number"]
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]:

@@ -992,29 +992,56 @@ def pr(args: argparse.Namespace) -> int:
     from outerloop.forge_local import LocalForge
     from outerloop.github import GitError, GitHubError
 
-    values = env_file_values(keys=("OUTERLOOP_FORGE", "OUTERLOOP_TARGET", "OUTERLOOP_ROOT"))
-    mode = _setting_of("OUTERLOOP_FORGE", values, os.environ).strip().lower() or "github"
+    values = env_file_values(
+        keys=(
+            "OUTERLOOP_FORGE",
+            "OUTERLOOP_TARGET",
+            "OUTERLOOP_ROOT",
+            "OUTERLOOP_BOT_LOGIN",
+            "OUTERLOOP_COMPUTE",
+            "OUTERLOOP_TICK_HOST",
+        )
+    )
+    # Every setting with the precedence the running tick applies (the launch
+    # mode picked as `plan_start` does): a resident Slurm tick lets the .env
+    # win, a local or login loop keeps the shell, and an empty value means the
+    # default. The CLI and the kernel must agree on the forge, the target, the
+    # state root and who the kernel is, or a person's comment could read as
+    # the kernel's.
+    compute = _setting_of("OUTERLOOP_COMPUTE", values, os.environ).strip().lower()
+    host = _setting_of("OUTERLOOP_TICK_HOST", values, os.environ).strip().lower()
+    if compute == "local" or not shutil.which("sbatch"):
+        launch = "local"
+    else:
+        launch = "login" if host == "login" else "slurm"
+    settings = _tick_settings(values, os.environ, launch)
+    mode = settings.get("OUTERLOOP_FORGE", "").strip().lower() or "github"
     if mode != LOCAL:
         print(
             "outerloop pr: this deployment uses GitHub; review and merge pull requests there.",
             file=sys.stderr,
         )
         return 2
-    target = (args.target or _setting_of("OUTERLOOP_TARGET", values, os.environ)).strip()
+    target = (args.target or settings.get("OUTERLOOP_TARGET", "")).strip()
     if not target:
         print(
             "outerloop pr: no target; pass --target owner/repo or set OUTERLOOP_TARGET",
             file=sys.stderr,
         )
         return 2
+    # The root is the one setting the deploy step never overrides: the tick and
+    # its jobs keep the shell's value (as `plan_start` reads it), so the shell
+    # wins here on every launch mode.
     root = Path(
         args.root
-        or os.environ.get("OUTERLOOP_ROOT")
-        or values.get("OUTERLOOP_ROOT")
-        or DEFAULT_LOCAL_ROOT
+        or _setting_of("OUTERLOOP_ROOT", values, os.environ)
+        or str(default_local_root(os.environ))
     ).expanduser()
+    from outerloop.forge_local import DEFAULT_LOCAL_IDENTITY
+
+    kernel_login = settings.get("OUTERLOOP_BOT_LOGIN", "").strip() or DEFAULT_LOCAL_IDENTITY
     try:
-        forge = forge_from_env(backend=LOCAL, root=root)
+        forge = forge_from_env(backend=LOCAL, root=root, bot_login=kernel_login)
     except (ValueError, GitError) as exc:
         print(f"outerloop pr: {exc}", file=sys.stderr)
         return 2
@@ -1063,6 +1090,16 @@ def pr(args: argparse.Namespace) -> int:
             if not text.strip():
                 raise ValueError("no comment text")
             who = getpass.getuser()
+            kernel = getattr(forge, "bot_login", "")
+            if isinstance(kernel, str) and who.strip().casefold() == kernel.strip().casefold():
+                print(
+                    f"outerloop pr: {who!r} is the kernel's login on this forge, so the "
+                    "comment would read as the kernel's own and never reach the inbox. "
+                    "Run the command as a different user, or give the kernel a different "
+                    "login with OUTERLOOP_BOT_LOGIN.",
+                    file=sys.stderr,
+                )
+                return 2
             forge.comment_as(target, number, text, author=who, association="OWNER")
             print(f"#{number}: comment posted as {who}")
             return 0

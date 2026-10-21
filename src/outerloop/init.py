@@ -1141,7 +1141,11 @@ def main(argv: list[str] | None = None) -> int:
             Path(configured_root).expanduser()
             if configured_root
             else default_local_root(os.environ)
-        )
+        ).resolve()
+        # Record the root the forge was bootstrapped under: `OUTERLOOP_ROOT`
+        # from the environment set up this run, and a later start without it
+        # must not open some other root.
+        answers.root = str(state_root)
         forge_root = state_root / "forge"
         repository = local_repo_path(forge_root, answers.target)
         if repository.exists():

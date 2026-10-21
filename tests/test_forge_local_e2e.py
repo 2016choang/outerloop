@@ -158,3 +158,63 @@ def test_a_local_deployment_from_factory_to_accepted_merge(
     assert merged["merged"] is True and merged["merge_commit_sha"]
     assert observe_target(forge, REPO, {}) == set()
     assert display_leader(forge, REPO)["tsp"].main_commit == merged["merge_commit_sha"]
+
+
+def test_a_cli_comment_from_the_kernel_login_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A person whose login is the kernel's would post a comment the inbox
+    reads as the kernel's own and drops; the CLI refuses instead."""
+    from outerloop.forge_local import bootstrap_local_repo
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("OUTERLOOP_FORGE", "local")
+    monkeypatch.delenv("OUTERLOOP_BOT_LOGIN", raising=False)
+    bootstrap_local_repo(state / "forge", REPO, _seed(tmp_path))
+    forge = LocalForge(state / "forge")
+    assert forge.create_issue(REPO, "an issue", "body") == 1
+    argv = ["pr", "comment", "1", "Nice work", "--root", str(state), "--target", REPO]
+
+    monkeypatch.setattr("getpass.getuser", lambda: "outerloop")
+    assert cli.main(argv) == 2
+    assert "the kernel's login" in capsys.readouterr().err
+
+    # the kernel's login may also be set explicitly
+    monkeypatch.setenv("OUTERLOOP_BOT_LOGIN", "lab-kernel")
+    monkeypatch.setattr("getpass.getuser", lambda: "lab-kernel")
+    assert cli.main(argv) == 2
+    assert "the kernel's login" in capsys.readouterr().err
+
+    # ...or only in the operator's .env
+    monkeypatch.delenv("OUTERLOOP_BOT_LOGIN")
+    env_file = tmp_path / ".env"
+    env_file.write_text("OUTERLOOP_BOT_LOGIN=file-kernel\n")
+    env_file.chmod(0o600)
+    monkeypatch.setattr(cli, "ENV_FILE", env_file)
+    monkeypatch.delenv("OUTERLOOP_ENV_FILE", raising=False)
+    monkeypatch.setattr("getpass.getuser", lambda: "file-kernel")
+    assert cli.main(argv) == 2
+    assert "the kernel's login" in capsys.readouterr().err
+
+    # a resident Slurm tick lets the .env win over a conflicting shell value,
+    # and the CLI must agree with it on who the kernel is
+    monkeypatch.setenv("OUTERLOOP_BOT_LOGIN", "shell-kernel")
+    monkeypatch.delenv("OUTERLOOP_COMPUTE", raising=False)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/" + name)
+    assert cli.main(argv) == 2
+    assert "the kernel's login" in capsys.readouterr().err
+
+    # an empty .env login under that tick means the default identity
+    env_file.write_text("OUTERLOOP_BOT_LOGIN=\n")
+    monkeypatch.setattr("getpass.getuser", lambda: "outerloop")
+    assert cli.main(argv) == 2
+    assert "the kernel's login" in capsys.readouterr().err
+    assert forge.list_comments(REPO, 1) == []
+
+    # the state root is the shell's on every launch mode (the deploy step never
+    # overrides it), so a conflicting .env root must not redirect the CLI
+    env_file.write_text(f"OUTERLOOP_ROOT={tmp_path / 'elsewhere'}\n")
+    monkeypatch.setenv("OUTERLOOP_ROOT", str(state))
+    monkeypatch.setattr("getpass.getuser", lambda: "ada")
+    assert cli.main(["pr", "comment", "1", "Looks right", "--target", REPO]) == 0
+    assert [c["body"] for c in forge.list_comments(REPO, 1)] == ["Looks right"]

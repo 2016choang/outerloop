@@ -188,6 +188,7 @@ def forge_from_env(
     dry_run: bool = False,
     backend: str = "",
     root: str | Path | None = None,
+    bot_login: str = "",
 ) -> Forge:
     """The deployment's forge, built from the credential paths and
     `OUTERLOOP_FORGE`. `backend` overrides the environment for callers that
@@ -195,7 +196,9 @@ def forge_from_env(
 
     `root` is the state root a local forge lives under; omitted, it comes from
     `OUTERLOOP_ROOT`, which the tick sets before building and every job
-    inherits. The credentials are GitHub's and are ignored locally."""
+    inherits. It is resolved to an absolute path, because a workspace resolves
+    the local clone URL from its own directory. The credentials are GitHub's
+    and are ignored locally."""
     name = (backend or forge_name()).strip().lower()
     if name == GITHUB:
         from outerloop.appauth import resolve_bot_auth
@@ -210,6 +213,15 @@ def forge_from_env(
             raise ValueError(
                 f"{FORGE_ENV}=local needs a state root: set OUTERLOOP_ROOT or pass one"
             )
-        login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip() or DEFAULT_LOCAL_IDENTITY
-        return LocalForge(Path(raw_root).expanduser() / "forge", bot_login=login, dry_run=dry_run)
+        # an explicit login (the CLI reads it from the .env too) wins over the env
+        login = (
+            bot_login.strip()
+            or os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
+            or DEFAULT_LOCAL_IDENTITY
+        )
+        # Absolute before the forge is built: jobs inherit an absolute root and
+        # a workspace resolves the clone URL from its own directory, so a
+        # relative `--root` would point each of them somewhere else.
+        state_root = Path(raw_root).expanduser().resolve()
+        return LocalForge(state_root / "forge", bot_login=login, dry_run=dry_run)
     raise ValueError(f"{FORGE_ENV}={name!r} is not a known forge; use 'github' or 'local'")

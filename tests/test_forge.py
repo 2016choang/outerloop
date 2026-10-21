@@ -39,3 +39,18 @@ def test_local_forge_is_built_under_the_state_root(
     monkeypatch.delenv("OUTERLOOP_ROOT")
     with pytest.raises(ValueError, match="OUTERLOOP_ROOT"):
         forge_from_env("")
+
+
+def test_a_relative_state_root_is_made_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick started with a relative `--root` must build the same forge path
+    every job inherits: a workspace resolves the clone URL from its own
+    directory, so a relative one would break its fetch and push."""
+    monkeypatch.setenv("OUTERLOOP_FORGE", LOCAL)
+    monkeypatch.delenv("OUTERLOOP_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    forge = forge_from_env("", root="state")
+    assert isinstance(forge, LocalForge)
+    assert forge.root == (tmp_path / "state" / "forge").resolve()
+    assert Path(forge.clone_url("org/repo")).is_absolute()
