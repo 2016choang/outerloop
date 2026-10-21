@@ -23,6 +23,38 @@ deployment needs a hosted repository and GitHub access through an App or a
 machine-user token, which some labs cannot or will not set up. Adopters
 report the App setup as the main friction of getting started.
 
+Large studies feel all of this at once. A study of hundreds of runs needs a
+hosted repository per cell, shares one API rate limit, and loses runs to any
+outage. Locally a cell is a directory that a study script creates and
+deletes.
+
+## Scope of the first version
+
+The first version serves unattended deployments and studies, where the
+auto merge dial is the norm: the kernel merges a head only after its own
+measurement and the judge panel's approval, and people review the record
+afterwards. It keeps what that needs and what the kernel writes on its own:
+
+- code, line and candidate branches and the research-log branch (ledger,
+  reports, board) on a bare repository;
+- pull-request records with real merge evidence;
+- comment threads as an append-only log, so agent and kernel posts have a
+  place to land and a person's reply reaches the author's inbox;
+- issue records that the kernel creates, comments on and closes (the
+  research-log issue and contract alarms need them);
+- the identity seam, trivial locally;
+- `outerloop pr list`, `show N`, `comment N`, `merge N` and `close N`.
+
+It leaves out human work orders: issue intake, the steward lane and claim
+markers. Work comes from the kernel's self-initiated lanes, and
+`outerloop message` steers a live run. The manual dial works, but nothing
+notifies a person that a pull request waits; `outerloop status` and
+`outerloop pr list` show it.
+
+Every record is kept in git (below), so a deployment's or a study's full
+history of pull requests, threads and outcomes can be read back, mirrored
+or replayed later.
+
 ## Design
 
 ### One interface, two backends
@@ -109,12 +141,18 @@ takes the forge's name instead.
   `$OUTERLOOP_ROOT/forge/<owner>/<repo>.git` with `git clone --bare` from an
   existing repository (a path or URL), or `git init --bare` with a first
   commit of a given directory. Its default branch is recorded.
-- **Records.** `pulls/<n>.json`, `issues/<n>.json` and
-  `threads/<n>/<id>.json` beside the repository. Issues and pull requests
-  share one number sequence, as on GitHub, and `close_issue` closes either
-  kind. One lock covers number allocation and every read-modify-write of a
-  record. Branch writes keep git's own compare-and-swap, as the ledger and
-  board need for concurrent writers.
+- **Records in git.** `pulls/<n>.json`, `issues/<n>.json` and
+  `threads/<n>/<id>.json` are files on a dedicated ref in the bare
+  repository (`refs/outerloop/records`), written with the same
+  compare-and-swap commit the ledger uses on the research-log branch. Every
+  change is a commit, so nothing is overwritten, any past state can be read
+  back, a crash leaves either the old commit or the new one, and
+  `git clone --mirror` backs up code and records together. A conflicting
+  writer retries on the new tip. Issues and pull requests share one number
+  sequence, as on GitHub, and `close_issue` closes either kind. Thread
+  entries are append-only with increasing integer ids. Closing is always
+  written explicitly: `close_if_done` reads `state == "closed"` to end a
+  rejected run.
 - **Transport.** A path URL with no credential (`Workspace` already accepts
   `auth=None`). Filesystem permissions are the access control. The bare
   repository sits outside every path a session can see. Every clone a
@@ -133,15 +171,24 @@ takes the forge's name instead.
   shas: `clean` when the head contains the base tip, `behind` when it does
   not but a trial merge succeeds, and `dirty` only when the trial merge
   conflicts, which is what the inbox treats as a conflict.
+- **References.** `html_url` holds the local reference and still ends in
+  the pull-request number, which the kernel parses from it.
 - **Merging.** `allowed_merge_methods` returns `["MERGE"]`. `merge_pull`
   builds a merge commit from the expected head sha and moves the base in one
   git ref transaction (`git update-ref --stdin`): verify the head branch
   still points at the expected sha, then update the base from its old tip.
   Either both checks pass and the base moves, or nothing changes. The record
-  is written after the ref moves. A process that dies in between leaves the
-  base containing the head; the next read of that record finds the merge
-  commit on the base whose second parent is the head and marks the record
-  merged, under the record lock.
+  is written after the ref moves.
+- **Merges made outside the kernel.** A person may merge with plain git and
+  push, and a process may die between moving the base and writing the
+  record. Either way the next read of an open record whose head the base
+  now contains records the merge: `merge_commit_sha` is the commit on the
+  base whose second parent is the head, or the head itself after a
+  fast-forward. The ledger needs that commit and compares its tree with the
+  measured one, so it is recorded once and kept even if the branch later
+  moves or is deleted. Squash and rebase merges leave no such commit and
+  are not supported. (`head_contains(repo, base, head)` asks whether the
+  head contains the base; this check is the reverse call.)
 - **Auto-merge.** Nothing is armed locally:
   `arm_auto_merge_when_review_required` returns `False` and
   `disable_auto_merge` reports disarmed. Under the auto dial the kernel
@@ -155,14 +202,17 @@ takes the forge's name instead.
 
 ### People: review and merge from the CLI (open question 1)
 
-A small `outerloop pr` group: `list`, `show N`, `comment N`, `merge N` and
-`close N`, plus `outerloop issue new [--label L]` and `outerloop issue
-comment N`. The labels are the kernel's own: `outerloop:steward` routes an
+A small `outerloop pr` group: `list`, `show N` (the record and its thread),
+`comment N`, `merge N` and `close N`. These commands write the same records
+the kernel reads, so a person's comment reaches the author's inbox and the
+agent's and kernel's posts are readable in the thread, as on GitHub. Diffs
+come from `git diff` against the bare repository. No web view in the first
+version.
+
+Human work orders come later: `outerloop issue new [--label L]` and
+`outerloop issue comment N`, with issue intake, the steward lane and claim
+markers. The labels are the kernel's own: `outerloop:steward` routes an
 issue to the steward lane and `outerloop:task` vouches for a work order.
-These commands write the same records the kernel reads, so a person's
-comment reaches a run's inbox and an issue becomes a work order as on
-GitHub. Diffs come from `git diff` against the bare repository. No web view
-in the first version.
 
 ### Ledger, board, research log (open question 2)
 
@@ -220,7 +270,8 @@ everyone with write access to the state root.
 
 One backend per deployment, chosen at `outerloop init`. Moving between
 backends is not supported in the first version. Branches can be pushed to
-another remote by hand; pull-request and issue records do not migrate.
+another remote by hand. Records stay recoverable because they live in git:
+a mirror keeps them, and a later tool can replay them into another forge.
 
 ## What stays GitHub-only
 
@@ -241,15 +292,18 @@ Each step is one PR with its tests:
 2. `LocalForge` bootstrap, refs, files and transport, with `--no-local`
    session clones, transport-gated snapshots and the 404 error contract; the
    ledger, research log and board on a bare repository; links through
-   `ref_for`.
-3. `LocalForge` pull requests, threads and issues, the merge transaction and
-   its recovery, and the `outerloop pr` and `outerloop issue` commands.
-4. The identity seam (`is_kernel_post`, `qualifies`) on both backends, and
-   the forge name in user-visible text.
-5. `outerloop init` offers the local backend; docs.
+   `ref_for`; `outerloop init` offers the local backend.
+3. Records on `refs/outerloop/records`: pull requests, threads and the
+   kernel's issues; the merge transaction and the recording of merges made
+   outside the kernel; the identity seam (`is_kernel_post`, `qualifies`) on
+   both backends; the forge name in user-visible text; the `outerloop pr`
+   commands; docs.
+
+Later, when someone needs them: human work orders (the `outerloop issue`
+commands, intake, the steward lane and claims on the local backend).
 
 Then the personal-token mode: `init` offers "use my GitHub login" and writes
-`gh auth token` to the PAT file, the marker rule from step 4 applies,
+`gh auth token` to the PAT file, the marker rule from step 3 applies,
 auto-merge arming is recorded in the run's stage, and PR bodies and commit
 trailers name Outerloop as the author. Its docs state the trade-offs: the
 person cannot approve their own agents' pull requests, so a required-review
