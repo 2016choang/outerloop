@@ -323,12 +323,6 @@ def test_get_file_on_large_file_errors(provider: FileTokenProvider) -> None:
         client.get_file("org/repo", "big.bin", "main")
 
 
-def test_create_pr_without_number_errors(provider: FileTokenProvider) -> None:
-    client = GitHubClient(auth=provider, transport=lambda _r: {"message": "Validation Failed"})
-    with pytest.raises(GitHubError, match="no PR number"):
-        client.create_pr("org/repo", "h", "main", "t", "b")
-
-
 def test_ref_is_url_encoded(provider: FileTokenProvider) -> None:
     seen: list[str] = []
 

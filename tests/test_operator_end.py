@@ -264,7 +264,15 @@ def test_request_during_wake_setup_still_prevents_the_leg(tmp_path, run, monkeyp
     monkeypatch.setenv("OUTERLOOP_AUTHOR_BACKEND", "claude")
     monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", "claude-native")
     monkeypatch.setattr(attempt, "_lease_held_by_another_job", lambda *args: "")
-    monkeypatch.setattr(attempt, "resolve_bot_auth", lambda *a: SimpleNamespace(token=lambda: "t"))
+    monkeypatch.setattr(
+        attempt,
+        "forge_from_env",
+        lambda *a: SimpleNamespace(
+            credential=lambda: SimpleNamespace(token=lambda: "t"),
+            secrets=lambda: ("t",),
+            clone_url=lambda target: f"https://github.com/{target}.git",
+        ),
+    )
     monkeypatch.setattr(attempt, "model_key", lambda *args: "key")
 
     def limits(*args):

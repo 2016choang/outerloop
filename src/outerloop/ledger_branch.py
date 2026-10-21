@@ -6,7 +6,8 @@ import hashlib
 import json
 from collections.abc import Callable
 
-from outerloop.github import GitHubClient, GitHubError
+from outerloop.forge import Forge
+from outerloop.github import GitHubError
 from outerloop.progress import (
     LEADER_FILE,
     PROGRESS_FILE,
@@ -30,7 +31,7 @@ class LedgerWriteError(RuntimeError):
     """A ledger write could not finish; retain the operation for the next tick."""
 
 
-def ensure_ledger_branch(github: GitHubClient, target: str, pinned_commit: str) -> None:
+def ensure_ledger_branch(github: Forge, target: str, pinned_commit: str) -> None:
     """Create an absent branch from the caller's pin, preserving an existing branch."""
     if not pinned_commit:
         raise ValueError("branch creation requires a pinned commit")
@@ -47,7 +48,7 @@ def ensure_ledger_branch(github: GitHubClient, target: str, pinned_commit: str) 
 
 
 def _read_at(
-    github: GitHubClient,
+    github: Forge,
     target: str,
     head: str,
     *,
@@ -88,7 +89,7 @@ def _read_at(
 
 
 def read_ledger(
-    github: GitHubClient, target: str, *, unmeasured: set[int] | None = None
+    github: Forge, target: str, *, unmeasured: set[int] | None = None
 ) -> tuple[str, Ledger, Pendings]:
     """Read leader and live submissions; optionally collect terminal unmeasured PRs."""
     head = github.branch_head(target, RESEARCH_LOG_BRANCH)
@@ -103,7 +104,7 @@ def progress_link(target: str) -> str:
 
 
 def write_ledger(
-    github: GitHubClient,
+    github: Forge,
     target: str,
     expected_head: str,
     files: LedgerEdit,

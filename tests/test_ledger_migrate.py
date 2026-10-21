@@ -111,8 +111,7 @@ def test_failed_write_keeps_destination():
 def test_cli_dispatch_and_redaction(monkeypatch, capsys):
     gh = fake()
     monkeypatch.setattr("outerloop.ledger_migrate.env_file_values", lambda **kw: {})
-    monkeypatch.setattr("outerloop.ledger_migrate.resolve_bot_auth", lambda *a: None)
-    monkeypatch.setattr("outerloop.ledger_migrate.GitHubClient", lambda **kw: gh)
+    monkeypatch.setattr("outerloop.ledger_migrate.forge_from_env", lambda *a, **k: gh)
     argv = ["migrate-ledger", "--target", "org/repo", "--main-sha", PIN, "--dry-run"]
     assert main(argv) == 0
     assert "provenance unknown" in capsys.readouterr().out
@@ -128,8 +127,7 @@ def test_cli_dispatch_and_redaction(monkeypatch, capsys):
 @pytest.mark.parametrize("error", [ValueError, LedgerReadError, LedgerWriteError])
 def test_cli_reports_local_errors(monkeypatch, capsys, error):
     monkeypatch.setattr("outerloop.ledger_migrate.env_file_values", lambda **kw: {})
-    monkeypatch.setattr("outerloop.ledger_migrate.resolve_bot_auth", lambda *a: None)
-    monkeypatch.setattr("outerloop.ledger_migrate.GitHubClient", lambda **kw: fake())
+    monkeypatch.setattr("outerloop.ledger_migrate.forge_from_env", lambda *a, **k: fake())
 
     def fail(*args, **kwargs):
         raise error("local migration failure")

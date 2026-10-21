@@ -19,6 +19,15 @@ class LedgerGitHub:
     ancestry: list[str] = field(default_factory=list)
     pull_requests: dict[int, dict] = field(default_factory=dict)
 
+    def clone_url(self, target):
+        return f"https://github.com/{target}.git"
+
+    def credential(self):
+        return None
+
+    def secrets(self):
+        return ()
+
     def default_branch(self, repo):
         return "main"
 

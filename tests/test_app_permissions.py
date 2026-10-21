@@ -134,6 +134,9 @@ def test_sweep_warning_caches_guidance(app, tmp_path, monkeypatch, caplog, looku
     class GitHub:
         auth = provider
 
+        def credential(self):
+            return self.auth
+
         def list_comments(self, *args):
             return []
 
@@ -286,6 +289,9 @@ def test_sweep_success_invalidates_warning(app_env, tmp_path, monkeypatch):
     class GitHub:
         auth = provider
         fails = True
+
+        def credential(self):
+            return self.auth
 
         def list_comments(self, *args):
             return []

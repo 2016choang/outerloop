@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
-from outerloop.appauth import add_credential_args, resolve_bot_auth
+from outerloop.appauth import add_credential_args
 from outerloop.brief import BudgetState, distill_lessons
 from outerloop.compute import LocalCompute
 from outerloop.contract import (
@@ -55,9 +55,9 @@ from outerloop.endpoints import (
     split_endpoint,
 )
 from outerloop.evalcache import seed_dir
+from outerloop.forge import Forge, forge_from_env
 from outerloop.github import (
     GitError,
-    GitHubClient,
     TokenProvider,
     Workspace,
     contract_at,
@@ -361,18 +361,11 @@ class WorkspaceDrift(RuntimeError):
     """The tree changed between measurement and commit."""
 
 
-def target_clone_url(target: str) -> str:
-    """The canonical HTTPS clone URL for `owner/repo`. The one source of truth
-    for where a run's git pushes go — derived from the target, never read from
-    the session-writable `remote.origin.url`."""
-    return f"https://github.com/{target}.git"
-
-
 def _contains_tip(
     ws: Workspace,
     tip: str,
     head: str,
-    github: GitHubClient | None = None,
+    github: Forge | None = None,
     target: str = "",
 ) -> bool:
     """Use local ancestry when both commits exist, otherwise ask GitHub."""
@@ -400,7 +393,7 @@ def _bless_decision(
     secrets: tuple[str, ...] = (),
     *,
     panel_skip: str = "",
-    github: GitHubClient | None = None,
+    github: Forge | None = None,
     target: str = "",
 ) -> tuple[str, str]:
     """Decide once; share the reason between the record, PR and log."""
@@ -465,7 +458,7 @@ def _self_merge_line(head: str, reason: str) -> str:
 
 
 def _arm_unless_base_moved(
-    github: GitHubClient,
+    github: Forge,
     ws: Workspace,
     target: str,
     pr_number: str,
@@ -629,7 +622,7 @@ def _clear_stage(record: RunRecord, run_root: Path) -> RunRecord:
 
 
 def _post_issue_finished(
-    github: GitHubClient,
+    github: Forge,
     target: str,
     issue_number: int,
     run_id: str,
@@ -1104,7 +1097,7 @@ def acknowledge_messages(run_root: Path, run_id: str, seq: int) -> RunRecord:
 
 def deliver_messages(
     record: RunRecord,
-    github: GitHubClient,
+    github: Forge,
     messages: tuple[dict, ...],
     secrets: tuple[str, ...],
     run_dir: Path,
@@ -1415,7 +1408,7 @@ def run_author_leg(
     record: RunRecord,
     ws: Workspace,
     dispatch: DispatchSettings | None,
-    github: GitHubClient,
+    github: Forge,
     secrets: tuple[str, ...],
     guidance: str = "",
     **kwargs: Any,
@@ -1544,7 +1537,7 @@ def _wake_author_sleep(
     workspace: Path,
     run_dir: Path,
     dispatch: DispatchSettings,
-    github: GitHubClient,
+    github: Forge,
     now: float,
     secrets: tuple[str, ...],
     base_branch: str,
@@ -2831,7 +2824,7 @@ def resume_run(
     run_id: str,
     *,
     dispatch: DispatchSettings,
-    github: GitHubClient,
+    github: Forge,
     bot_auth: TokenProvider,
     now: float,
     secrets: tuple[str, ...] = (),
@@ -2867,7 +2860,7 @@ def _resume_run(
     run_id: str,
     *,
     dispatch: DispatchSettings,
-    github: GitHubClient,
+    github: Forge,
     bot_auth: TokenProvider,
     now: float,
     secrets: tuple[str, ...] = (),
@@ -2934,7 +2927,7 @@ def _resume_run(
     ws = Workspace(
         root=workspace,
         auth=bot_auth,
-        url=target_clone_url(record.target),
+        url=github.clone_url(record.target),
         channels=record.channels,
         self_agent=record.agent_id,
     )
@@ -2956,7 +2949,7 @@ def _resume_run(
     try:
         with tempfile.TemporaryDirectory(prefix=".wake-policy-", dir=run_dir) as directory:
             policy_ws = Workspace.clone(
-                target_clone_url(record.target),
+                github.clone_url(record.target),
                 Path(directory) / "ws",
                 auth=bot_auth,
                 single_branch=policy_branch,
@@ -2968,12 +2961,17 @@ def _resume_run(
         refs = ws.git_network(
             "ls-remote",
             "--heads",
-            ws.url or target_clone_url(record.target),
+            ws.url or github.clone_url(record.target),
             f"refs/heads/{policy_branch}",
         )
         if not refs.strip():
             return _end_refused_wake(
-                run_root, record, ScopeHistoryError(policy_branch), now, secrets, ws.auth
+                run_root,
+                record,
+                ScopeHistoryError(policy_branch),
+                now,
+                secrets,
+                ws.auth,
             )
         raise
     # Channels follow the current contract at once (tightening isolation must
@@ -3321,7 +3319,13 @@ def _resume_run(
                     # tamper during the panel is not a panel error to draft
                     # around — end as a refused wake.
                     return _end_refused_wake(
-                        run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+                        run_root,
+                        record,
+                        exc,
+                        now,
+                        secrets,
+                        ws.auth,
+                        snapshot_attempted=True,
                     )
                 log.warning(
                     "wake panel errored for %s (%s); opening a DRAFT",
@@ -3865,7 +3869,7 @@ def _finish_attempt(
     record: RunRecord,
     config: RunConfig,
     contract: Contract,
-    github: GitHubClient,
+    github: Forge,
     now: float,
     secrets: tuple[str, ...],
     base_branch: str,
@@ -3955,7 +3959,7 @@ def _finish_attempt(
 
 
 def _ledger_comparison(
-    github: GitHubClient,
+    github: Forge,
     bench: Any,
     candidate: float,
     target: str,
@@ -4010,7 +4014,7 @@ def _publish_signature(bench: Any) -> tuple:
     return bench.model_copy(update={"verification": "gate"}).measurement_signature()
 
 
-def _measured_note_on_thread(github: GitHubClient, target: str, number: int, sha: str) -> bool:
+def _measured_note_on_thread(github: Forge, target: str, number: int, sha: str) -> bool:
     """Whether this sealed tree's measured note is already on the PR thread —
     a retry after the record write that follows the comment failed."""
     try:
@@ -4037,7 +4041,7 @@ def publish(
     record: RunRecord,
     config: RunConfig,
     contract: Contract,
-    github: GitHubClient,
+    github: Forge,
     now: float,
     secrets: tuple[str, ...],
     base_branch: str,
@@ -4099,7 +4103,13 @@ def publish(
         bench = contract.benchmark(config.benchmark)
     except BenchmarkNotFoundError as exc:
         return _end_refused_wake(
-            run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+            run_root,
+            record,
+            exc,
+            now,
+            secrets,
+            ws.auth,
+            snapshot_attempted=True,
         )
 
     def refuse(
@@ -4186,7 +4196,13 @@ def publish(
             return refuse("Publish refused: the base contract's measurement signature changed.")
     except BenchmarkNotFoundError as exc:
         return _end_refused_wake(
-            run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+            run_root,
+            record,
+            exc,
+            now,
+            secrets,
+            ws.auth,
+            snapshot_attempted=True,
         )
     except Exception as exc:
         return refuse(
@@ -4602,7 +4618,13 @@ def publish(
     except Exception as exc:
         if isinstance(exc, GitError) and _is_git_tamper(exc):
             return _end_refused_wake(
-                run_root, record, exc, now, secrets, ws.auth, snapshot_attempted=True
+                run_root,
+                record,
+                exc,
+                now,
+                secrets,
+                ws.auth,
+                snapshot_attempted=True,
             )
         log.warning(
             "publish failed for %s: %s",
@@ -4701,7 +4723,7 @@ def live_attempt(
     run_root: Path,
     run_id: str,
     harness: Harness,
-    github: GitHubClient,
+    github: Forge,
     bot_auth: TokenProvider,
     now: float,
     created: str,
@@ -4777,7 +4799,7 @@ def live_attempt(
     salvage: dict[str, object] = {}
     try:
         ws = Workspace.clone_for_channels(
-            target_clone_url(config.target),
+            github.clone_url(config.target),
             workspace,
             config.target,
             base_branch,
@@ -5597,7 +5619,8 @@ def main() -> int:
     # each --codex-config KEY=VALUE becomes a `-c KEY=VALUE` pair for codex
     codex_extra = tuple(a for c in args.codex_config for a in ("-c", c))
 
-    bot_auth = resolve_bot_auth(args.pat_file, args.github_app_file)
+    forge = forge_from_env(args.pat_file, args.github_app_file)
+    bot_auth = cast(TokenProvider, forge.credential())
 
     # --resume WAKES a parked dispatched run: rebuild the dispatched measurer
     # and re-enter the decision. The wake job the WakeDispatcher submits runs
@@ -5767,7 +5790,7 @@ def main() -> int:
                 if wake_backend == "hermes"
                 else None,
             )
-        wake_secrets = tuple(k for k in (bot_auth.token(), *wake_panel_secrets, wake_api_key) if k)
+        wake_secrets = tuple(k for k in (*forge.secrets(), *wake_panel_secrets, wake_api_key) if k)
         if end_requested(Path(args.run_root), args.resume):
             # requested during setup: still no new leg
             _release_own_lease(args.run_root, args.resume)
@@ -5777,7 +5800,7 @@ def main() -> int:
                 args.run_root,
                 args.resume,
                 dispatch=_dispatch_settings(args),
-                github=GitHubClient(auth=bot_auth),
+                github=forge,
                 bot_auth=bot_auth,
                 now=time.time(),
                 secrets=wake_secrets,
@@ -5857,7 +5880,7 @@ def main() -> int:
         if args.issue:
             _best_effort(
                 "issue report",
-                lambda: GitHubClient(auth=bot_auth).comment(
+                lambda: forge.comment(
                     args.target,
                     args.issue,
                     "A run for this issue could not start: the orchestrator's "
@@ -5919,7 +5942,7 @@ def main() -> int:
                 panel_lenses=panel_lenses,
                 dispatch=dispatch,
                 eval_image=args.image,
-                github=GitHubClient(auth=bot_auth),
+                github=forge,
                 bot_auth=bot_auth,
                 now=time.time(),
                 created=datetime.now(UTC).isoformat(),
@@ -5929,7 +5952,7 @@ def main() -> int:
                     k
                     for k in (
                         api_key,
-                        bot_auth.token(),
+                        *forge.secrets(),
                         *panel_secrets,
                     )
                     if k
@@ -5978,7 +6001,7 @@ def _ledger_digits(record: RunRecord) -> dict[str, int]:
 def withdraw_pr(
     run_root: Path,
     record: RunRecord,
-    github: GitHubClient,
+    github: Forge,
     reason: str,
     secrets: tuple[str, ...] = (),
 ) -> str:
@@ -6003,9 +6026,7 @@ def end_requested(run_root: Path, run_id: str) -> bool:
     return (run_dir_of(run_root, run_id) / END_REQUEST_NAME).is_file()
 
 
-def end_on_request(
-    run_root: Path, record: RunRecord, github: GitHubClient | None, now: float
-) -> str:
+def end_on_request(run_root: Path, record: RunRecord, github: Forge | None, now: float) -> str:
     """End a run an operator asked to end. The caller holds the run's lease, so
     no session leg (and no publish) is in flight."""
     from outerloop.runstate import OPERATOR
@@ -6030,7 +6051,7 @@ def requested_note(run_root: Path, run_id: str) -> str:
         return ""  # the request still stands; a damaged note never blocks the ending
 
 
-def close_if_done(run_root: Path, record: RunRecord, github: GitHubClient, now: float) -> str:
+def close_if_done(run_root: Path, record: RunRecord, github: Forge, now: float) -> str:
     """Finish a withdrawal intent, then route the PR ending through the run terminal."""
     from outerloop.github import GitHubError
     from outerloop.runstate import MERGED, REJECTED
@@ -6086,8 +6107,9 @@ def finish_run(
     ending: str,
     note: str,
     now: float,
-    github: GitHubClient | None = None,
+    github: Forge | None = None,
     *,
+    forge: Forge | None = None,
     auth: TokenProvider | None = None,
     snapshot_attempted: bool = False,
     secrets: tuple[str, ...] = (),
@@ -6096,7 +6118,11 @@ def finish_run(
     """Persist the terminal, retain its report, seal its notebook and cancel jobs.
 
     A caller that already captured the session tree owns its snapshot attempt.
-    Auth is separate from the client so existing issue-comment ownership stays intact.
+    `github` is the client that comments on the requesting issue; `forge` is
+    the transport the ending workspace uses (the same client when only one is
+    given, so a caller that does not want an issue comment can still pass the
+    forge). Auth is separate from the client so existing issue-comment
+    ownership stays intact.
     """
     from outerloop.compute import compute_from_env
     from outerloop.tick import cancel_ended_launches
@@ -6120,10 +6146,18 @@ def finish_run(
     if snapshot_attempted and not ref:
         ws = None
     else:
+        transport = forge or github
+        credential = auth
+        if credential is None and transport is not None:
+            credential = transport.credential()
         ws = Workspace(
             root=directory / "ws",
-            auth=auth if auth is not None else getattr(github, "auth", None),
-            url=target_clone_url(record.target),
+            auth=credential,
+            url=(
+                transport.clone_url(record.target)
+                if transport is not None
+                else forge_from_env().clone_url(record.target)
+            ),
             channels=record.channels,
             self_agent=record.agent_id,
         )
@@ -6136,7 +6170,13 @@ def finish_run(
     if not snapshot_attempted and ws is not None and ws.root.is_dir():
         line_ref = f"agents/{record.agent_id}"
         try:
-            base_branch = str(record.stage.get("base_branch") or "main")
+            base_branch = str(record.stage.get("base_branch") or "")
+            if not base_branch and transport is not None:
+                try:
+                    base_branch = transport.default_branch(record.target)
+                except Exception:
+                    base_branch = ""
+            base_branch = base_branch or "main"
             contract = load_contract(
                 contract_at(ws, str(record.stage.get("base_sha") or f"origin/{base_branch}")),
                 record.target,

@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from outerloop.contract import Benchmark, Contract
-from outerloop.github import GitHubClient, Workspace
+from outerloop.forge import Forge
+from outerloop.github import Workspace
 from outerloop.ledger_branch import (
     RESEARCH_LOG_BRANCH,
     ensure_ledger_branch,
@@ -36,7 +37,7 @@ from outerloop.runstate import RunRecord, acknowledge_ledger_pending, save_recor
 log = logging.getLogger(__name__)
 
 
-def display_leader(github: GitHubClient, target: str) -> dict[str, LeaderEntry]:
+def display_leader(github: Forge, target: str) -> dict[str, LeaderEntry]:
     """A failed display/decision read means no prior, never checkout fallback."""
     try:
         head = github.branch_head(target, RESEARCH_LOG_BRANCH)
@@ -99,7 +100,7 @@ def measurement_pending(
 def queue_pending(
     root: Path,
     record: RunRecord,
-    github: GitHubClient,
+    github: Forge,
     pending: PendingSubmission,
     contract: Contract,
     now: float,
@@ -118,7 +119,7 @@ def queue_pending(
     return retry_pending(root, record, github, now)
 
 
-def retry_pending(root: Path, record: RunRecord, github: GitHubClient, now: float) -> RunRecord:
+def retry_pending(root: Path, record: RunRecord, github: Forge, now: float) -> RunRecord:
     queue = dict(cast(dict[str, Any], record.stage.get(LEDGER_RETRY) or {}))
     for path, work in list(queue.items()):
         try:
@@ -147,7 +148,7 @@ def retry_pending(root: Path, record: RunRecord, github: GitHubClient, now: floa
     return record
 
 
-def observe_target(github: GitHubClient, target: str, digits: dict[str, int]) -> set[int]:
+def observe_target(github: Forge, target: str, digits: dict[str, int]) -> set[int]:
     """Reconcile all branch pendings, resets first and each kind in ancestry order.
 
     Returns PRs whose merge tree is unmeasured. An API/ancestry failure raises

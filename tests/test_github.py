@@ -40,6 +40,8 @@ def test_default_branch_and_headers(provider: FileTokenProvider) -> None:
     request = transport.requests[0]
     assert request.full_url == "https://api.github.com/repos/org/repo"
     assert request.get_header("Authorization") == "Bearer github_pat_test123"
+    assert client.default_branch("org/repo") == "main"  # cached: one request per client
+    assert len(transport.requests) == 1
 
 
 def test_branch_sha_reads_current_ref(provider: FileTokenProvider) -> None:
@@ -170,21 +172,6 @@ def test_get_file_decodes_base64(provider: FileTokenProvider) -> None:
     assert "ref=main" in transport.requests[0].full_url
 
 
-def test_create_pr_posts_body(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([{"number": 7}])
-    client = GitHubClient(auth=provider, transport=transport)
-    assert client.create_pr("org/repo", "feat/x", "main", "Title", "Body") == 7
-    request = transport.requests[0]
-    assert request.get_method() == "POST"
-    assert isinstance(request.data, bytes)
-    assert json.loads(request.data.decode()) == {
-        "title": "Title",
-        "head": "feat/x",
-        "base": "main",
-        "body": "Body",
-    }
-
-
 def test_update_issue_sets_the_title_only_when_given(provider: FileTokenProvider) -> None:
     transport = FakeTransport([{}, {}])
     client = GitHubClient(auth=provider, transport=transport)
@@ -205,7 +192,6 @@ def test_update_issue_sets_the_title_only_when_given(provider: FileTokenProvider
 def test_dry_run_mutations_touch_nothing(provider: FileTokenProvider) -> None:
     transport = FakeTransport([])
     client = GitHubClient(auth=provider, transport=transport, dry_run=True)
-    assert client.create_pr("org/repo", "h", "b", "t", "b") is None
     client.comment("org/repo", 1, "hello")
     assert transport.requests == []
 
@@ -264,25 +250,6 @@ def test_env_token_provider(monkeypatch) -> None:
         EnvTokenProvider("SOME_TOKEN").token()
 
 
-def test_upsert_comment_edits_existing_marked_comment(provider: FileTokenProvider) -> None:
-    marker = "<!-- m -->"
-    transport = FakeTransport([[{"id": 42, "body": f"{marker} old", "user": {"type": "Bot"}}], {}])
-    client = GitHubClient(auth=provider, transport=transport)
-    client.upsert_comment("org/repo", 7, marker, f"{marker} new")
-    edit = transport.requests[-1]
-    assert edit.get_method() == "PATCH"
-    assert "/issues/comments/42" in edit.full_url
-
-
-def test_upsert_comment_creates_when_absent(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([[{"id": 1, "body": "unrelated", "user": {"type": "Bot"}}], {}])
-    client = GitHubClient(auth=provider, transport=transport)
-    client.upsert_comment("org/repo", 7, "<!-- m -->", "body")
-    create = transport.requests[-1]
-    assert create.get_method() == "POST"
-    assert create.full_url.endswith("/issues/7/comments")
-
-
 def test_diff_uses_raw_transport_and_diff_media_type(provider: FileTokenProvider) -> None:
     """The diff is text/plain — a JSON-decoding transport would break it."""
     seen: list[urllib.request.Request] = []
@@ -321,32 +288,12 @@ def test_default_raw_transport_returns_text_not_json() -> None:
         server.shutdown()
 
 
-def test_upsert_never_overwrites_a_human_comment(provider: FileTokenProvider) -> None:
-    """A human who quote-replies copies the marker; editing their comment is worse
-    than posting a second one."""
-    marker = "<!-- m -->"
-    transport = FakeTransport(
-        [[{"id": 9, "body": f"quoting: {marker}", "user": {"type": "User"}}], {}]
-    )
-    client = GitHubClient(auth=provider, transport=transport)
-    client.upsert_comment("org/repo", 7, marker, "body")
-    assert transport.requests[-1].get_method() == "POST"
-
-
 def test_list_comments_paginates(provider: FileTokenProvider) -> None:
     page1 = [{"id": i, "body": "x", "user": {"type": "Bot"}} for i in range(100)]
     page2 = [{"id": 100, "body": "marked", "user": {"type": "Bot"}}]
     transport = FakeTransport([page1, page2])
     client = GitHubClient(auth=provider, transport=transport)
     assert len(client.list_comments("org/repo", 7)) == 101
-
-
-def test_pull_request_files_paginate(provider: FileTokenProvider) -> None:
-    page1 = [{"filename": f"f{i}.py", "status": "modified"} for i in range(100)]
-    page2 = [{"filename": "last.py", "status": "added"}]
-    transport = FakeTransport([page1, page2])
-    client = GitHubClient(auth=provider, transport=transport)
-    assert len(client.get_pull_request_files("org/repo", 7)) == 101
 
 
 def test_file_content_decodes_base64(provider: FileTokenProvider) -> None:

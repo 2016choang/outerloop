@@ -6,6 +6,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -1086,6 +1087,12 @@ def test_disk_preflight_passes_normally(tmp_path: Path, monkeypatch) -> None:
     fetched = []
 
     class G:
+        def default_branch(self, repo):
+            return "main"
+
+        def secrets(self):
+            return ()
+
         def get_file_content(self, repo, path, ref):
             fetched.append(repo)
             return None  # no contract: self-initiated stops AFTER the gate
@@ -1473,6 +1480,9 @@ def test_contract_alarm_opens_once_and_closes_on_recovery(tmp_path: Path) -> Non
             self.closed: list[int] = []
             self.next = 7
 
+        def secrets(self):
+            return ()
+
         def list_open_issues(self, repo, max_pages: int = 3):
             return [i for i in self.issues if i["number"] not in self.closed]
 
@@ -1609,6 +1619,9 @@ def test_contract_alarm_redacts_and_fences_the_error(tmp_path: Path) -> None:
 
         def list_open_issues(self, repo, max_pages: int = 3):
             return self.issues
+
+        def secrets(self):
+            return (self.auth.token(),)
 
         def create_issue(self, repo, title, body):
             self.issues.append(
@@ -3310,12 +3323,16 @@ def test_service_syncs_fetches_for_live_sessions(tmp_path: Path, monkeypatch) ->
     _g(mover, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "moves")
     _g(mover, "push", "-q", "origin", "main")
 
-    monkeypatch.setattr("outerloop.attempt.target_clone_url", lambda t: str(bare))
-
     class Spec:
         pat_file = ""
         github_app_file = ""
 
+    monkeypatch.setattr(
+        "outerloop.tick.forge_from_env",
+        lambda *a, **k: SimpleNamespace(
+            credential=lambda: None, clone_url=lambda target: str(bare)
+        ),
+    )
     service_syncs(tmp_path, Spec(), 2.0)
     assert sync_requested(ws) is None  # done stamped
     assert _g(ws, "show", "origin/main:docs/b.md").strip() == "new"
@@ -3959,6 +3976,18 @@ class QuietPRGitHub:
             "base": {"sha": "base", "ref": "main"},
         }
 
+    def clone_url(self, target):
+        return f"https://github.com/{target}.git"
+
+    def credential(self):
+        return None
+
+    def secrets(self):
+        return ()
+
+    def default_branch(self, repo):
+        return "main"
+
     def head_contains(self, repo, base, head):
         return True
 
@@ -4283,6 +4312,12 @@ def test_github_failure_does_not_skip_sweep_duties(tmp_path, caplog, failed_requ
     )
 
     class GitHub:
+        def credential(self):
+            return None
+
+        def clone_url(self, target):
+            return f"https://github.com/{target}.git"
+
         def get_pull_request(self, *args):
             if failed_request == "pr":
                 raise RuntimeError("GitHub down")
@@ -4523,6 +4558,9 @@ def test_merge_holds_lease_and_reloads_record(tmp_path, monkeypatch, caplog, cha
 
     class GitHub:
         head_contains = GitHubClient.head_contains
+
+        def secrets(self):
+            return ()
 
         def compare(self, repo, base, head):
             assert events == ["acquire"]
@@ -4871,3 +4909,18 @@ roadmap: README.md
     assert message in caplog.text
     compute.submit.assert_not_called()
     github.comment.assert_not_called()
+
+
+def test_base_dial_reads_an_explicit_base_when_the_default_branch_is_unreadable(monkeypatch):
+    import outerloop.tick as tick_mod
+
+    class Down:
+        def default_branch(self, repo):
+            raise RuntimeError("api down")
+
+    monkeypatch.setattr(tick_mod, "_contract_text", lambda g, t, ref: "x" if ref == "dev" else None)
+    monkeypatch.setattr(
+        "outerloop.contract.load_contract", lambda raw, t: SimpleNamespace(merge="auto")
+    )
+    assert tick_mod._base_dial(Down(), "o/r", {"base": {"ref": "dev"}}, None, "o/r") == "auto"
+    assert tick_mod._base_dial(Down(), "o/r", {}, None, "o/r") == "manual"  # no base: doubt

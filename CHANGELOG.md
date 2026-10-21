@@ -6,6 +6,8 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).
+
 ## [0.4.0] - 2026-10-20
 
 ### Upgrading

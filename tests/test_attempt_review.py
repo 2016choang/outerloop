@@ -194,7 +194,7 @@ def review_run(tmp_path: Path, monkeypatch):
     )
     save_record(root, record, NOW - 1000)
     advance_github_positions(ws.parent, {"comment": 100})
-    monkeypatch.setattr("outerloop.attempt.target_clone_url", lambda target: str(bare))
+    monkeypatch.setattr(FakeGitHub, "clone_url", lambda self, target: str(bare))
     return root, bare
 
 
