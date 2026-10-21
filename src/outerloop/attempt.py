@@ -1940,7 +1940,7 @@ def _wake_author_sleep(
         log.warning("run %s: %s", run_id, exc)
         return AttemptOutcome(run_id=run_id, outcome="parked", pr_url=latest.pr_url)
     except ScopeHistoryError as exc:
-        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
+        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth, forge=github)
     finally:
         for snap in snapshots:
             if parked and kept_ref and snap.ref == kept_ref:
@@ -2396,14 +2396,14 @@ def _log_line_snapshot(
     operation: str,
     run_id: str,
     line_ref: str,
-    auth: bool,
+    transport: bool,
     sealed: str,
     detail: str,
     secrets: tuple[str, ...],
 ) -> None:
     message = (
         f"line snapshot {operation} run={run_id} line={line_ref} "
-        f"auth={auth} sealed={sealed}: {detail}"
+        f"transport={transport} sealed={sealed}: {detail}"
     )
     message = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1[redacted]@", message)
     message = re.sub(r"(?i)authorization[^\r\n]*", "Authorization: [redacted]", message)
@@ -2457,16 +2457,18 @@ def _push_line_snapshot(
         return
     sealed = "-"
     operation = "prepare"
+    # A transport is a credential (GitHub) or a local path URL (the local
+    # forge): a local workspace has the latter and no credential, and must
+    # still seal.
+    has_transport = ws.has_transport()
 
     def report(detail: str) -> None:
-        _log_line_snapshot(
-            operation, run_id, line_ref, ws.auth is not None, sealed, detail, secrets
-        )
+        _log_line_snapshot(operation, run_id, line_ref, has_transport, sealed, detail, secrets)
 
-    if ws.auth is None or ws.dry_run:
+    if not has_transport or ws.dry_run:
         operation = "skip"
         report(
-            "snapshot skipped: no GitHub auth" if ws.auth is None else "snapshot skipped: dry run"
+            "snapshot skipped: no transport" if not has_transport else "snapshot skipped: dry run"
         )
         return
     dropped: set[str] = set()
@@ -2791,6 +2793,8 @@ def _end_refused_wake(
     secrets: tuple[str, ...],
     auth: TokenProvider | None = None,
     snapshot_attempted: bool = False,
+    *,
+    forge: Forge | None = None,
 ) -> AttemptOutcome:
     """End a refused run with the reason recorded as its note.
 
@@ -2811,6 +2815,7 @@ def _end_refused_wake(
             note,
             now,
             auth=auth,
+            forge=forge,
             secrets=secrets,
             snapshot_attempted=snapshot_attempted,
         ),
@@ -2851,7 +2856,7 @@ def resume_run(
         )
     except BenchmarkNotFoundError as exc:
         return _end_refused_wake(
-            run_root, load_record(run_root, run_id), exc, now, secrets, bot_auth
+            run_root, load_record(run_root, run_id), exc, now, secrets, bot_auth, forge=github
         )
 
 
@@ -2941,7 +2946,7 @@ def _resume_run(
     try:
         handoff_git_dir(workspace)
     except GitError as exc:
-        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
+        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth, forge=github)
     # Discover CURRENT policy outside the author's object store before fetching
     # any refs into it. The saved contract and dirty working tree can both be
     # stale; only the canonical base branch can authorize sharing on this wake.
@@ -2972,6 +2977,7 @@ def _resume_run(
                 now,
                 secrets,
                 ws.auth,
+                forge=github,
             )
         raise
     # Channels follow the current contract at once (tightening isolation must
@@ -3004,7 +3010,7 @@ def _resume_run(
         pinned_tip = _scope_revision(ws, scope_base)
     except ScopeHistoryError as exc:
         # An unresolvable base cannot be scope-checked: refuse, never guess.
-        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
+        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth, forge=github)
 
     if record.pr_url and not stage.get("phase"):
         base_branch = str(stage.get("base_branch") or base_branch)
@@ -3087,7 +3093,7 @@ def _resume_run(
             )
         )
     except ScopeHistoryError as exc:
-        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth)
+        return _end_refused_wake(run_root, record, exc, now, secrets, ws.auth, forge=github)
     seed = int(stage["seed"])  # type: ignore[call-overload]
     suite_seed = int(stage["suite_seed"])  # type: ignore[call-overload]
     panel_reads = int(stage.get("panel_reads", 0))  # type: ignore[call-overload]
@@ -3326,6 +3332,7 @@ def _resume_run(
                         secrets,
                         ws.auth,
                         snapshot_attempted=True,
+                        forge=github,
                     )
                 log.warning(
                     "wake panel errored for %s (%s); opening a DRAFT",
@@ -3427,6 +3434,7 @@ def _resume_run(
             NEGATIVE_RESULT,
             redact(result.note or result.outcome, secrets),
             now,
+            forge=github,
             snapshot_attempted=True,
             secrets=secrets,
         )
@@ -3932,6 +3940,7 @@ def _finish_attempt(
                 _ENDINGS_BY_OUTCOME[result.outcome],
                 redact(result.note, secrets),
                 now,
+                forge=github,
                 snapshot_attempted=True,
                 secrets=secrets,
             ),
@@ -4110,6 +4119,7 @@ def publish(
             secrets,
             ws.auth,
             snapshot_attempted=True,
+            forge=github,
         )
 
     def refuse(
@@ -4203,6 +4213,7 @@ def publish(
             secrets,
             ws.auth,
             snapshot_attempted=True,
+            forge=github,
         )
     except Exception as exc:
         return refuse(
@@ -4424,7 +4435,7 @@ def publish(
                 record.target,
                 number,
                 f"---\n**Edit ({date}, submit):** {note}\n\n"
-                f"{progress_link(config.target)}\n\n"
+                f"{progress_link(config.target, github)}\n\n"
                 f"{redact(result.submit_report or 'no report was given', secrets)}"
                 f"{panel_section}\n\n"
                 f"{_self_merge_line(blessed_head, bless_reason)}",
@@ -4511,7 +4522,7 @@ def publish(
                 experiments=experiments_rows(run_dir),
                 base_sha=base_sha,
             )
-            body += f"\n\n{progress_link(config.target)}\n"
+            body += f"\n\n{progress_link(config.target, github)}\n"
             if issue_number:
                 body = f"Addresses #{issue_number}.\n\n{body}"
             pr_url = github.create_pull(
@@ -4625,6 +4636,7 @@ def publish(
                 secrets,
                 ws.auth,
                 snapshot_attempted=True,
+                forge=github,
             )
         log.warning(
             "publish failed for %s: %s",
@@ -4659,6 +4671,7 @@ def publish(
                 final.ending,
                 final.ending_note,
                 now,
+                forge=github,
                 snapshot_attempted=True,
                 secrets=secrets,
             )
@@ -5276,6 +5289,7 @@ def live_attempt(
                 failed.ending_note,
                 now,
                 auth=bot_auth,
+                forge=github,
                 snapshot_attempted=bool(salvage),
                 secrets=secrets,
                 bot_login=config.bot_login,
@@ -5826,6 +5840,7 @@ def main() -> int:
                 time.time(),
                 wake_secrets,
                 bot_auth,
+                forge=forge,
             )
         finally:
             # This wake job HOLDS the run's lease (the sweep transferred it on
@@ -6197,7 +6212,7 @@ def finish_run(
                 "prepare",
                 record.run_id,
                 line_ref,
-                ws.auth is not None,
+                ws.has_transport(),
                 "-",
                 f"failed: {type(exc).__name__}: {exc}",
                 secrets,

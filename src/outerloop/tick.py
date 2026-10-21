@@ -1456,8 +1456,12 @@ def _publish_ledger_entry(
         # the probe: a fresh successful write is the license to post
         if not _mark("pointer-pending"):
             return False
-        url = f"https://github.com/{target}/blob/{RESEARCH_LOG_BRANCH}/{path}"
-        line = f"**{outcome}** `{record.benchmark}` — [report]({url})"
+        _, url = github.ref_for(target, "blob", f"{RESEARCH_LOG_BRANCH}/{path}")
+        line = (
+            f"**{outcome}** `{record.benchmark}` — [report]({url})"
+            if url
+            else f"**{outcome}** `{record.benchmark}` — report `{path}`"
+        )
         if record.pr_url:
             line += f" · {record.pr_url}"
         if record.issue_number:
@@ -1490,12 +1494,17 @@ def _publish_ledger_entry(
                         log_issue = int(issue.get("number", 0))
                         break
             if not log_issue:
+                _, reports_link = github.ref_for(target, "tree", f"{RESEARCH_LOG_BRANCH}/reports")
+                reports_ref = (
+                    f"[`{RESEARCH_LOG_BRANCH}`]({reports_link})"
+                    if reports_link
+                    else f"`{RESEARCH_LOG_BRANCH}`"
+                )
                 log_issue = github.create_issue(
                     target,
                     "Research log",
                     f"{RESEARCH_LOG_MARKER}\nOne two-line comment per finished "
-                    f"outerloop run — full reports live on the [`{RESEARCH_LOG_BRANCH}`]"
-                    f"(https://github.com/{target}/tree/{RESEARCH_LOG_BRANCH}/reports) "
+                    f"outerloop run — full reports live on the {reports_ref} "
                     "branch. Results relevant to an open order issue are posted "
                     "there instead.",
                 )

@@ -282,8 +282,16 @@ class GitHubClient:
         return (token,) if token else ()
 
     def ref_for(self, repo: str, kind: str, ident: int | str) -> tuple[str, str]:
-        """A stable reference for a record and its link on this forge."""
-        segment = "pull" if kind == "pull" else "issues"
+        """A stable reference for a record and its link on this forge. `pull`
+        and `issue` name records; `commit`, `blob` and `tree` let the ledger,
+        the board and the research log link into the target's own repository."""
+        segment = {
+            "pull": "pull",
+            "issue": "issues",
+            "commit": "commit",
+            "blob": "blob",
+            "tree": "tree",
+        }.get(kind, "issues")
         return f"{repo}#{ident}", f"https://github.com/{repo}/{segment}/{ident}"
 
     @staticmethod
@@ -1564,6 +1572,17 @@ def _run_git(args: list[str], env: dict[str, str], timeout: float | None = None)
     return result.stdout.strip()
 
 
+def _is_path_url(url: str) -> bool:
+    """Whether `url` names a local path (including `file://`), as opposed to
+    an HTTPS/SSH remote or an scp-style `host:path` spelling."""
+    if url.startswith("file://"):
+        return True
+    if "://" in url:
+        return False
+    # scp-style remotes have no scheme but carry `user@host:` before any path
+    return re.match(r"^[^/]+@[^/]+:", url) is None
+
+
 @dataclass
 class Workspace:
     """A working clone the agent session edits; pushes happen orchestrator-side."""
@@ -1603,6 +1622,11 @@ class Workspace:
             timeout=NETWORK_GIT_TIMEOUT_S,
         )
 
+    def has_transport(self) -> bool:
+        """Whether this workspace can fetch and push: a credential (GitHub) or
+        a local path URL (the local forge, where permissions are the auth)."""
+        return self.auth is not None or (self.url is not None and _is_path_url(self.url))
+
     def remote_url(self) -> str:
         """The remote URL as recorded at clone time, read token-free."""
         return self.git("config", "--get", "remote.origin.url")
@@ -1624,10 +1648,14 @@ class Workspace:
                 "--quiet",
                 *SAFE_GIT_FLAGS,
                 *(
-                    ["--single-branch", "--branch", single_branch, "--no-tags", "--no-local"]
+                    ["--single-branch", "--branch", single_branch, "--no-tags"]
                     if single_branch
                     else []
                 ),
+                # A path URL is a local clone: without --no-local git hardlinks
+                # object files and writes an alternates file, so the session
+                # clone would share objects with the kernel's bare repository.
+                *(["--no-local"] if _is_path_url(url) else []),
                 url,
                 str(dest),
             ],

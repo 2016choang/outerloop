@@ -8,6 +8,10 @@ import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from outerloop.forge import Forge
 
 log = logging.getLogger(__name__)
 
@@ -290,6 +294,8 @@ def render_markdown(
     entries: dict[str, LeaderEntry],
     target: str,
     digits: dict[str, int] | None = None,
+    *,
+    forge: Forge | None = None,
 ) -> str:
     lines = [
         "# Benchmark progress",
@@ -311,11 +317,18 @@ def render_markdown(
         e = entries[name]
         arrow = "↓" if e.direction == "min" else "↑"
         d = (digits or {}).get(e.benchmark)
-        provenance = (
-            f"[{e.main_commit[:9]}](https://github.com/{target}/commit/{e.main_commit})"
-            if e.main_commit
-            else "provenance unknown"
-        )
+        commit_link = ""
+        if e.main_commit:
+            if forge is None:
+                commit_link = f"https://github.com/{target}/commit/{e.main_commit}"
+            else:
+                _, commit_link = forge.ref_for(target, "commit", e.main_commit)
+        if commit_link:
+            provenance = f"[{e.main_commit[:9]}]({commit_link})"
+        elif e.main_commit:
+            provenance = f"`{e.main_commit[:9]}`"
+        else:
+            provenance = "provenance unknown"
         if e.main_commit and not e.measured_sha:
             provenance += " (imported; provenance unknown)"
         if e.provenance == "self_reported":

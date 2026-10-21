@@ -530,6 +530,7 @@ def live_steward(
                     final.ending_note,
                     now,
                     auth=bot_auth,
+                    forge=github,
                     secrets=secrets,
                     bot_login=config.bot_login,
                 ),
@@ -603,7 +604,7 @@ def live_steward(
             f"them with their own work orders.\n\n"
             f"## Stewardship report\n\n{redact(session.final_text, secrets)[:20000]}"
         )
-        body += f"\n\n{progress_link(config.target)}\n"
+        body += f"\n\n{progress_link(config.target, github)}\n"
         pr_url = github.create_pull(
             config.target,
             title=f"[steward] {config.benchmark}: re-based env "
@@ -701,6 +702,7 @@ def live_steward(
                 final.ending_note,
                 now,
                 auth=bot_auth,
+                forge=github,
                 secrets=secrets,
                 bot_login=config.bot_login,
             ),

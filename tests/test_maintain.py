@@ -257,6 +257,9 @@ class _Client:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.comments.append((number, body))
 
+    def ref_for(self, repo: str, kind: str, ident: int | str) -> tuple[str, str]:
+        return f"{repo}#{ident}", f"https://github.com/{repo}/{kind}/{ident}"
+
 
 def _envelope(tmp_path: Path, **kw: Any) -> Path:
     envelope: dict[str, Any] = {

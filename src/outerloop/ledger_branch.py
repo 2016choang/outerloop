@@ -99,8 +99,16 @@ def read_ledger(
     return head, leader, pendings
 
 
-def progress_link(target: str) -> str:
-    return f"[Benchmark progress](https://github.com/{target}/blob/{RESEARCH_LOG_BRANCH}/BENCHMARKS.md)"
+def progress_link(target: str, forge: Forge | None = None) -> str:
+    if forge is None:
+        return (
+            f"[Benchmark progress](https://github.com/{target}/blob/"
+            f"{RESEARCH_LOG_BRANCH}/{PROGRESS_FILE})"
+        )
+    _, link = forge.ref_for(target, "blob", f"{RESEARCH_LOG_BRANCH}/{PROGRESS_FILE}")
+    if not link:
+        return f"Benchmark progress (`{PROGRESS_FILE}` on the `{RESEARCH_LOG_BRANCH}` branch)"
+    return f"[Benchmark progress]({link})"
 
 
 def write_ledger(
@@ -139,7 +147,7 @@ def write_ledger(
             )
             + "\n"
         )
-        patch[PROGRESS_FILE] = render_markdown(leader, target, digits)
+        patch[PROGRESS_FILE] = render_markdown(leader, target, digits, forge=github)
         if github.put_files(
             target, patch, RESEARCH_LOG_BRANCH, "Update benchmark ledger", expected_head=head
         ):
