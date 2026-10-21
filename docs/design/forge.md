@@ -31,72 +31,117 @@ A `Forge` Protocol, selected the way `Compute` is (`compute.py`):
 `OUTERLOOP_FORGE=github` (the default) or `local`. `GitHubForge` wraps the
 existing client and changes no behavior. `LocalForge` implements the same
 verbs over a bare git repository and JSON records on the deployment's
-shared filesystem.
+shared filesystem. `OUTERLOOP_FORGE` joins the keys `start` exports and the
+deploy step carries into every tick.
 
-One factory builds the forge at every entry point: the tick, attempt and
-steward jobs, and the CLI. It replaces today's direct credential handling
-there. Startup checks become backend-aware: the tick currently disables
-servicing without a PAT or App and a bot login, which stays true for
-`github` and does not apply to `local`. The factory also builds each
-`Workspace`: clone URL and credential from the forge.
+One factory builds the forge at every entry point (the tick, attempt and
+steward jobs, and the CLI) and supplies three things callers take from the
+client or the environment today:
 
-The verbs are the ones the kernel calls now, grouped by role:
+- **Workspaces.** Clone URL and credential come from the forge. This
+  replaces `target_clone_url` (`attempt.py`) everywhere it is used: run
+  wakes, publish, `finish_run`, the tick's mid-leg sync and the steward.
+- **Kernel identity.** `bot_login` stays load-bearing: commits take their
+  author from it, and intake and the steward refuse to run without it. On
+  GitHub it is the App or bot login, as today; locally the factory supplies
+  `outerloop`.
+- **Secrets and dry run.** `forge.secrets()` feeds redaction, replacing the
+  direct `github.auth.token()` read in the tick; `forge.dry_run` replaces the
+  direct attribute read in the ledger.
+
+Startup gates become backend-aware. Servicing needs a home, a target and an
+image on every backend; the credential and bot-login gate applies to
+`github` only.
+
+The kernel's verbs, grouped by role:
 
 | Role | Verbs |
 |---|---|
 | Transport | clone URL and credential for a `Workspace` |
 | Refs and files | `default_branch`, `branch_head`, `branch_sha`, `head_contains`, `commit_tree`, `get_tree`, `get_file`, `get_file_content`, `list_directory`, `create_ref`, `ensure_branch`, `put_file`, `put_files` |
-| Pull requests | `create_pull`, `get_pull_request`, `find_open_pull_for_head`, `update_candidate_row`, `append_pull_body`, `mark_ready_for_review`, `arm_auto_merge_when_review_required`, `disable_auto_merge`, `allowed_merge_methods`, `merge_pull`, `get_pull_request_diff`, `close_issue` |
-| Threads | `list_comments`, `comment`, `list_pr_reviews`, `list_pr_review_comments`, `create_pr_review` |
-| Issues | `list_open_issues`, `create_issue`, `update_issue` |
-| Checks | `list_check_runs`, `job_log_tail` |
+| Pull requests | `create_pull`, `get_pull_request`, `find_open_pull_for_head`, `update_candidate_row`, `append_pull_body`, `mark_ready_for_review`, `arm_auto_merge_when_review_required`, `disable_auto_merge`, `allowed_merge_methods`, `merge_pull`, `close_issue` |
+| Threads | `list_comments`, `comment`, `list_pr_reviews`, `list_pr_review_comments` |
+| Issues | `list_open_issues`, `create_issue` (with labels) |
+| Checks | `list_check_runs` |
 | Identity | `is_kernel_post`, `qualifies` (below) |
-| References | `ref_for(kind, id)`: a stable reference for records and reports, and an optional clickable link |
+| References | `ref_for(kind, id)`: a stable reference and an optional link |
 
-Return values keep the shapes callers read today. A pull request is a
-mapping with `number`, `state`, `merged`, `merged_at`, `merge_commit_sha`,
-`draft`, `mergeable_state`, nested `head.sha`, `head.ref` and `base.ref`,
-`html_url`, and `labels`, so the ledger observer, bless and merge checks and
-publish read local records unchanged. Reads at a ref follow the real
-client's semantics: a branch or a sha, `None` for a missing file in
-`get_file_content`, regular files only, and the same compare-and-swap result
-for `put_files`.
+`get_pull_request_diff`, `create_pr_review`, `update_issue` and
+`job_log_tail` serve only the GitHub Actions posting CLIs (or are reached
+only through a GitHub check run), so they stay on the GitHub client and out
+of the Protocol. Four client methods have no caller (`create_pr`,
+`get_issue`, `get_pull_request_files`, `upsert_comment`) and are deleted.
 
-Four client methods have no caller (`create_pr`, `get_issue`,
-`get_pull_request_files`, `upsert_comment`) and are deleted rather than
-carried into the interface.
+### Shapes and errors
+
+Return values keep the shapes callers read today, so the ledger observer,
+bless and merge checks, intake and the steward read local records unchanged:
+
+- **Pull request**: `number`, `state`, `merged`, `merged_at`,
+  `merge_commit_sha`, `draft`, `mergeable_state`, `user.login`, `html_url`,
+  `labels`, and nested `head.sha`, `head.ref`, `base.ref`. `head.sha` and the
+  base tip are read from the live refs on every call, so a follow-up push is
+  seen at once.
+- **Issue**: `number`, `title`, `body`, `user.login`, `author_association`,
+  `labels[].name`, `created_at`.
+- **Comment**: an increasing integer `id`, `user.login`, `body`,
+  `author_association`, and an ISO `created_at` (the steward releases stale
+  claims by age).
+- **Reads at a ref** follow the real client: a branch or a sha; `get_file`
+  raises on a missing file and `get_file_content` returns `None`; regular
+  files only; `get_tree` reports `truncated` false; `branch_head` returns
+  `""` for a missing branch and `None` on failure; `put_file` and `put_files`
+  return what the client returns.
+- **Errors**: a missing branch, file or record raises the client's error
+  with `status` 404. Several callers read a 404 as "absent" (the ledger, the
+  board, `close_if_done`, base-moved checks); any other error reads as an
+  outage and stalls them.
+
+Contract reads use `default_branch` instead of the literal `main` the tick
+passes in two places today, so a local repository with another default
+branch still loads its contract. User-visible text that names GitHub (the
+inbox's member label, its conflict line, the self-merge status comment)
+takes the forge's name instead.
 
 ### The local backend
 
-- **Storage.** A bare repository at
-  `$OUTERLOOP_ROOT/forge/<owner>/<repo>.git`, and records beside it:
-  `pulls/<n>.json`, `issues/<n>.json` and `threads/<n>/<id>.json`. Issues and
-  pull requests share one number sequence, as on GitHub. One lock covers
-  number allocation and every read-modify-write of a record; comment ids are
-  increasing integers, since the inbox cursor and claim markers depend on
-  their order. Branch writes keep git's own compare-and-swap, as the ledger
-  and board need for concurrent writers.
+- **Bootstrap.** `outerloop init` creates the bare repository at
+  `$OUTERLOOP_ROOT/forge/<owner>/<repo>.git` with `git clone --bare` from an
+  existing repository (a path or URL), or `git init --bare` with a first
+  commit of a given directory. Its default branch is recorded.
+- **Records.** `pulls/<n>.json`, `issues/<n>.json` and
+  `threads/<n>/<id>.json` beside the repository. Issues and pull requests
+  share one number sequence, as on GitHub, and `close_issue` closes either
+  kind. One lock covers number allocation and every read-modify-write of a
+  record. Branch writes keep git's own compare-and-swap, as the ledger and
+  board need for concurrent writers.
 - **Transport.** A path URL with no credential (`Workspace` already accepts
   `auth=None`). Filesystem permissions are the access control. The bare
-  repository sits outside every path a session can see, and every clone a
+  repository sits outside every path a session can see. Every clone a
   session can see uses `--no-local` with no alternates, so it shares no
-  object files with the bare repository. A contained session cannot reach
-  the state root; an uncontained one can, which the install guide's
-  uncontained trade-offs will say.
+  object files with the bare repository; today only the single-branch clone
+  passes `--no-local`, so the default `Workspace.clone` and the channel
+  bootstrap clone change too. A contained session cannot reach the state
+  root; an uncontained one can, which the install guide's uncontained
+  trade-offs will say.
 - **Line snapshots.** `_push_line_snapshot` returns early when a workspace
   has no credential. It changes to ask whether the forge has a transport,
-  so local snapshots are pushed.
+  and the forge reaches it through `finish_run` as well as the run legs, so
+  local snapshots are pushed on every path.
 - **Pull requests.** Opening one pushes the head branch first, as on GitHub.
-  `mergeable_state` comes from git: `clean` when the head contains the base
-  tip, `behind` when it does not but merges without conflict, and `dirty`
-  only when a trial merge conflicts, which is what the inbox treats as a
-  conflict. `html_url` holds the local reference; numbers parse as before.
-- **Merging.** A merge commit into the base, with `git update-ref` given the
-  old base tip, after checking that the live head ref still equals the
-  expected head sha. The record is written after the ref moves. A process
-  that dies between the two leaves the base containing the head, and the
-  next read of that record marks it merged from git, so the state heals
-  instead of drifting.
+  `mergeable_state` is computed when read and cached by the head and base
+  shas: `clean` when the head contains the base tip, `behind` when it does
+  not but a trial merge succeeds, and `dirty` only when the trial merge
+  conflicts, which is what the inbox treats as a conflict.
+- **Merging.** `allowed_merge_methods` returns `["MERGE"]`. `merge_pull`
+  builds a merge commit from the expected head sha and moves the base in one
+  git ref transaction (`git update-ref --stdin`): verify the head branch
+  still points at the expected sha, then update the base from its old tip.
+  Either both checks pass and the base moves, or nothing changes. The record
+  is written after the ref moves. A process that dies in between leaves the
+  base containing the head; the next read of that record finds the merge
+  commit on the base whose second parent is the head and marks the record
+  merged, under the record lock.
 - **Auto-merge.** Nothing is armed locally:
   `arm_auto_merge_when_review_required` returns `False` and
   `disable_auto_merge` reports disarmed. Under the auto dial the kernel
@@ -104,29 +149,34 @@ carried into the interface.
   GitHub. There are no required checks, so the stale-base guard is the
   head-contains-tip test.
 - **Checks and reviews.** `list_check_runs`, `list_pr_reviews` and
-  `list_pr_review_comments` return nothing, and `job_log_tail` is unused.
-  They serve the GitHub Actions workflows, which do not run locally.
+  `list_pr_review_comments` return nothing. The inbox reads them to pass
+  CI results and Actions review rounds to the author; locally there are
+  none.
 
 ### People: review and merge from the CLI (open question 1)
 
-A small `outerloop pr` group: `list`, `show N`, `diff N`, `comment N`,
-`merge N` and `close N`, plus `outerloop issue new [--label L]` and
-`outerloop issue comment N`. Labels matter because the steward lane only
-takes issues carrying its label. These commands write the same records the
-kernel reads, so a person's comment reaches a run's inbox and an issue
-becomes a work order as on GitHub. No web view in the first version.
+A small `outerloop pr` group: `list`, `show N`, `comment N`, `merge N` and
+`close N`, plus `outerloop issue new [--label L]` and `outerloop issue
+comment N`. The labels are the kernel's own: `outerloop:steward` routes an
+issue to the steward lane and `outerloop:task` vouches for a work order.
+These commands write the same records the kernel reads, so a person's
+comment reaches a run's inbox and an issue becomes a work order as on
+GitHub. Diffs come from `git diff` against the bare repository. No web view
+in the first version.
 
 ### Ledger, board, research log (open question 2)
 
 The ledger, reports and board go through refs-and-files verbs and work
 unchanged. Research-log publication also creates and comments on the
-research-log issue; locally those become records like any issue. Links in
-reports come from `ref_for`, so they point at the forge in use. The
-steward's clone URL, hard-coded to GitHub today, comes from the forge too.
+research-log issue; locally those become records like any issue. Links are
+hard-coded to `github.com` today in the tick (the research-log pointer and
+the rolling issue body), `progress.py`, `ledger_branch.py` and
+`maintain.py`; they move to `ref_for`, so they point at the forge in use.
 
 ### Identity, and who merges (open question 3)
 
-`is_own_login(author, bot_login)` becomes `forge.is_kernel_post(item)`:
+`is_own_login(author, bot_login)` becomes `forge.is_kernel_post(item)` at
+the call sites that judge an issue, comment or post:
 
 - **GitHub with an App or bot account**: the login check, aliases included,
   as today.
@@ -137,11 +187,15 @@ steward's clone URL, hard-coded to GitHub today, comes from the forge too.
   and carries an `outerloop:` marker. Every kernel post gets a marker for
   this; most already have one.
 
-One ownership check has no post: `_observe_auto_pr` disarms auto-merge only
+Two call sites judge a pull request's author rather than a post (the
+reviewer's and the verifier's skip rules). They run in GitHub Actions only,
+and read `user.login` from the pull request.
+
+One ownership check has neither: `_observe_auto_pr` disarms auto-merge only
 when the kernel armed it, read from `auto_merge.enabled_by.login`. With a
 shared login that cannot tell the kernel from the person, so the follow-up
-reads it from the run record instead (the kernel already records the head
-it blessed).
+records the arming itself (pull request number and head) in the run's stage
+when the kernel arms, and compares against that.
 
 `author_association` checks become `forge.qualifies(item)`: author standing
 only. Locally every person-written record qualifies, since only people with
@@ -151,12 +205,16 @@ requires author standing, and the verifier still trusts kernel replies and
 marked verifier posts.
 
 Who merges is unchanged on every backend. Under the manual dial the kernel
-never merges; on GitHub it only arms auto-merge behind a required human
-review, and locally it arms nothing. Under the auto dial the kernel merges
-blessed solver heads, and steward pull requests stay a person's to merge.
-Reviews are comments only. Locally none of this is enforced by permission,
-because the kernel and the person share the filesystem; that is the trust
-the operator already gives the kernel over its state root.
+never calls `merge_pull`; on GitHub it only arms auto-merge behind a
+required human review, and locally it arms nothing. Under the auto dial the
+kernel merges blessed solver heads, and steward pull requests stay a
+person's to merge. Reviews are comments only.
+
+Locally none of this is enforced by permission. The kernel and the people
+share the filesystem, so anyone who can write the forge directory can write
+a record with the author `outerloop`, including a claim marker that GitHub's
+bot identity makes unforgeable. That is the trust the operator already gives
+everyone with write access to the state root.
 
 ### Migration (open question 4)
 
@@ -176,19 +234,23 @@ run inside the kernel and are unaffected.
 Each step is one PR with its tests:
 
 1. The `Forge` Protocol, `GitHubForge` around the existing client, the
-   factory at every entry point, callers typed to `Forge`, the four dead
-   methods removed. No behavior change.
-2. `LocalForge` refs, files and transport, with `--no-local` session clones
-   and transport-gated snapshots; the ledger, research log and board on a
-   bare repository.
-3. `LocalForge` pull requests, threads and issues, the merge and recovery
-   path, and the `outerloop pr` and `outerloop issue` commands.
-4. The identity seam (`is_kernel_post`, `qualifies`) on both backends.
+   factory at every entry point (workspaces, kernel identity, secrets, dry
+   run), `OUTERLOOP_FORGE` in the deploy and start key lists, callers typed
+   to `Forge`, contract reads at `default_branch`, the four dead methods
+   removed. No behavior change.
+2. `LocalForge` bootstrap, refs, files and transport, with `--no-local`
+   session clones, transport-gated snapshots and the 404 error contract; the
+   ledger, research log and board on a bare repository; links through
+   `ref_for`.
+3. `LocalForge` pull requests, threads and issues, the merge transaction and
+   its recovery, and the `outerloop pr` and `outerloop issue` commands.
+4. The identity seam (`is_kernel_post`, `qualifies`) on both backends, and
+   the forge name in user-visible text.
 5. `outerloop init` offers the local backend; docs.
 
 Then the personal-token mode: `init` offers "use my GitHub login" and writes
 `gh auth token` to the PAT file, the marker rule from step 4 applies,
-auto-merge ownership comes from the run record, and PR bodies and commit
+auto-merge arming is recorded in the run's stage, and PR bodies and commit
 trailers name Outerloop as the author. Its docs state the trade-offs: the
 person cannot approve their own agents' pull requests, so a required-review
 rule needs a second reviewer; the kernel's restraint about merging holds by
