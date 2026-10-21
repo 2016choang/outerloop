@@ -1308,6 +1308,11 @@ class LocalForge:
                     head_sha[:9],
                 )
                 return False
+            if self._descends_from(repo, wanted, base_tip):
+                # merged outside the kernel after the read: land nothing (no
+                # second merge commit); the next read records the outside merge
+                log.warning("merge of %s#%s skipped: the base already contains it", repo, number)
+                return False
             if self.head_contains(repo, base_tip, wanted):
                 tree = self.commit_tree(repo, wanted)
             else:
@@ -1328,7 +1333,7 @@ class LocalForge:
             merge_sha = self._merge_commit(repo, tree, base_tip, wanted, message)
             if not self._land_merge(repo, head_ref, wanted, base_ref, base_tip, merge_sha):
                 return False
-        except GitHubError as exc:
+        except (GitHubError, GitError) as exc:
             log.warning("merge of %s#%s failed: %s", repo, number, exc)
             return False
         try:
@@ -1367,7 +1372,8 @@ class LocalForge:
         if not head:
             return []
         comments = self._json_records(repo, head, f"threads/{issue_number}")
-        return sorted(comments.values(), key=lambda c: int(c.get("id") or 0))
+        ordered = sorted(comments.values(), key=lambda c: int(c.get("id") or 0))
+        return ordered[: max_pages * 100]  # GitHub's cap: max_pages pages of 100, oldest first
 
     def comment(self, repo: str, issue_number: int, body: str) -> None:
         """Append one comment to an issue's or pull request's thread."""
