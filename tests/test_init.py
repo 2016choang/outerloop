@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -430,6 +431,64 @@ def test_init_force_overwrites_an_existing_env(tmp_path: Path, monkeypatch) -> N
     )
     assert rc == 0
     assert "OUTERLOOP_TARGET=o/r" in (tmp_path / ".env").read_text()
+
+
+def test_init_local_forge_bootstraps_without_github_credentials(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`--forge local` seeds a bare repository under the state root and writes
+    no GitHub credential. Re-running init never replaces an existing forge."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "README.md").write_text("seed\n")
+    git = ["git", "-C", str(seed)]
+    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run(
+        [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"], check=True
+    )
+    state = tmp_path / "state"
+    argv = [
+        "--yes",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--root",
+        str(state),
+        "--forge",
+        "local",
+        "--forge-source",
+        str(seed),
+        "--claude-model",
+        "claude-x",
+    ]
+    assert init.main(argv) == 0
+    env = (tmp_path / "config" / ".env").read_text()
+    assert "OUTERLOOP_FORGE=local" in env
+    assert f"OUTERLOOP_ROOT={state}" in env
+    assert "OUTERLOOP_PAT_FILE" not in env and "OUTERLOOP_GITHUB_APP_FILE" not in env
+    repository = state / "forge" / "o" / "r.git"
+    assert repository.is_dir()
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    # a re-run refreshes the settings and leaves the forge repository alone
+    assert init.main([*argv, "--force"]) == 0
+    assert "left unchanged" in capsys.readouterr().out
+    assert (
+        subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == head
+    )
 
 
 def test_init_interactive_declined_overwrite_keeps_the_config(tmp_path: Path, monkeypatch) -> None:

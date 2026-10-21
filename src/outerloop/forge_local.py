@@ -1122,6 +1122,20 @@ class LocalForge:
                 return pull
         return None
 
+    def list_pulls(self, repo: str) -> list[dict[str, Any]]:
+        """Every pull-request record, open, merged or closed, in number order.
+
+        Read through `get_pull_request` so a merge made outside the kernel is
+        recorded on first sight, exactly as a run's own read does."""
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return []
+        numbers = sorted(
+            int(record.get("number") or 0)
+            for record in self._json_records(repo, head, "pulls").values()
+        )
+        return [self.get_pull_request(repo, number) for number in numbers if number]
+
     def update_candidate_row(
         self, repo: str, number: int, candidate: float, digits: int | None = None
     ) -> bool:
@@ -1370,7 +1384,31 @@ class LocalForge:
         return sorted(comments.values(), key=lambda c: int(c.get("id") or 0))
 
     def comment(self, repo: str, issue_number: int, body: str) -> None:
-        """Append one comment to an issue's or pull request's thread."""
+        """Append one kernel comment to an issue's or pull request's thread."""
+        self._append_comment(repo, issue_number, body, self.bot_login, "NONE")
+
+    def comment_as(
+        self,
+        repo: str,
+        issue_number: int,
+        body: str,
+        *,
+        author: str,
+        association: str = "OWNER",
+    ) -> None:
+        """Append a comment written by a person (`outerloop pr comment`).
+
+        Records carry the author's standing, so the inbox delivers it to the
+        author as a person's comment: locally only people with write access to
+        the forge directory can reach this path."""
+        author = author.strip()
+        if not author:
+            raise ValueError("a person's comment needs an author")
+        self._append_comment(repo, issue_number, body, author, association)
+
+    def _append_comment(
+        self, repo: str, issue_number: int, body: str, author: str, association: str
+    ) -> None:
         if self.dry_run:
             log.info("[dry-run] comment on %s#%s (%d chars)", repo, issue_number, len(body))
             return
@@ -1386,9 +1424,9 @@ class LocalForge:
             counters["comment"] = comment_id
             record = {
                 "id": comment_id,
-                "user": {"login": self.bot_login},
+                "user": {"login": author},
                 "body": body,
-                "author_association": "NONE",
+                "author_association": association,
                 "created_at": self._now(),
             }
             return {

@@ -24,7 +24,7 @@ import logging
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from outerloop.appauth import add_credential_args
 from outerloop.attempt import (
@@ -38,7 +38,7 @@ from outerloop.attempt import (
 )
 from outerloop.contract import Contract, contract_text_in_tree, load_contract
 from outerloop.dispatch import image_file_arg
-from outerloop.forge import Forge, forge_from_env
+from outerloop.forge import Forge, forge_from_env, forge_identity
 from outerloop.github import (
     TokenProvider,
     Workspace,
@@ -375,7 +375,7 @@ def live_steward(
     harness: Harness,
     evaluator: StewardEvaluator,
     github: Forge,
-    bot_auth: TokenProvider,
+    bot_auth: TokenProvider | None,
     now: float,
     created: str,
     secrets: tuple[str, ...] = (),
@@ -831,7 +831,7 @@ def main() -> int:
 
     api_key = role_key(args.key_file)  # steward runs the claude backend
     forge = forge_from_env(args.pat_file, args.github_app_file)
-    bot_auth = cast(TokenProvider, forge.credential())
+    bot_auth = forge.credential()
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_id = f"steward-{args.benchmark}-{stamp}"
 
@@ -850,7 +850,11 @@ def main() -> int:
     spec = steward_spec(max_turns=args.max_turns, walltime_s=args.session_minutes * 60)
     try:
         outcome = live_steward(
-            config=StewardConfig(target=args.target, benchmark=args.benchmark),
+            config=StewardConfig(
+                target=args.target,
+                benchmark=args.benchmark,
+                bot_login=forge_identity(forge),
+            ),
             run_root=args.run_root,
             run_id=run_id,
             harness=build_harness(

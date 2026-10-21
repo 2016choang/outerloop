@@ -13,6 +13,7 @@ allowlist of author knobs per tick), so editing it later cannot move a chain.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import shlex
@@ -977,6 +978,114 @@ def message(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pr_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    parser.add_argument("--target", help="the repo, owner/repo (defaults to OUTERLOOP_TARGET)")
+
+
+def pr(args: argparse.Namespace) -> int:
+    """Review and merge pull requests on a local forge.
+
+    Reads the settings the way `status` does, and refuses on a GitHub
+    deployment: there the pull request lives on GitHub."""
+    from outerloop.forge import LOCAL, forge_from_env
+    from outerloop.forge_local import LocalForge
+    from outerloop.github import GitError, GitHubError
+
+    values = env_file_values(keys=("OUTERLOOP_FORGE", "OUTERLOOP_TARGET", "OUTERLOOP_ROOT"))
+    mode = _setting_of("OUTERLOOP_FORGE", values, os.environ).strip().lower() or "github"
+    if mode != LOCAL:
+        print(
+            "outerloop pr: this deployment uses GitHub; review and merge pull requests there.",
+            file=sys.stderr,
+        )
+        return 2
+    target = (args.target or _setting_of("OUTERLOOP_TARGET", values, os.environ)).strip()
+    if not target:
+        print(
+            "outerloop pr: no target; pass --target owner/repo or set OUTERLOOP_TARGET",
+            file=sys.stderr,
+        )
+        return 2
+    root = Path(
+        args.root
+        or os.environ.get("OUTERLOOP_ROOT")
+        or values.get("OUTERLOOP_ROOT")
+        or DEFAULT_LOCAL_ROOT
+    ).expanduser()
+    try:
+        forge = forge_from_env(backend=LOCAL, root=root)
+    except (ValueError, GitError) as exc:
+        print(f"outerloop pr: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(forge, LocalForge):
+        print("outerloop pr: the local forge is not available", file=sys.stderr)
+        return 2
+    try:
+        if args.pr_command == "list":
+            for pull in forge.list_pulls(target):
+                state = "merged" if pull.get("merged") else str(pull.get("state") or "open")
+                draft = " draft" if pull.get("draft") else ""
+                head = str((pull.get("head") or {}).get("ref") or "")
+                base = str((pull.get("base") or {}).get("ref") or "")
+                print(
+                    f"#{pull['number']} {state}{draft} {head} -> {base}  {pull.get('title') or ''}"
+                )
+            return 0
+        number = int(args.number)
+        if args.pr_command == "show":
+            pull = forge.get_pull_request(target, number)
+            state = "merged" if pull.get("merged") else str(pull.get("state") or "open")
+            print(f"#{number} {pull.get('title') or ''} [{state}]")
+            print(f"  {pull.get('html_url') or ''}")
+            head_info = pull.get("head") or {}
+            print(f"  {head_info.get('ref') or ''} -> {(pull.get('base') or {}).get('ref') or ''}")
+            print(f"  head {head_info.get('sha') or ''}")
+            if pull.get("merge_commit_sha"):
+                print(f"  merge commit {pull['merge_commit_sha']}")
+            print()
+            print(str(pull.get("body") or "").rstrip())
+            comments = forge.list_comments(target, number)
+            if comments:
+                print("\nComments:")
+            for comment in comments:
+                who = str((comment.get("user") or {}).get("login") or "")
+                print(
+                    f"\n{who} ({comment.get('author_association') or ''}) "
+                    f"at {comment.get('created_at') or ''}:"
+                )
+                print(str(comment.get("body") or "").rstrip())
+            return 0
+        if args.pr_command == "comment":
+            if args.file and args.text:
+                raise ValueError("give the comment text directly or with --file, not both")
+            text = args.file.read_text() if args.file else " ".join(args.text)
+            if not text.strip():
+                raise ValueError("no comment text")
+            who = getpass.getuser()
+            forge.comment_as(target, number, text, author=who, association="OWNER")
+            print(f"#{number}: comment posted as {who}")
+            return 0
+        if args.pr_command == "merge":
+            pull = forge.get_pull_request(target, number)
+            head = str((pull.get("head") or {}).get("sha") or "")
+            if not forge.merge_pull(target, number, "merge", expected_head=head):
+                print(
+                    f"outerloop pr: could not merge #{number}; it is not open at head "
+                    f"{head[:9]} or the merge conflicts",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"#{number}: merged")
+            return 0
+        forge.close_issue(target, number)
+        print(f"#{number}: closed")
+        return 0
+    except (GitHubError, GitError, ValueError, OSError) as exc:
+        print(f"outerloop pr: {exc}", file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     from outerloop import __version__
 
@@ -1071,6 +1180,29 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("status", help="show local runs and endpoint outages (read-only)")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p.add_argument("--json", action="store_true", help="print structured JSON")
+    p = sub.add_parser(
+        "pr",
+        help="review and merge pull requests on a local forge",
+        description="Read a local deployment's pull requests, comment as yourself, "
+        "merge or close them. On GitHub, use GitHub instead.",
+    )
+    pr_sub = p.add_subparsers(dest="pr_command", required=True)
+    pr_list = pr_sub.add_parser("list", help="list pull requests")
+    _pr_arguments(pr_list)
+    pr_show = pr_sub.add_parser("show", help="show a pull request and its thread")
+    pr_show.add_argument("number", type=int)
+    _pr_arguments(pr_show)
+    pr_comment = pr_sub.add_parser("comment", help="comment as yourself on a pull request")
+    pr_comment.add_argument("number", type=int)
+    pr_comment.add_argument("text", nargs="*", help="the comment text")
+    pr_comment.add_argument("--file", type=Path, help="read the comment text from this path")
+    _pr_arguments(pr_comment)
+    pr_merge = pr_sub.add_parser("merge", help="merge a pull request at its current head")
+    pr_merge.add_argument("number", type=int)
+    _pr_arguments(pr_merge)
+    pr_close = pr_sub.add_parser("close", help="close a pull request")
+    pr_close.add_argument("number", type=int)
+    _pr_arguments(pr_close)
     p = sub.add_parser("permissions", help="check and update the App's required permissions")
     p.add_argument("--open", action="store_true", help="open the next permission settings page")
     p = sub.add_parser("migrate-ledger", help="seed research-log from a pinned main ledger")
@@ -1110,6 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         print(f"run {args.run_id}: rebind {'requested' if created else 'already pending'}")
         return 0
+    if args.command == "pr":
+        return pr(args)
     if args.command == "status":
         from outerloop.status import collect_status, render_text
 

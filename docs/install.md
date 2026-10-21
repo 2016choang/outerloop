@@ -112,6 +112,58 @@ For an organization that already runs a machine user, or one where you cannot cr
 
 Add the bot as a direct collaborator with **Write** on every target repo, not to a team, which grants more than it needs and inherits future grants. Without that grant the tick cannot even read the contract and idles silently on that target. A pasted token is stored at `~/.config/outerloop/bot_pat` (0600), and `--pat-file` records a path you give. When the check against the target succeeds, init records the token's login as `OUTERLOOP_BOT_LOGIN`, and the tick does not service a target without it.
 
+## Running without GitHub (local forge)
+
+A deployment can use a bare git repository on its own filesystem as the code
+host. `OUTERLOOP_FORGE=local` selects it. The repository lives at
+`<state root>/forge/<owner>/<repo>.git`; pull requests, their comment threads
+and the kernel's issues are commits on `refs/outerloop/records` inside it.
+There is no service and no credential: filesystem permissions are the access
+control, so anyone who can reach the state root can read and write the
+records.
+
+```bash
+outerloop init --forge local --compute local --target owner/repo \
+  --forge-source /path/to/repo
+```
+
+`--forge-source` takes a repository path or URL and seeds the bare repository
+from it; without it the repository starts empty. init writes
+`OUTERLOOP_FORGE=local` and no PAT or App, and re-running it leaves an
+existing forge repository alone.
+
+The suggested contract setting is `merge: auto`: the kernel merges a head
+only after its own measurement and the judge panel's approval, and people
+review the record afterwards. Review from a machine with the shared
+filesystem:
+
+```bash
+outerloop pr list
+outerloop pr show N
+outerloop pr comment N "looks right"   # or --file
+outerloop pr merge N
+outerloop pr close N
+```
+
+Your comment carries your user name and owner standing, so the author's inbox
+reads it as a person's comment. Diffs are ordinary git: clone or fetch the
+bare repository and run `git diff main feat/auto/<agent>`. The ledger, the
+board and the research log are on the `research-log` branch.
+
+What stays GitHub-only: the advisory review and verifier workflows (they run
+in GitHub Actions), CI checks, issue work orders and the steward lane. The
+kernel's own review panel and gate run inside the kernel and work locally.
+
+The local backend needs Git 2.38 or newer. Back it up with
+`git clone --mirror <state root>/forge/<owner>/<repo>.git`, which carries the
+code, the research log and the records together.
+
+Switching between GitHub and local is a planned drain and move, not a setting
+flip: finish or end running work, copy the repository (`git push --mirror` or
+`git clone --bare`), point the new forge at the copy, and start fresh.
+Records stay readable in git, but the kernel does not replay them into the
+other backend.
+
 ## The operator settings file
 
 Everything above lands in `~/.config/outerloop/.env`, written by `outerloop init`, with every file owner-only (0600). `start` and the chain's deploy step refuse a file that is not owned by you or is group- or world-writable, so `chmod 600` it.

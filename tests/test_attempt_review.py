@@ -1107,7 +1107,7 @@ def test_review_submit_parks_and_delivers_verdict(
         record.run_id,
         dispatch=dispatch,
         github=github,  # type: ignore[arg-type]
-        bot_auth=None,  # type: ignore[arg-type]
+        bot_auth=None,
         now=NOW + 10,
         harness=wake,
         spec=author_spec(),

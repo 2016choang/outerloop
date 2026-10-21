@@ -754,7 +754,7 @@ def test_read_only_spec_is_refused_before_any_work(tmp_path, steward_repo) -> No
             harness=None,  # type: ignore[arg-type]  # refused before any use
             evaluator=None,  # type: ignore[arg-type]
             github=None,  # type: ignore[arg-type]
-            bot_auth=None,  # type: ignore[arg-type]
+            bot_auth=None,
             now=1_000_000.0,
             created="t",
             spec=read_only,

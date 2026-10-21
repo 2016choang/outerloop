@@ -55,7 +55,7 @@ from outerloop.endpoints import (
     split_endpoint,
 )
 from outerloop.evalcache import seed_dir
-from outerloop.forge import Forge, forge_from_env
+from outerloop.forge import Forge, forge_from_env, forge_identity
 from outerloop.github import (
     GitError,
     TokenProvider,
@@ -2830,7 +2830,7 @@ def resume_run(
     *,
     dispatch: DispatchSettings,
     github: Forge,
-    bot_auth: TokenProvider,
+    bot_auth: TokenProvider | None,
     now: float,
     secrets: tuple[str, ...] = (),
     base_branch: str = "main",
@@ -2866,7 +2866,7 @@ def _resume_run(
     *,
     dispatch: DispatchSettings,
     github: Forge,
-    bot_auth: TokenProvider,
+    bot_auth: TokenProvider | None,
     now: float,
     secrets: tuple[str, ...] = (),
     base_branch: str = "main",
@@ -3072,6 +3072,7 @@ def _resume_run(
         target=record.target,
         benchmark=record.benchmark,
         agent_id=record.agent_id,
+        bot_login=forge_identity(github),
         author_history=record.author_history,
     )
     eval_minutes = contract.benchmark(record.benchmark).eval_minutes
@@ -4737,7 +4738,7 @@ def live_attempt(
     run_id: str,
     harness: Harness,
     github: Forge,
-    bot_auth: TokenProvider,
+    bot_auth: TokenProvider | None,
     now: float,
     created: str,
     secrets: tuple[str, ...] = (),
@@ -5634,7 +5635,7 @@ def main() -> int:
     codex_extra = tuple(a for c in args.codex_config for a in ("-c", c))
 
     forge = forge_from_env(args.pat_file, args.github_app_file)
-    bot_auth = cast(TokenProvider, forge.credential())
+    bot_auth = forge.credential()
 
     # --resume WAKES a parked dispatched run: rebuild the dispatched measurer
     # and re-enter the decision. The wake job the WakeDispatcher submits runs
@@ -5935,7 +5936,10 @@ def main() -> int:
         try:
             outcome = live_attempt(
                 config=RunConfig(
-                    target=args.target, benchmark=args.benchmark, agent_id=args.agent_id
+                    target=args.target,
+                    benchmark=args.benchmark,
+                    agent_id=args.agent_id,
+                    bot_login=forge_identity(forge),
                 ),
                 base_branch=args.base_branch,
                 run_root=args.run_root,
@@ -6165,6 +6169,10 @@ def finish_run(
         credential = auth
         if credential is None and transport is not None:
             credential = transport.credential()
+        if not bot_login and transport is not None:
+            # A local deployment has no exported bot login to fall back on;
+            # the forge carries the identity every ending commit is authored as.
+            bot_login = forge_identity(transport)
         ws = Workspace(
             root=directory / "ws",
             auth=credential,
