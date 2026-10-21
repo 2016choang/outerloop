@@ -36,7 +36,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from outerloop.contract import CONTRACT_NAME, find_contract, read_guidance
-from outerloop.markers import marker
+from outerloop.forge import BODY_EDIT_MARKER as _BODY_EDIT_MARKER
+from outerloop.forge import body_with_addendum, candidate_row_body
 
 
 def bot_login_from_env(default: str = "") -> str:
@@ -272,6 +273,11 @@ class GitHubClient:
         `remote.origin.url`."""
         return f"https://github.com/{target}.git"
 
+    @property
+    def name(self) -> str:
+        """The forge's name in user-visible text."""
+        return "GitHub"
+
     def credential(self) -> TokenProvider:
         """The credential a `Workspace` uses for its network git calls."""
         return self.auth
@@ -475,72 +481,41 @@ class GitHubClient:
                     return item
         return None
 
-    BODY_EDIT_MARKER = marker("body-edit")
-    # the orchestrator-owned candidate row in pr_body's results table
-    # \r-tolerant: a human web-UI edit can normalize the body to CRLF
-    _CANDIDATE_ROW = re.compile(r"^\| candidate \| .* \|(\r?)$", re.MULTILINE)
+    BODY_EDIT_MARKER = _BODY_EDIT_MARKER
 
     def update_candidate_row(
         self, repo: str, number: int, candidate: float, digits: int | None = None
     ) -> bool:
         """Rewrite the results table's candidate row in place (PATCH).
 
-        The row is orchestrator-owned and mechanical — the ONE part of the
-        body that must never go stale when a follow-up push re-measures
-        (rewrite the measured numbers,
-        never the narrative). Returns False when the row is not found
-        (older body formats), in which case the Edit addendum still
-        carries the number.
+        The text transformation is shared with the local backend
+        (`forge.candidate_row_body`); this method is only its GET and PATCH.
+        Returns False when the row cannot be rewritten (older body formats),
+        in which case the Edit addendum still carries the number.
         """
         if self.dry_run:
             log.info("[dry-run] update candidate row %s#%d -> %s", repo, number, candidate)
             return True
         path = f"/repos/{urllib.parse.quote(repo)}/pulls/{number}"
         current = str(self._expect_dict(self._request("GET", path), path).get("body") or "")
-        # only the FIRST match, and only in the orchestrator's preamble
-        # (before the report section) — agent report text could contain a
-        # lookalike row, and it must stay untouched
-        head, sep, tail = current.partition("## Research report")
-        if not sep:
-            # No report heading -> the preamble boundary is gone (human
-            # body edit?): fail CLOSED rather than rewrite report text —
-            # the Edit addendum already carries the number.
+        updated = candidate_row_body(current, candidate, digits)
+        if updated is None:
             return False
-        if not self._CANDIDATE_ROW.search(head):
-            return False
-        from outerloop.progress import fmt_metric
-
-        head = self._CANDIDATE_ROW.sub(
-            rf"| candidate | {fmt_metric(candidate, digits)} |\1", head, count=1
-        )
-        self._request("PATCH", path, {"body": f"{head}{sep}{tail}"})
+        self._request("PATCH", path, {"body": updated})
         return True
 
     def append_pull_body(self, repo: str, number: int, addendum: str) -> None:
         """Upsert an EDIT addendum onto a PR body (read-modify-write PATCH).
 
-        Follow-up commits desync the report frozen into the body at publish.
-        The addendum marks the body EDITED rather than rewriting history in
-        place — and
-        REPLACES any previous addendum (marker-delimited) instead of
-        stacking one per round, so the body stays bounded and always points
-        at the latest state.
+        The text transformation is shared with the local backend
+        (`forge.body_with_addendum`); this method is only its GET and PATCH.
         """
         if self.dry_run:
             log.info("[dry-run] upsert PR body edit %s#%d (%d chars)", repo, number, len(addendum))
             return
         path = f"/repos/{urllib.parse.quote(repo)}/pulls/{number}"
         current = str(self._expect_dict(self._request("GET", path), path).get("body") or "")
-        # Strip ONLY a previous addendum of ours: marker followed by our
-        # exact format. Agent-authored report text could contain the marker
-        # string (it is public), and splitting on it blindly would truncate
-        # the frozen report — the history this method exists to preserve.
-        base = current
-        idx = current.rfind(self.BODY_EDIT_MARKER)
-        tail = current[idx + len(self.BODY_EDIT_MARKER) :]
-        if idx != -1 and tail.lstrip().startswith("---"):
-            base = current[:idx].rstrip()
-        self._request("PATCH", path, {"body": f"{base}\n\n{self.BODY_EDIT_MARKER}\n{addendum}"})
+        self._request("PATCH", path, {"body": body_with_addendum(current, addendum)})
 
     def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         data = self._request("POST", "/graphql", {"query": query, "variables": variables})

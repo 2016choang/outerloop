@@ -1,10 +1,10 @@
-"""The local backend: refs, files and transport over a bare git repository.
+"""The local backend: refs, files, transport and records over a bare git repository.
 
 A deployment's forge root holds one bare repository per target at
 ``<root>/<owner>/<repo>.git`` (`docs/design/forge.md`, "The local backend").
-This module implements the refs-and-files and transport half of the `Forge`
-protocol; pull requests, threads and issues arrive in step 3 and raise
-`NotImplementedError` until then.
+This module implements the refs-and-files, transport and record half of the
+`Forge` protocol: pull requests, threads and the kernel's issues live as JSON
+files on ``refs/outerloop/records``.
 
 The backend writes with Git's low-level commands on the bare repository:
 blobs through ``hash-object``, trees through ``mktree`` (nested trees are
@@ -16,14 +16,17 @@ GitHub.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from outerloop.forge import body_with_addendum, candidate_row_body
 from outerloop.github import (
     SAFE_GIT_FLAGS,
     GitError,
@@ -36,7 +39,20 @@ log = logging.getLogger(__name__)
 DEFAULT_BRANCH_CONFIG = "outerloop.defaultBranch"
 DEFAULT_LOCAL_IDENTITY = "outerloop"
 
+# Records live on their own ref in the target's bare repository: every change
+# is a compare-and-swap commit, so a crash leaves the old commit or the new
+# one and a mirror backs up code and records together.
+RECORDS_REF = "refs/outerloop/records"
+RECORDS_WRITE_ATTEMPTS = 5
+COUNTERS_FILE = "counters.json"
+# merge-tree --write-tree, the trial merge and merge commit path, is Git 2.38.
+MIN_GIT_VERSION = (2, 38)
+# A record's recent head shas: enough to recognise a merge of a branch that
+# advanced (and was deleted) between the kernel's reads.
+HEAD_HISTORY_LIMIT = 16
+
 _TARGET_PART = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_GIT_VERSION = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
 
 def _split_target(target: str) -> tuple[str, str]:
@@ -131,7 +147,7 @@ def _entry_at(repo: Path, ref: str, path: str) -> tuple[str, str, str] | None:
 
 
 def _flat_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
-    """Every entry of a tree by path (recursive), for rebuilding it."""
+    """Every entry of a tree by path (recursive)."""
     result = _git(repo, ["ls-tree", "-r", "-z", "--full-tree", tree])
     entries: dict[str, tuple[str, str, str]] = {}
     for record in result.stdout.split(b"\0"):
@@ -143,10 +159,27 @@ def _flat_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
     return entries
 
 
-def _build_tree(repo: Path, entries: dict[str, tuple[str, str, str]]) -> str:
-    """Build nested trees bottom-up: `mktree` only accepts one level."""
+def _direct_tree(repo: Path, tree: str) -> dict[str, tuple[str, str, str]]:
+    """One tree's direct children by name."""
+    result = _git(repo, ["ls-tree", "-z", tree])
+    entries: dict[str, tuple[str, str, str]] = {}
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition(b"\t")
+        mode, kind, sha = meta.decode().split(" ")
+        entries[os.fsdecode(name)] = (mode, kind, sha)
+    return entries
+
+
+def _build_tree(
+    repo: Path, changes: dict[str, tuple[str, str, str]], base_tree: str | None = None
+) -> str:
+    """Build `changes` over `base_tree`, rebuilding only the directories on a
+    changed path: every other entry keeps the subtree sha it already had, so
+    one record write costs one `mktree` per changed level, not per directory."""
     root: dict[str, Any] = {}
-    for path, entry in entries.items():
+    for path, entry in changes.items():
         node = root
         for part in path.split("/")[:-1]:
             child = node.setdefault(part, {})
@@ -158,18 +191,37 @@ def _build_tree(repo: Path, entries: dict[str, tuple[str, str, str]]) -> str:
             raise ValueError(f"path is both a file and a directory: {path!r}")
         node[leaf] = entry
 
-    def emit(node: dict[str, Any]) -> str:
-        lines: list[bytes] = []
+    def emit(node: dict[str, Any], tree: str | None, prefix: str = "") -> str:
+        entries = _direct_tree(repo, tree) if tree else {}
         for name, value in node.items():
+            full = prefix + name
+            current = entries.get(name)
             if isinstance(value, dict):
-                lines.append(b"040000 tree " + emit(value).encode() + b"\t" + os.fsencode(name))
+                if current is not None and current[1] != "tree":
+                    raise ValueError(f"path is both a file and a directory: {full!r}")
+                child = current[2] if current is not None else None
+                entries[name] = ("040000", "tree", emit(value, child, full + "/"))
             else:
-                mode, kind, sha = value
-                lines.append(f"{mode} {kind} {sha}\t".encode() + os.fsencode(name))
+                if current is not None and current[1] == "tree":
+                    raise ValueError(f"path is both a file and a directory: {full!r}")
+                entries[name] = value
+        lines: list[bytes] = []
+        for name, value in entries.items():
+            mode, kind, sha = value
+            lines.append(f"{mode} {kind} {sha}\t".encode() + os.fsencode(name))
         payload = b"\0".join(lines) + (b"\0" if lines else b"")
         return _git(repo, ["mktree", "-z"], input_bytes=payload).stdout.strip().decode()
 
-    return emit(root)
+    return emit(root, base_tree)
+
+
+def _git_version(text: str) -> tuple[int, ...]:
+    """A `git version` string's numeric release (`2.39.5 (Apple Git-154)`
+    -> (2, 39, 5))."""
+    match = _GIT_VERSION.search(text)
+    if not match:
+        raise GitError(f"could not read the Git version from {text.strip()!r}")
+    return tuple(int(part or 0) for part in match.groups())
 
 
 class LocalForge:
@@ -186,11 +238,26 @@ class LocalForge:
     ) -> None:
         if not bot_login.strip():
             raise ValueError("a local forge needs a kernel identity; git refuses an empty author")
+        found = _git_version(_git(None, ["version"]).stdout.decode(errors="replace"))
+        if found < MIN_GIT_VERSION:
+            minimum = ".".join(str(part) for part in MIN_GIT_VERSION)
+            raise GitError(
+                f"the local forge needs Git {minimum} or newer (merge-tree --write-tree); "
+                f"found {'.'.join(str(part) for part in found)}"
+            )
         self.root = Path(root)
         self.bot_login = bot_login.strip()
         self.dry_run = dry_run
+        # mergeable_state by (repo, head, base): a re-read of the same pair
+        # need not trial-merge again inside one tick.
+        self._mergeable_cache: dict[tuple[str, str, str], str] = {}
 
     # -- paths and transport -------------------------------------------------
+
+    @property
+    def name(self) -> str:
+        """The forge's name in user-visible text."""
+        return "Local"
 
     def repo_path(self, repo: str) -> Path:
         return local_repo_path(self.root, repo)
@@ -338,12 +405,38 @@ class LocalForge:
         return result.stdout
 
     def list_directory(self, repo: str, path: str, ref: str) -> list[dict[str, Any]]:
-        """Direct entries of a directory at `ref`; [] when absent or a file."""
-        spec = ref if path in ("", ".", "/") else f"{ref}:{path}"
-        result = _git(self.repo_path(repo), ["ls-tree", "-z", "-l", spec], check=False)
+        """Direct entries of a directory at `ref`; [] when absent or a file.
+
+        A ref or tree that cannot be read raises rather than reading as an
+        empty directory (`_entry_at` makes the same distinction), so a
+        damaged repository is not mistaken for one with nothing there."""
+        bare = self.repo_path(repo)
+        resolved = _git(bare, ["rev-parse", "--verify", "--quiet", f"{ref}^{{tree}}"], check=False)
+        if resolved.returncode == 1:
+            # --quiet folds "no such ref" and "the ref names a missing object"
+            # into the same code; `cat-file -e` tells them apart (a name that
+            # resolves with no object behind it is damage, not absence).
+            probe = _git(bare, ["cat-file", "-e", ref], check=False)
+            if probe.returncode == 1:
+                raise GitError(f"ref {ref} names an object that is missing")
+            if probe.returncode:
+                return []  # the ref does not resolve at all
+            raise GitError(f"ref {ref} does not peel to a tree")
+        if resolved.returncode:
+            detail = resolved.stderr.decode(errors="replace").strip()
+            raise GitError(f"git rev-parse failed: {detail}", returncode=resolved.returncode)
+        root = path in ("", ".", "/")
+        spec = resolved.stdout.strip().decode()
+        if not root:
+            found_entry = _entry_at(bare, ref, path)
+            if found_entry is None or found_entry[1] != "tree":
+                return []  # absent, or not a directory
+            spec = found_entry[2]
+        result = _git(bare, ["ls-tree", "-z", "-l", spec], check=False)
         if result.returncode != 0:
-            return []
-        prefix = "" if path in ("", ".", "/") else path.rstrip("/") + "/"
+            detail = result.stderr.decode(errors="replace").strip()
+            raise GitError(f"git ls-tree failed: {detail}", returncode=result.returncode)
+        prefix = "" if root else path.rstrip("/") + "/"
         entries: list[dict[str, Any]] = []
         for record in result.stdout.split(b"\0"):
             if not record:
@@ -415,7 +508,7 @@ class LocalForge:
         except (GitHubError, GitError, ValueError) as exc:
             log.warning("could not put %s on %s@%s: %s", path, repo, branch, exc)
             return ""
-        if not self._move(repo, branch, commit, head):
+        if not self._move(repo, f"refs/heads/{branch}", commit, head):
             return ""
         return "updated" if existed else "created"
 
@@ -460,109 +553,905 @@ class LocalForge:
                 exc,
             )
             return False
-        return self._move(repo, branch, commit, head)
+        return self._move(repo, f"refs/heads/{branch}", commit, head)
 
     def _commit_files(self, repo: str, files: dict[str, str], parent: str, message: str) -> str:
+        """One commit carrying `files` over `parent`'s tree. An empty parent
+        is the first commit on a ref: no tree to read past, no parent."""
         path = self.repo_path(repo)
-        entries = _flat_tree(path, self.commit_tree(repo, parent))
+        base_tree = self.commit_tree(repo, parent) if parent else None
+        changes: dict[str, tuple[str, str, str]] = {}
         for file_path, content in sorted(files.items()):
             blob = (
                 _git(path, ["hash-object", "-w", "--stdin"], input_bytes=content.encode())
                 .stdout.strip()
                 .decode()
             )
-            entries[file_path] = ("100644", "blob", blob)
-        tree = _build_tree(path, entries)
+            changes[file_path] = ("100644", "blob", blob)
+        tree = _build_tree(path, changes, base_tree)
         identity = list(git_identity(self.bot_login))
-        commit = (
-            _git(path, [*identity, "commit-tree", tree, "-p", parent, "-m", message])
-            .stdout.strip()
-            .decode()
-        )
+        args = [*identity, "commit-tree", tree]
+        if parent:
+            args += ["-p", parent]
+        commit = _git(path, [*args, "-m", message]).stdout.strip().decode()
         if not commit:
             raise GitError("commit-tree produced no commit")
         return commit
 
-    def _move(self, repo: str, branch: str, new: str, old: str) -> bool:
+    def _move(self, repo: str, ref: str, new: str, old: str) -> bool:
+        """Compare-and-swap `ref` from `old` to `new`."""
         result = _git(
             self.repo_path(repo),
-            ["update-ref", f"refs/heads/{branch}", new, old],
+            ["update-ref", ref, new, old],
             check=False,
         )
         if result.returncode != 0:
             log.warning(
                 "ref %s on %s moved under the writer: %s",
-                branch,
+                ref,
                 repo,
                 result.stderr.decode(errors="replace").strip(),
             )
             return False
         return True
 
-    # -- step 3: records, pull requests, threads and issues -----------------
+    # -- records -------------------------------------------------------------
+    #
+    # `pulls/<n>.json`, `issues/<n>.json` and `threads/<n>/<id>.json` on
+    # `refs/outerloop/records`; `counters.json` holds the shared issue/PR
+    # number and the last comment id. Every write is one compare-and-swap
+    # commit, retried on the new tip when another writer wins.
 
     @staticmethod
-    def _step_three(verb: str) -> NotImplementedError:
-        return NotImplementedError(
-            f"LocalForge.{verb} arrives in forge step 3 (records, pull requests, threads, issues)"
+    def _now() -> str:
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def _dump(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+    @staticmethod
+    def _pull_path(number: int) -> str:
+        return f"pulls/{number}.json"
+
+    @staticmethod
+    def _issue_path(number: int) -> str:
+        return f"issues/{number}.json"
+
+    @staticmethod
+    def _comment_path(number: int, comment_id: int) -> str:
+        return f"threads/{number}/{comment_id}.json"
+
+    def _ref_head(self, repo: str, ref: str) -> str:
+        """The ref's commit, or "" when the ref does not exist."""
+        path = self.repo_path(repo)
+        found = _git(path, ["show-ref", "--verify", "--quiet", ref], check=False)
+        if found.returncode == 1:
+            return ""
+        if found.returncode:
+            detail = found.stderr.decode(errors="replace").strip()
+            raise GitError(f"git show-ref failed: {detail}", returncode=found.returncode)
+        resolved = _git(path, ["rev-parse", "--verify", ref], check=False)
+        sha = resolved.stdout.strip().decode()
+        if resolved.returncode != 0 or not sha:
+            detail = resolved.stderr.decode(errors="replace").strip()
+            raise GitError(f"git rev-parse failed: {detail}", returncode=resolved.returncode)
+        return sha
+
+    def _tree_at(self, repo: str, ref: str) -> str:
+        """The tree `ref` names; a broken ref raises rather than reading as
+        an empty tree."""
+        path = self.repo_path(repo)
+        resolved = _git(path, ["rev-parse", "--verify", f"{ref}^{{tree}}"], check=False)
+        if resolved.returncode != 0:
+            detail = resolved.stderr.decode(errors="replace").strip()
+            raise GitError(f"git rev-parse failed: {detail}", returncode=resolved.returncode)
+        return resolved.stdout.strip().decode()
+
+    def _blobs(self, repo: str, shas: dict[str, str]) -> dict[str, str]:
+        """The text of several blobs in ONE `cat-file --batch`; a missing
+        object or non-UTF-8 content raises."""
+        if not shas:
+            return {}
+        path = self.repo_path(repo)
+        items = list(shas.items())
+        payload = b"".join(sha.encode() + b"\n" for _name, sha in items)
+        result = _git(path, ["cat-file", "--batch"], input_bytes=payload, check=False)
+        if result.returncode != 0:
+            detail = result.stderr.decode(errors="replace").strip()
+            raise GitError(f"git cat-file failed: {detail}", returncode=result.returncode)
+        out = result.stdout
+        pos = 0
+        files: dict[str, str] = {}
+        for name, _sha in items:
+            end = out.find(b"\n", pos)
+            if end < 0:
+                raise GitError(f"git cat-file returned no header for record {name}")
+            header = out[pos:end].decode(errors="replace").split()
+            pos = end + 1
+            if len(header) < 3 or header[1] != "blob":
+                raise GitError(f"git cat-file could not read record {name}")
+            size = int(header[2])
+            content = out[pos : pos + size]
+            pos += size + 1  # the newline cat-file appends after each object
+            try:
+                files[name] = content.decode()
+            except UnicodeDecodeError as exc:
+                raise GitError(f"record {name} is not UTF-8 text") from exc
+        return files
+
+    def _files_at(self, repo: str, ref: str) -> dict[str, str]:
+        """Every file in `ref`'s tree as text; {} for a missing ref. A broken
+        ref or unreadable blob raises rather than reading as an empty tree.
+        (Record writes need the whole set; reads take only their paths.)"""
+        if not ref:
+            return {}
+        path = self.repo_path(repo)
+        tree = self._tree_at(repo, ref)
+        shas = {
+            name: sha
+            for name, (_mode, kind, sha) in _flat_tree(path, tree).items()
+            if kind == "blob"
+        }
+        return self._blobs(repo, shas)
+
+    def _blob_at(self, repo: str, ref: str, path: str) -> str | None:
+        """One record's text at exactly `path`, or None when absent."""
+        entry = _entry_at(self.repo_path(repo), ref, path)
+        if entry is None or entry[1] != "blob":
+            return None
+        return self._blobs(repo, {path: entry[2]})[path]
+
+    def _json_records(self, repo: str, ref: str, directory: str) -> dict[str, dict[str, Any]]:
+        """The direct `*.json` records under `directory` at `ref`, read with
+        one `cat-file --batch`; {} when the ref or the directory is absent."""
+        if not ref:
+            return {}
+        path = self.repo_path(repo)
+        tree = self._tree_at(repo, ref)
+        args = ["ls-tree", "-z", "-r", tree]
+        if directory:
+            args += ["--", directory.rstrip("/")]
+        result = _git(path, args)
+        prefix = directory.rstrip("/") + "/" if directory else ""
+        shas: dict[str, str] = {}
+        for record in result.stdout.split(b"\0"):
+            if not record:
+                continue
+            meta, _, raw_name = record.partition(b"\t")
+            name = os.fsdecode(raw_name)
+            relative = name[len(prefix) :] if prefix else name
+            if prefix and not name.startswith(prefix):
+                continue
+            if "/" in relative or not relative.endswith(".json"):
+                continue
+            _mode, kind, sha = meta.decode().split(" ")
+            if kind == "blob":
+                shas[name] = sha
+        return {
+            name: self._decode_json(name, text) for name, text in self._blobs(repo, shas).items()
+        }
+
+    def _read_json(self, files: dict[str, str], path: str) -> dict[str, Any] | None:
+        text = files.get(path)
+        return None if text is None else self._decode_json(path, text)
+
+    @staticmethod
+    def _decode_json(path: str, text: str) -> dict[str, Any]:
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise GitHubError(500, path, "record is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise GitHubError(500, path, "record is not a JSON object")
+        return data
+
+    def _update_records(
+        self,
+        repo: str,
+        message: str,
+        mutate: Callable[[dict[str, str]], dict[str, str] | None],
+    ) -> None:
+        """Apply `mutate` to the records as ONE compare-and-swap commit.
+
+        `mutate` receives the current files and returns the files to write
+        (or None for no change). A lost race re-reads the new tip and runs
+        `mutate` again, a few times, before failing: no writer's change is
+        silently dropped."""
+        if self.dry_run:
+            return
+        for _ in range(RECORDS_WRITE_ATTEMPTS):
+            head = self._ref_head(repo, RECORDS_REF)
+            changes = mutate(self._files_at(repo, head))
+            if changes is None:
+                return
+            commit = self._commit_files(repo, changes, head, message)
+            if self._move(repo, RECORDS_REF, commit, head or _zero(commit)):
+                return
+            log.info("records on %s moved under the writer; retrying", repo)
+        raise GitHubError(
+            409, RECORDS_REF, f"records moved under the writer {RECORDS_WRITE_ATTEMPTS} times"
         )
+
+    def _read_pull(self, repo: str, number: int) -> dict[str, Any] | None:
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return None
+        path = self._pull_path(number)
+        text = self._blob_at(repo, head, path)
+        return None if text is None else self._decode_json(path, text)
+
+    def _counters(self, files: dict[str, str]) -> dict[str, int]:
+        data = self._read_json(files, COUNTERS_FILE) or {}
+        return {
+            key: value
+            for key in ("number", "comment")
+            if isinstance((value := data.get(key)), int) and not isinstance(value, bool)
+        }
+
+    def _branch_ref(self, repo: str, branch: str) -> str:
+        """Validate `branch` and return its full ref name. Records steer the
+        merge transaction, so a branch name is checked before it can reach
+        `update-ref --stdin`."""
+        result = _git(
+            self.repo_path(repo), ["check-ref-format", f"refs/heads/{branch}"], check=False
+        )
+        if not branch or result.returncode != 0:
+            raise GitHubError(422, branch, "invalid branch name")
+        return f"refs/heads/{branch}"
+
+    @staticmethod
+    def _remember_head(record: dict[str, Any], sha: str) -> None:
+        """Stamp `sha` as the head and keep it in a short history, so a merge
+        of a branch that later advanced (or was deleted) stays recognisable
+        from a sha the record has seen."""
+        if not sha:
+            return
+        record.setdefault("head", {})["sha"] = sha
+        history = record.get("head_history")
+        seen = (
+            [item for item in history if isinstance(item, str)] if isinstance(history, list) else []
+        )
+        if sha in seen:
+            seen.remove(sha)
+        seen.append(sha)
+        record["head_history"] = seen[-HEAD_HISTORY_LIMIT:]
+
+    def _stamp_head(self, repo: str, record: dict[str, Any]) -> None:
+        """Keep the record's last-seen head sha current when the record is
+        being written anyway; an open record's returned shape still reads the
+        live ref. A merged record keeps the head the merge landed."""
+        if record.get("merged"):
+            return
+        head_ref = str((record.get("head") or {}).get("ref") or "")
+        live = self.branch_head(repo, head_ref) if head_ref else ""
+        if live:
+            self._remember_head(record, live)
+
+    def _mergeable_state(self, repo: str, head: str, base: str) -> str:
+        """`clean` when the head contains the base tip; `behind` when it does
+        not but a trial merge succeeds; `dirty` only on conflict."""
+        if not head or not base:
+            return "unknown"
+        key = (repo, head, base)
+        if key in self._mergeable_cache:
+            return self._mergeable_cache[key]
+        if self.head_contains(repo, base, head):
+            state = "clean"
+        else:
+            trial = _git(
+                self.repo_path(repo), ["merge-tree", "--write-tree", base, head], check=False
+            )
+            if trial.returncode == 0:
+                state = "behind"
+            elif trial.returncode == 1:
+                state = "dirty"
+            else:
+                detail = trial.stderr.decode(errors="replace").strip()
+                raise GitError(f"git merge-tree failed: {detail}", returncode=trial.returncode)
+        self._mergeable_cache[key] = state
+        return state
+
+    def _pull_shape(self, repo: str, record: dict[str, Any]) -> dict[str, Any]:
+        """The record in the shape callers read. An open record shows the live
+        head sha (a follow-up push is seen at once); a merged record keeps the
+        head the merge landed, not wherever the branch went afterwards."""
+        number = int(record.get("number") or 0)
+        head_ref = str((record.get("head") or {}).get("ref") or "")
+        base_ref = str((record.get("base") or {}).get("ref") or "")
+        merged = bool(record.get("merged"))
+        stored_head = str((record.get("head") or {}).get("sha") or "")
+        if merged:
+            head_sha = stored_head
+        else:
+            live_head = self.branch_head(repo, head_ref) if head_ref else ""
+            head_sha = live_head or stored_head
+        open_ = str(record.get("state") or "open") == "open" and not merged
+        base_tip = self.branch_head(repo, base_ref) if base_ref and open_ else ""
+        _, url = self.ref_for(repo, "pull", number)
+        return {
+            "number": number,
+            "state": str(record.get("state") or "open"),
+            "merged": merged,
+            "merged_at": record.get("merged_at"),
+            "merge_commit_sha": record.get("merge_commit_sha"),
+            "draft": bool(record.get("draft")),
+            "user": dict(record.get("user") or {}),
+            "title": str(record.get("title") or ""),
+            "body": str(record.get("body") or ""),
+            "html_url": url,
+            "labels": list(record.get("labels") or []),
+            "head": {"sha": head_sha, "ref": head_ref},
+            "base": {"ref": base_ref},
+            "auto_merge": None,
+            "mergeable_state": (
+                self._mergeable_state(repo, head_sha, str(base_tip or "")) if open_ else "unknown"
+            ),
+        }
+
+    def _with_merge(self, record: dict[str, Any], sha: str) -> dict[str, Any]:
+        return {
+            **record,
+            "merged": True,
+            "merged_at": self._now(),
+            "merge_commit_sha": sha,
+            "state": "closed",
+        }
+
+    def _seen_heads(self, repo: str, record: dict[str, Any]) -> list[str]:
+        """Head shas the record has seen, newest first: the live branch, the
+        stored head, then the history of shas stamped on earlier writes."""
+        head_ref = str((record.get("head") or {}).get("ref") or "")
+        candidates = [self.branch_head(repo, head_ref) if head_ref else ""]
+        candidates.append(str((record.get("head") or {}).get("sha") or ""))
+        history = record.get("head_history")
+        if isinstance(history, list):
+            candidates.extend(reversed([item for item in history if isinstance(item, str)]))
+        seen: list[str] = []
+        for sha in candidates:
+            if sha and sha not in seen:
+                seen.append(sha)
+        return seen
+
+    def _descends_from(self, repo: str, ancestor: str, commit: str) -> bool:
+        try:
+            return self.head_contains(repo, ancestor, commit)
+        except GitHubError as exc:
+            if exc.status == 404:  # a gone object is simply not it
+                return False
+            raise
+
+    def _detect_merge(self, repo: str, record: dict[str, Any]) -> tuple[str, str] | None:
+        """(merge commit, merged head) when the base carries evidence that
+        this head landed, None while the pull request is open.
+
+        A person may merge with plain git, or a process may die between the
+        ref move and the record write. On the base's FIRST-PARENT chain:
+          - a merge commit whose second parent is, or descends from, a seen
+            head landed that head — the merged head is the second parent;
+          - a seen head that is itself on the chain was a fast-forward — the
+            merged head is that commit.
+        The EARLIEST landing wins: a later merge may bring in a branch built
+        on top of an already-landed head, and that later merge is not when
+        this pull request landed.
+        A head the base merely contains some other way (squash, rebase, an
+        unrelated history) is not evidence: the record stays open."""
+        head_ref = str((record.get("head") or {}).get("ref") or "")
+        base_ref = str((record.get("base") or {}).get("ref") or "")
+        if not head_ref or not base_ref or head_ref == base_ref:
+            return None
+        seen = self._seen_heads(repo, record)
+        if not seen:
+            return None
+        base_tip = self.branch_head(repo, base_ref)
+        if not base_tip:
+            return None
+        # No first-parent evidence can exist unless the base contains a seen
+        # head; this keeps an ordinary open pull request from walking the
+        # whole history on every read.
+        contained = [head for head in seen if self._descends_from(repo, head, base_tip)]
+        if not contained:
+            return None
+
+        def first_parent_chain() -> list[tuple[str, list[str]]]:
+            result = _git(
+                self.repo_path(repo),
+                ["rev-list", "--first-parent", "--reverse", "--parents", base_tip],
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode(errors="replace").strip()
+                raise GitError(f"git rev-list failed: {detail}", returncode=result.returncode)
+            return [
+                (fields[0], fields[1:])
+                for line in result.stdout.decode().splitlines()
+                if (fields := line.split())
+            ]
+
+        chain = first_parent_chain()
+        position = {commit: index for index, (commit, _parents) in enumerate(chain)}
+        best: tuple[int, str, str] | None = None
+        for head in contained:
+            landing: tuple[int, str, str] | None = None
+            if head in position:
+                # A fast-forward: the head itself is on the chain.
+                landing = (position[head], head, head)
+            else:
+                # Oldest first, only the commits after `head`: the first merge
+                # whose second parent is or descends from `head` landed it.
+                result = _git(
+                    self.repo_path(repo),
+                    [
+                        "rev-list",
+                        "--first-parent",
+                        "--reverse",
+                        "--parents",
+                        base_tip,
+                        "--not",
+                        head,
+                    ],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    detail = result.stderr.decode(errors="replace").strip()
+                    raise GitError(f"git rev-list failed: {detail}", returncode=result.returncode)
+                for line in result.stdout.decode().splitlines():
+                    fields = line.split()
+                    if len(fields) < 3:
+                        continue
+                    commit, second = fields[0], fields[2]
+                    if second == head or self._descends_from(repo, head, second):
+                        landing = (position.get(commit, len(chain)), commit, second)
+                        break
+            if landing is not None and (best is None or landing[0] < best[0]):
+                best = landing
+        return None if best is None else (best[1], best[2])
+
+    def _record_merge(self, repo: str, number: int, sha: str, head_sha: str = "") -> None:
+        def mutate(files: dict[str, str]) -> dict[str, str] | None:
+            record = self._read_json(files, self._pull_path(number))
+            # A concurrent close must not hide a merge the kernel landed;
+            # only an already-merged record is left alone.
+            if record is None or record.get("merged"):
+                return None
+            if head_sha:
+                self._remember_head(record, head_sha)
+            return {self._pull_path(number): self._dump(self._with_merge(record, sha))}
+
+        self._update_records(repo, f"records: merge #{number}", mutate)
+
+    # -- pull requests -------------------------------------------------------
 
     def create_pull(
         self, repo: str, title: str, head: str, base: str, body: str, draft: bool = False
     ) -> str:
-        raise self._step_three("create_pull")
+        """Open a pull request; returns its local reference. The head branch
+        must exist, as on GitHub (publish pushes it first)."""
+        self._branch_ref(repo, head)
+        self._branch_ref(repo, base)
+        head_sha = self.branch_head(repo, head)
+        if head_sha is None:
+            raise GitHubError(500, head, "branch head unavailable")
+        if not head_sha:
+            raise GitHubError(404, head, "branch not found")
+        base_sha = self.branch_head(repo, base)
+        if base_sha is None:
+            raise GitHubError(500, base, "branch head unavailable")
+        if not base_sha:
+            raise GitHubError(422, base, "base branch not found")
+        if self.head_contains(repo, head_sha, base_sha):
+            # GitHub refuses this with 422 "No commits between ..."; a pull
+            # request with nothing to merge can never be recorded as merged.
+            raise GitHubError(422, head, f"No commits between {base} and {head}")
+        if self.dry_run:
+            log.info("[dry-run] PR on %s: %s (%s -> %s)", repo, title, head, base)
+            return self.ref_for(repo, "pull", "dry-run")[1]
+        created: dict[str, int] = {}
+
+        def mutate(files: dict[str, str]) -> dict[str, str]:
+            counters = self._counters(files)
+            number = counters.get("number", 0) + 1
+            counters["number"] = number
+            created["number"] = number
+            record = {
+                "number": number,
+                "state": "open",
+                "merged": False,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "draft": bool(draft),
+                "user": {"login": self.bot_login},
+                "author_association": "NONE",
+                "title": title,
+                "body": body,
+                "labels": [],
+                "head": {"ref": head, "sha": head_sha},
+                "head_history": [head_sha],
+                "base": {"ref": base},
+                "created_at": self._now(),
+            }
+            return {
+                COUNTERS_FILE: self._dump(counters),
+                self._pull_path(number): self._dump(record),
+            }
+
+        self._update_records(repo, "records: open pull request", mutate)
+        return self.ref_for(repo, "pull", created["number"])[1]
 
     def get_pull_request(self, repo: str, number: int) -> dict[str, Any]:
-        raise self._step_three("get_pull_request")
+        """The record with live head/base refs; a merge made outside the
+        kernel is recorded here once, on first read."""
+        record = self._read_pull(repo, number)
+        if record is None:
+            raise GitHubError(404, self._pull_path(number), "pull request not found")
+        if str(record.get("state") or "open") == "open" and not record.get("merged"):
+            detected = self._detect_merge(repo, record)
+            if detected:
+                merge_sha, merged_head = detected
+                if self.dry_run:
+                    # Same shape as the write path: the head the merge landed,
+                    # never a branch pushed after it.
+                    self._remember_head(record, merged_head)
+                    record = self._with_merge(record, merge_sha)
+                else:
+                    # Stamp the head the merge landed, never the live branch:
+                    # a push after the merge is not part of what landed.
+                    self._record_merge(repo, number, merge_sha, merged_head)
+                    record = self._read_pull(repo, number) or self._with_merge(record, merge_sha)
+        return self._pull_shape(repo, record)
 
     def find_open_pull_for_head(
         self, repo: str, head_branch: str, base: str
     ) -> dict[str, Any] | None:
-        raise self._step_three("find_open_pull_for_head")
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return None
+        matches = [
+            int(record.get("number") or 0)
+            for record in self._json_records(repo, head, "pulls").values()
+            if str(record.get("state") or "open") == "open"
+            and not record.get("merged")
+            and str((record.get("head") or {}).get("ref") or "") == head_branch
+            and str((record.get("base") or {}).get("ref") or "") == base
+        ]
+        # A read can just have recorded an outside merge; skip that pull
+        # request and keep looking rather than return a closed one.
+        for number in sorted(matches):
+            pull = self.get_pull_request(repo, number)
+            if pull.get("state") == "open" and not pull.get("merged"):
+                return pull
+        return None
 
     def update_candidate_row(
         self, repo: str, number: int, candidate: float, digits: int | None = None
     ) -> bool:
-        raise self._step_three("update_candidate_row")
+        """Rewrite the results table's candidate row in place (shared text
+        transform; this method is only the read and the CAS write)."""
+        if self.dry_run:
+            log.info("[dry-run] update candidate row %s#%d -> %s", repo, number, candidate)
+            return True
+        outcome: dict[str, bool] = {}
+
+        def mutate(files: dict[str, str]) -> dict[str, str] | None:
+            record = self._read_json(files, self._pull_path(number))
+            if record is None:
+                raise GitHubError(404, self._pull_path(number), "pull request not found")
+            updated = candidate_row_body(str(record.get("body") or ""), candidate, digits)
+            if updated is None:
+                outcome["rewritten"] = False
+                return None
+            record["body"] = updated
+            self._stamp_head(repo, record)
+            outcome["rewritten"] = True
+            return {self._pull_path(number): self._dump(record)}
+
+        self._update_records(repo, f"records: candidate row on #{number}", mutate)
+        return outcome.get("rewritten", True)
 
     def append_pull_body(self, repo: str, number: int, addendum: str) -> None:
-        raise self._step_three("append_pull_body")
+        """Upsert the EDIT addendum onto the pull-request body (shared text
+        transform; this method is only the read and the CAS write)."""
+        if self.dry_run:
+            log.info(
+                "[dry-run] upsert pull body edit %s#%d (%d chars)", repo, number, len(addendum)
+            )
+            return
+
+        def mutate(files: dict[str, str]) -> dict[str, str]:
+            record = self._read_json(files, self._pull_path(number))
+            if record is None:
+                raise GitHubError(404, self._pull_path(number), "pull request not found")
+            record["body"] = body_with_addendum(str(record.get("body") or ""), addendum)
+            self._stamp_head(repo, record)
+            return {self._pull_path(number): self._dump(record)}
+
+        self._update_records(repo, f"records: edit #{number}", mutate)
 
     def mark_ready_for_review(self, repo: str, number: int, expected_head: str = "") -> None:
-        raise self._step_three("mark_ready_for_review")
+        """Mark a draft ready, honoring `expected_head` like the client: a
+        head that moved since the panel read is left a draft."""
+        if self.dry_run:
+            log.info("[dry-run] mark PR ready for review %s#%d", repo, number)
+            return
+        pr = self.get_pull_request(repo, number)
+        head = str((pr.get("head") or {}).get("sha") or "")
+        if expected_head and head != expected_head:
+            log.info("not marking %s#%d ready: head moved since the panel read", repo, number)
+            return
+
+        def mutate(files: dict[str, str]) -> dict[str, str] | None:
+            record = self._read_json(files, self._pull_path(number))
+            if record is None:
+                raise GitHubError(404, self._pull_path(number), "pull request not found")
+            # The panel read happened before the compare-and-swap: a merge or
+            # close that landed since must not be reopened or have its frozen
+            # head overwritten.
+            if record.get("merged") or str(record.get("state") or "open") != "open":
+                return None
+            head_ref = str((record.get("head") or {}).get("ref") or "")
+            live = self.branch_head(repo, head_ref) if head_ref else ""
+            if expected_head and live and live != expected_head:
+                return None
+            if not record.get("draft"):
+                return None
+            record["draft"] = False
+            if live:
+                self._remember_head(record, live)
+            return {self._pull_path(number): self._dump(record)}
+
+        self._update_records(repo, f"records: ready for review #{number}", mutate)
 
     def arm_auto_merge_when_review_required(self, repo: str, number: int) -> bool:
-        raise self._step_three("arm_auto_merge_when_review_required")
+        """Nothing is armed locally; the auto dial merges through merge_pull."""
+        return False
 
     def disable_auto_merge(self, repo: str, number: int) -> bool:
-        raise self._step_three("disable_auto_merge")
+        """Nothing is ever armed, so auto-merge is always confirmed disarmed."""
+        return True
 
     def allowed_merge_methods(self, repo: str) -> list[str]:
-        raise self._step_three("allowed_merge_methods")
+        return ["MERGE"]
+
+    def _merge_commit(
+        self, repo: str, tree: str, base_tip: str, head_sha: str, message: str
+    ) -> str:
+        result = _git(
+            self.repo_path(repo),
+            [
+                *git_identity(self.bot_login),
+                "commit-tree",
+                tree,
+                "-p",
+                base_tip,
+                "-p",
+                head_sha,
+                "-m",
+                message,
+            ],
+            check=False,
+        )
+        commit = result.stdout.strip().decode()
+        if result.returncode != 0 or not commit:
+            detail = result.stderr.decode(errors="replace").strip()
+            raise GitError(f"git commit-tree failed: {detail}", returncode=result.returncode)
+        return commit
+
+    def _land_merge(
+        self,
+        repo: str,
+        head_ref: str,
+        head_sha: str,
+        base_ref: str,
+        base_tip: str,
+        merge_sha: str,
+    ) -> bool:
+        """Move the base in ONE transaction: the head must still point at the
+        expected sha and the base at the tip this commit was built on, or
+        nothing changes at all."""
+        head = self._branch_ref(repo, head_ref)
+        base = self._branch_ref(repo, base_ref)
+        payload = (
+            b"start\n"
+            + f"verify {head} {head_sha}\n".encode()
+            + f"update {base} {merge_sha} {base_tip}\n".encode()
+            + b"prepare\ncommit\n"
+        )
+        result = _git(
+            self.repo_path(repo), ["update-ref", "--stdin"], input_bytes=payload, check=False
+        )
+        if result.returncode != 0:
+            log.warning(
+                "merge of %s into %s refused: %s",
+                head_ref,
+                base_ref,
+                result.stderr.decode(errors="replace").strip(),
+            )
+            return False
+        return True
 
     def merge_pull(
         self, repo: str, number: int, method: str = "merge", expected_head: str = ""
     ) -> bool:
-        raise self._step_three("merge_pull")
+        """Directly merge a clean pull request as a merge commit (the only
+        method the local forge offers). `expected_head` guarantees the head
+        did not move; a lost race moves nothing."""
+        if self.dry_run:
+            log.info("[dry-run] merge %s#%s", repo, number)
+            return True
+        if str(method).strip().lower() != "merge":
+            log.warning("local forge merges with merge commits only; refusing %r", method)
+            return False
+        try:
+            record = self._read_pull(repo, number)
+            if record is None:
+                log.warning("merge of %s#%s failed: pull request not found", repo, number)
+                return False
+            if record.get("merged") or str(record.get("state") or "open") != "open":
+                log.warning("merge of %s#%s failed: pull request is not open", repo, number)
+                return False
+            head_ref = str((record.get("head") or {}).get("ref") or "")
+            base_ref = str((record.get("base") or {}).get("ref") or "")
+            if not head_ref or not base_ref:
+                return False
+            head_sha = self.branch_head(repo, head_ref)
+            base_tip = self.branch_head(repo, base_ref)
+            if not head_sha or not base_tip:
+                log.warning("merge of %s#%s failed: branch head unavailable", repo, number)
+                return False
+            wanted = expected_head or head_sha
+            if wanted != head_sha:
+                log.warning(
+                    "merge of %s#%s refused: head moved %s -> %s",
+                    repo,
+                    number,
+                    wanted[:9],
+                    head_sha[:9],
+                )
+                return False
+            if self._descends_from(repo, wanted, base_tip):
+                # merged outside the kernel after the read: land nothing (no
+                # second merge commit); the next read records the outside merge
+                log.warning("merge of %s#%s skipped: the base already contains it", repo, number)
+                return False
+            if self.head_contains(repo, base_tip, wanted):
+                tree = self.commit_tree(repo, wanted)
+            else:
+                # the base moved ahead: merge it in, or refuse a conflict
+                trial = _git(
+                    self.repo_path(repo),
+                    ["merge-tree", "--write-tree", base_tip, wanted],
+                    check=False,
+                )
+                if trial.returncode == 1:
+                    log.warning("merge of %s#%s refused: the trial merge conflicts", repo, number)
+                    return False
+                tree = trial.stdout.split(b"\n", 1)[0].strip().decode()
+                if trial.returncode != 0 or not tree:
+                    detail = trial.stderr.decode(errors="replace").strip()
+                    raise GitError(f"git merge-tree failed: {detail}", returncode=trial.returncode)
+            message = f"Merge pull request #{number} from {head_ref}\n\n{record.get('title') or ''}"
+            merge_sha = self._merge_commit(repo, tree, base_tip, wanted, message)
+            if not self._land_merge(repo, head_ref, wanted, base_ref, base_tip, merge_sha):
+                return False
+        except (GitHubError, GitError) as exc:
+            log.warning("merge of %s#%s failed: %s", repo, number, exc)
+            return False
+        try:
+            self._record_merge(repo, number, merge_sha, wanted)
+        except (GitHubError, GitError) as exc:
+            # the ref moved; the next read recovers the merge from the base
+            log.warning("merged %s#%s but could not record it: %s", repo, number, exc)
+        return True
 
     def close_issue(self, repo: str, number: int) -> None:
-        raise self._step_three("close_issue")
+        """Close a pull request or an issue; the state is always written
+        explicitly (`close_if_done` reads it to end a rejected run)."""
+        if self.dry_run:
+            log.info("[dry-run] close issue %s#%s", repo, number)
+            return
+
+        def mutate(files: dict[str, str]) -> dict[str, str] | None:
+            for path in (self._pull_path(number), self._issue_path(number)):
+                record = self._read_json(files, path)
+                if record is None:
+                    continue
+                if record.get("state") == "closed":
+                    return None
+                record["state"] = "closed"
+                return {path: self._dump(record)}
+            raise GitHubError(404, str(number), "issue or pull request not found")
+
+        self._update_records(repo, f"records: close #{number}", mutate)
+
+    # -- threads -------------------------------------------------------------
 
     def list_comments(
         self, repo: str, issue_number: int, max_pages: int = 20
     ) -> list[dict[str, Any]]:
-        raise self._step_three("list_comments")
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return []
+        comments = self._json_records(repo, head, f"threads/{issue_number}")
+        ordered = sorted(comments.values(), key=lambda c: int(c.get("id") or 0))
+        return ordered[: max_pages * 100]  # GitHub's cap: max_pages pages of 100, oldest first
 
     def comment(self, repo: str, issue_number: int, body: str) -> None:
-        raise self._step_three("comment")
+        """Append one comment to an issue's or pull request's thread."""
+        if self.dry_run:
+            log.info("[dry-run] comment on %s#%s (%d chars)", repo, issue_number, len(body))
+            return
+
+        def mutate(files: dict[str, str]) -> dict[str, str]:
+            if not any(
+                self._read_json(files, path)
+                for path in (self._pull_path(issue_number), self._issue_path(issue_number))
+            ):
+                raise GitHubError(404, str(issue_number), "issue or pull request not found")
+            counters = self._counters(files)
+            comment_id = counters.get("comment", 0) + 1
+            counters["comment"] = comment_id
+            record = {
+                "id": comment_id,
+                "user": {"login": self.bot_login},
+                "body": body,
+                "author_association": "NONE",
+                "created_at": self._now(),
+            }
+            return {
+                COUNTERS_FILE: self._dump(counters),
+                self._comment_path(issue_number, comment_id): self._dump(record),
+            }
+
+        self._update_records(repo, f"records: comment on #{issue_number}", mutate)
+
+    # -- issues --------------------------------------------------------------
 
     def list_open_issues(
         self, repo: str, max_pages: int = 3, creator: str = ""
     ) -> list[dict[str, Any]]:
-        raise self._step_three("list_open_issues")
+        head = self._ref_head(repo, RECORDS_REF)
+        if not head:
+            return []
+        wanted = creator.strip().casefold()
+        issues = []
+        for record in self._json_records(repo, head, "issues").values():
+            if record.get("state") != "open":
+                continue
+            login = str((record.get("user") or {}).get("login") or "")
+            if wanted and login.casefold() != wanted:
+                continue
+            issues.append(record)
+        return sorted(issues, key=lambda i: int(i.get("number") or 0))
 
     def create_issue(self, repo: str, title: str, body: str, labels: Sequence[str] = ()) -> int:
-        raise self._step_three("create_issue")
+        """Open an issue on the shared number sequence; returns its number."""
+        if self.dry_run:
+            log.info("[dry-run] issue on %s: %s", repo, title)
+            return 0
+        created: dict[str, int] = {}
+
+        def mutate(files: dict[str, str]) -> dict[str, str]:
+            counters = self._counters(files)
+            number = counters.get("number", 0) + 1
+            counters["number"] = number
+            created["number"] = number
+            record = {
+                "number": number,
+                "state": "open",
+                "title": title,
+                "body": body,
+                "user": {"login": self.bot_login},
+                "author_association": "NONE",
+                "labels": [{"name": str(label)} for label in labels],
+                "created_at": self._now(),
+            }
+            return {
+                COUNTERS_FILE: self._dump(counters),
+                self._issue_path(number): self._dump(record),
+            }
+
+        self._update_records(repo, "records: open issue", mutate)
+        return created["number"]
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]:
         """Locally there are no CI checks (docs/design/forge.md)."""
