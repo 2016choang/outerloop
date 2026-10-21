@@ -1131,6 +1131,57 @@ def test_focused_github_app_preserves_deployment_env(tmp_path, monkeypatch, comp
     assert result["OUTERLOOP_GITHUB_APP_FILE"] == str(app_json)
 
 
+def test_focused_github_app_drops_a_preserved_local_forge(tmp_path, monkeypatch):
+    """`--github-app` means GitHub: updating a local deployment must not keep
+    OUTERLOOP_FORGE=local beside the GitHub credentials it writes."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    path = tmp_path / ".env"
+    path.write_text(
+        "OUTERLOOP_COMPUTE=local\n"
+        "OUTERLOOP_TARGET=o/r\n"
+        "OUTERLOOP_ROOT=/shared/state\n"
+        "OUTERLOOP_FORGE=local\n"
+        "OUTERLOOP_CLAUDE_MODEL=claude-x\n"
+    )
+    app_json = tmp_path / "github_app.myapp.json"
+    app_json.write_text(json.dumps({"app_id": 1, "installation_id": 7, "private_key": "/k.pem"}))
+    monkeypatch.setattr("outerloop.appauth.app_provider_from_file", lambda path: object())
+    monkeypatch.setattr(
+        init, "app_permission_gaps", lambda *a: init.AppPermissionGaps((), "", "", "", known=True)
+    )
+    assert init.main(["--yes", "--force", "--github-app"]) == 0
+    result = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    assert "OUTERLOOP_FORGE" not in result
+    assert result["OUTERLOOP_GITHUB_APP_FILE"] == str(app_json)
+
+
+def test_init_local_forge_records_the_configured_kernel_login(tmp_path, monkeypatch):
+    """The bootstrap reads OUTERLOOP_BOT_LOGIN; the .env must carry it too, or
+    once the shell variable is gone the tick posts as the default `outerloop`."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path / "config")
+    monkeypatch.setenv("OUTERLOOP_BOT_LOGIN", "lab-kernel")
+    state = tmp_path / "state"
+    rc = init.main(
+        [
+            "--yes",
+            "--compute",
+            "local",
+            "--target",
+            "o/r",
+            "--root",
+            str(state),
+            "--forge",
+            "local",
+            "--claude-model",
+            "claude-x",
+        ]
+    )
+    assert rc == 0
+    assert "OUTERLOOP_BOT_LOGIN=lab-kernel" in (tmp_path / "config" / ".env").read_text()
+    monkeypatch.delenv("OUTERLOOP_BOT_LOGIN")
+    assert "OUTERLOOP_BOT_LOGIN=lab-kernel" in (tmp_path / "config" / ".env").read_text()
+
+
 def test_whitespace_claude_model_prompts(tmp_path, monkeypatch):
     monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)

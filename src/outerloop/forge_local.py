@@ -1550,6 +1550,10 @@ def bootstrap_local_repo(
             None,
             ["clone", "--bare", "--no-local", str(source), str(dest)],
         )
+        # the seed URL may carry a credential in its userinfo, and every
+        # state-root user can read this config; the forge never fetches from
+        # its seed again
+        _git(dest, ["remote", "remove", "origin"])
         head = _git(dest, ["symbolic-ref", "--short", "HEAD"], check=False)
         branch = head.stdout.strip().decode() or "main"
     else:

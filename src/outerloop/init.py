@@ -287,7 +287,12 @@ def write_author_key(backend: str, key: str, *, config_dir: Path = CONFIG_DIR) -
 
 
 def write_config(
-    a: InitAnswers, token: str, pat_file: str, *, config_dir: Path = CONFIG_DIR
+    a: InitAnswers,
+    token: str,
+    pat_file: str,
+    *,
+    config_dir: Path = CONFIG_DIR,
+    bot_login: str = "",
 ) -> tuple[Path, Path | None]:
     """Write the PAT file (only when a token is pasted) and the `.env`, both
     owner-only (0600) — `start`/`tick_deploy` refuse a group/world-readable
@@ -303,7 +308,7 @@ def write_config(
         written_pat = pat_path
         pat_file = str(pat_path)
     env_path = operator_env_file(config_dir / ENV_FILE.name)
-    write_private(env_path, render_env(a, pat_file))
+    write_private(env_path, render_env(a, pat_file, bot_login=bot_login))
     return env_path, written_pat
 
 
@@ -537,7 +542,15 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
                 preserved[key] = os.environ[key]
         if args.author_key_file:
             preserved.pop(author_key_env(backend), None)
-        for key in ("OUTERLOOP_PAT_FILE", "OUTERLOOP_GITHUB_APP_FILE", "OUTERLOOP_BOT_LOGIN"):
+        for key in (
+            "OUTERLOOP_PAT_FILE",
+            "OUTERLOOP_GITHUB_APP_FILE",
+            "OUTERLOOP_BOT_LOGIN",
+            # the App path means GitHub: a preserved local selection would
+            # leave the deployment on the local forge while writing GitHub
+            # credentials
+            "OUTERLOOP_FORGE",
+        ):
             preserved.pop(key, None)
     compute = args.compute or (_ask("Compute: slurm or local", "slurm") if interactive else "slurm")
     compute = compute.lower()
@@ -1148,13 +1161,18 @@ def main(argv: list[str] | None = None) -> int:
         answers.root = str(state_root)
         forge_root = state_root / "forge"
         repository = local_repo_path(forge_root, answers.target)
+        # the bootstrap needs an identity; a configured one is also recorded so
+        # the tick keeps posting as it once the shell variable is gone
+        login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip()
         if repository.exists():
             print(f"forge repository already at {repository}; left unchanged")
         else:
-            login = os.environ.get("OUTERLOOP_BOT_LOGIN", "").strip() or DEFAULT_LOCAL_IDENTITY
             try:
                 bootstrap_local_repo(
-                    forge_root, answers.target, args.forge_source or None, bot_login=login
+                    forge_root,
+                    answers.target,
+                    args.forge_source or None,
+                    bot_login=login or DEFAULT_LOCAL_IDENTITY,
                 )
             except (OSError, ValueError, GitError) as exc:
                 print(
@@ -1163,7 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 2
             print(f"created forge repository at {repository}")
-        env_path, _ = write_config(answers, "", "", config_dir=_env_path().parent)
+        env_path, _ = write_config(answers, "", "", config_dir=_env_path().parent, bot_login=login)
         print(f"wrote {env_path}")
         _claude_model_hint(answers)
         _author_key_hint(answers)

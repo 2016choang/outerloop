@@ -224,6 +224,18 @@ def test_bootstrap_takes_a_sha256_source_and_refuses_an_empty_one(tmp_path) -> N
         bootstrap_local_repo(tmp_path / "forge", "org/empty", empty)
 
 
+def test_bootstrap_leaves_no_seed_remote_or_credential_in_the_shared_config(tmp_path) -> None:
+    """The bare clone would keep its seed URL as remote.origin.url, and a
+    `--forge-source` URL with userinfo would expose that credential to every
+    state-root user. The forge never fetches from its seed again."""
+    seed = _seed(tmp_path)
+    bare = bootstrap_local_repo(tmp_path / "forge", "org/private", f"file://user:secret@{seed}")
+    assert _git(bare, "remote") == ""
+    config = (bare / "config").read_text()
+    assert "remote.origin" not in config
+    assert "secret" not in config
+
+
 def test_inherited_git_settings_neither_redirect_nor_reauthor_a_write(
     tmp_path, forge, monkeypatch
 ) -> None:
