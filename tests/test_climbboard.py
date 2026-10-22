@@ -1141,6 +1141,11 @@ def test_array_launch_is_not_done_until_every_task_is_back(tmp_path: Path) -> No
     append_ended(directory, sleep=1, results=(failed, last), at=3.0)
     (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
     assert run["launches"][0]["state"] == "1 of 3 tasks failed"
+    # a launch without a --why still shows while it is out
+    bare = Launch(name="bare", command="true", minutes=5)
+    append_submitted(directory, sleep=2, launches=(bare,), job_ids=["10"], at=4.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0] == {"why": "", "state": "not back", "result": ""}
 
 
 def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:

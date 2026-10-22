@@ -1132,8 +1132,6 @@ def _launch_rows(root: Path, record: RunRecord) -> list[dict[str, str]]:
             elif tasks > 1 and failed:
                 # one task's success must not hide another's failure
                 state = f"{failed} of {tasks} tasks failed"
-        if not why and not result:
-            continue
         rows.append(
             {
                 "why": why[:MAX_LAUNCH_WHY_CHARS],
