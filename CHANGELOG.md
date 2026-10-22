@@ -12,6 +12,7 @@ Versions follow [SemVer](https://semver.org).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.
 - The local forge is selectable: `OUTERLOOP_FORGE=local` builds it from the state root, entry points need no GitHub credential or bot login, `outerloop init --forge local` bootstraps the bare repository, and `outerloop pr` lists, shows, comments on, merges and closes its pull requests.
+- Refresh the toolchain within the existing bounds: pydantic 2.14.1, pydantic-core 2.50.1, ruff 0.17.1 and pre-commit 4.7.0; the ruff-pre-commit hook matches the locked Ruff. No source formatting or lint changes were needed.
 
 ## [0.4.0] - 2026-10-20
 
