@@ -35,8 +35,9 @@ placed and capped before any TPU contract is accepted.
 - **Operator limits.** `limits.toml` `max_gpus`, counted from one
   `squeue --me --json` snapshot by parsing `gres/gpu` TRES, attributing jobs to
   this fleet by run id.
-- **Local backend.** `nvidia-smi` detection (or `OUTERLOOP_LOCAL_GPUS`),
-  `CUDA_VISIBLE_DEVICES` pinning.
+- **Local backend.** `nvidia-smi` detection (or `OUTERLOOP_LOCAL_GPUS`), the
+  loop's own `CUDA_VISIBLE_DEVICES` when it is set, `CUDA_VISIBLE_DEVICES`
+  pinning.
 - **Surfaces.** Briefs, wake lines, refusals, `budget.json`
   (`gpu_hours_remaining`), `outerloop status`, `outerloop limits` and the board
   carry GPU-named fields.

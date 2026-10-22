@@ -101,6 +101,9 @@ PROTECTED_EVAL_ENV = frozenset(
         "NODE_RANK",
         "MASTER_ADDR",
         "MASTER_PORT",
+        # the GPU mask local compute allocates (dispatch forwards it)
+        "CUDA_VISIBLE_DEVICES",
+        "OUTERLOOP_CUDA_VISIBLE_DEVICES",
     }
 )
 # ...and whole families: any UV_* steers uv's env/cache resolution, and any

@@ -10,6 +10,8 @@ Versions follow [SemVer](https://semver.org).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.
 - The local forge is selectable: `OUTERLOOP_FORGE=local` builds it from the state root, entry points need no GitHub credential or bot login, `outerloop init --forge local` bootstraps the bare repository, and `outerloop pr` lists, shows, comments on, merges and closes its pull requests.
+- Local compute's GPU pool follows the loop's own `CUDA_VISIBLE_DEVICES`: when it is set at startup, those ids are the pool (jobs still get a subset), so two deployments on one host can be given disjoint GPUs. `OUTERLOOP_LOCAL_GPUS` caps the list, keeping the first ids; empty or `-1` means no GPUs. Jobs never see GPUs outside the loop's view: a job without an allocation inherits the loop's `CUDA_VISIBLE_DEVICES`. Fix: on local compute, the evaluated command now sees its job's GPU mask; the eval script's scrubbed environment (`env -i`, or apptainer `--cleanenv`) used to drop it, so evaluated code saw every GPU on the host. Slurm jobs are unchanged.
+- Upgrading: an existing pool file (`gpus.json`) reads correctly, since holder keys stay the GPU index strings. Before rolling back to an older kernel, let jobs on non-integer ids (`GPU-...` UUIDs) finish: the older kernel cannot sort those holder keys.
 
 ## [0.4.0] - 2026-10-20
 

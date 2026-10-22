@@ -49,6 +49,15 @@ TERMINAL_STATES = (
 )
 # A successful query that returns no record: the job left Slurm's memory.
 GONE = "GONE"
+# The GPU mask local compute applied to a job. The eval script forwards it past
+# its scrubbed environment (`env -i`, apptainer --cleanenv); Slurm jobs never
+# carry it, since their cgroups already confine the devices.
+LOCAL_GPU_MASK = "OUTERLOOP_CUDA_VISIBLE_DEVICES"
+
+
+def _gpu_id_order(gpu_id: str) -> tuple[int, int, str]:
+    """Integer index ids sort numerically; opaque ids (UUIDs) sort after them."""
+    return (0, int(gpu_id), "") if gpu_id.isdigit() else (1, 0, gpu_id)
 
 
 class SlurmError(RuntimeError):
@@ -540,16 +549,35 @@ class LocalCompute:
     minute_s: int = 60  # a walltime minute; tests shrink it to exercise the kill
 
     @staticmethod
-    def _gpu_count() -> int:
+    def _gpu_ids() -> list[str]:
+        """The GPU ids the local pool may hand out, in order.
+
+        `CUDA_VISIBLE_DEVICES` is the loop's own view of the machine: when the
+        loop is started with it set, those ids are the whole pool, so two
+        deployments with disjoint lists can share one host. Ids are opaque —
+        integer indices or `GPU-...` UUIDs — and `nvidia-smi` cannot answer
+        for them (it ignores the variable), so the list is the count.
+        Empty or `-1` means no GPUs, as it does to CUDA.
+        `OUTERLOOP_LOCAL_GPUS` caps the count, keeping the first listed ids.
+        """
+        limit: int | None = None
         override = os.environ.get("OUTERLOOP_LOCAL_GPUS")
         if override is not None:
             try:
-                count = int(override)
-                if count >= 0:
-                    return count
+                limit = int(override)
             except ValueError:
-                pass
-            raise SlurmError("OUTERLOOP_LOCAL_GPUS must be a non-negative integer")
+                limit = None
+            if limit is None or limit < 0:
+                raise SlurmError("OUTERLOOP_LOCAL_GPUS must be a non-negative integer")
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible is not None:
+            # dict.fromkeys keeps the first occurrence: a duplicated id is one GPU.
+            ids = list(dict.fromkeys(part.strip() for part in visible.split(",") if part.strip()))
+            if not ids or ids == ["-1"]:
+                return []
+            return ids[:limit] if limit is not None else ids
+        if limit is not None:
+            return [str(index) for index in range(limit)]
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
@@ -559,11 +587,15 @@ class LocalCompute:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return 0
-        lines = result.stdout.splitlines()
-        if result.returncode or not all(line.strip().isdigit() for line in lines):
-            return 0
-        return len(lines)
+            return []
+        lines = [line.strip() for line in result.stdout.splitlines()]
+        if result.returncode or not all(line.isdigit() for line in lines):
+            return []
+        return lines
+
+    @staticmethod
+    def _gpu_count() -> int:
+        return len(LocalCompute._gpu_ids())
 
     @contextlib.contextmanager
     def _pool(self) -> Iterator[_GPUPool]:
@@ -652,7 +684,7 @@ class LocalCompute:
         self,
         spec: JobSpec,
         job_id: str,
-        count: int,
+        gpu_ids: list[str],
         start: Callable[[list[str], str | None], subprocess.Popen[str]],
         tasks: _LocalTasks,
     ) -> subprocess.Popen[str] | None:
@@ -676,7 +708,7 @@ class LocalCompute:
                     ticket = {"id": job_id, "pid": os.getpid(), "heartbeat": time.time()}
                     queue.append(ticket)
                 ticket["heartbeat"] = time.time()
-                free = [str(i) for i in range(count) if str(i) not in holders]
+                free = [gpu for gpu in gpu_ids if gpu not in holders]
                 if queue[0]["id"] == job_id and len(free) >= spec.gpus:
                     allocated = free[: spec.gpus]
                     for index in allocated:
@@ -815,7 +847,8 @@ class LocalCompute:
             # same contract SlurmCompute enforces via to_argv
             raise ValueError("exactly one of command/script must be set")
         argv = ["sh", spec.script, *spec.script_args] if spec.script else ["sh", "-c", spec.command]
-        count = self._gpu_count() if spec.gpus > 0 else 0
+        gpu_ids = self._gpu_ids() if spec.gpus > 0 else []
+        count = len(gpu_ids)
         if count and spec.gpus > count:
             raise SlurmError(
                 f"local job {spec.job_name} requests {spec.gpus} GPUs; only {count} available"
@@ -824,7 +857,8 @@ class LocalCompute:
             if spec.gpus > 0 and count == 0 and self._zero_gpu_warning_pid != os.getpid():
                 log.warning(
                     "No local GPUs detected; GPU jobs run without CUDA_VISIBLE_DEVICES. "
-                    "Set OUTERLOOP_LOCAL_GPUS to the GPU count to enable the pool."
+                    "Set OUTERLOOP_LOCAL_GPUS to the GPU count, or unset CUDA_VISIBLE_DEVICES, "
+                    "to enable the pool."
                 )
                 LocalCompute._zero_gpu_warning_pid = os.getpid()
             LocalCompute._seq += 1
@@ -865,6 +899,12 @@ class LocalCompute:
             or (k.startswith(("OUTERLOOP_", "REVIEW_HERMES_")) and not _secret_name(k))
         }
         job_env.update(cache_environment(os.environ))
+        # a job never sees GPUs outside the loop's own view: without an
+        # allocation (a CPU job, or an empty or `-1` mask) it inherits that
+        # view; an allocation narrows it further at launch
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            job_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
+            job_env[LOCAL_GPU_MASK] = os.environ["CUDA_VISIBLE_DEVICES"]
         indices = array_indices(spec.array)
         if indices:
             workers = min(len(indices), count // spec.gpus if count else (os.cpu_count() or 1))
@@ -881,7 +921,7 @@ class LocalCompute:
                         argv,
                         {**job_env, "SLURM_ARRAY_TASK_ID": str(i)},
                         f"{job_id}_{i}",
-                        count,
+                        gpu_ids,
                         tasks,
                     )
                     for i in indices
@@ -909,7 +949,7 @@ class LocalCompute:
             state = combine_states(states)
             self._record(spec, job_id, state, "")
         else:
-            state = self._run_and_record(spec, argv, job_env, job_id, count)
+            state = self._run_and_record(spec, argv, job_env, job_id, gpu_ids)
         state_dir = _local_state_dir()
         where = (
             f"; output in {state_dir / (job_id + '.out')}"
@@ -925,13 +965,16 @@ class LocalCompute:
         argv: list[str],
         job_env: dict[str, str],
         job_id: str,
-        count: int = 0,
+        gpu_ids: list[str] | None = None,
         tasks: _LocalTasks | None = None,
     ) -> str:
         tasks = tasks or _LocalTasks()
 
         def start(allocated: list[str], announce: str | None = None) -> subprocess.Popen[str]:
-            env = {**job_env, "CUDA_VISIBLE_DEVICES": ",".join(allocated)} if allocated else job_env
+            env = job_env
+            if allocated:
+                mask = ",".join(allocated)
+                env = {**job_env, "CUDA_VISIBLE_DEVICES": mask, LOCAL_GPU_MASK: mask}
             wrapped = (
                 ["sh", "-c", 'echo "$$" > "$1" && shift && exec "$@"', "sh", announce, *argv]
                 if announce
@@ -950,8 +993,8 @@ class LocalCompute:
                 raise SlurmError(f"local job {spec.job_name} failed to start: {exc}") from exc
 
         try:
-            if count:
-                proc = self._allocate(spec, job_id, count, start, tasks)
+            if gpu_ids:
+                proc = self._allocate(spec, job_id, gpu_ids, start, tasks)
             else:
                 with tasks.lock:
                     proc = None if tasks.cancelled.is_set() else start([])
@@ -962,7 +1005,7 @@ class LocalCompute:
                 return "CANCELLED"
             return self._run_process(spec, proc, job_id, tasks)
         finally:
-            if count:
+            if gpu_ids:
                 self._release(job_id)
             with tasks.lock:
                 tasks.running.pop(job_id, None)
@@ -1087,7 +1130,7 @@ class LocalCompute:
                     indices[job_id] = []
                 indices[job_id].append(index)
         for job_id, row in rows.items():
-            row["gres"] = "gpu:" + ",".join(sorted(indices[job_id], key=int))
+            row["gres"] = "gpu:" + ",".join(sorted(indices[job_id], key=_gpu_id_order))
         return list(rows.values())
 
     def lane_load(self, partition: str) -> dict[str, int]:
