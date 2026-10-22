@@ -78,18 +78,24 @@ unchanged.
 
 ### Every kernel post carries a marker
 
-`GitHubClient.comment`, `create_issue` and `create_pull` prepend
-`<!-- outerloop:kernel -->` when the body has no `outerloop:` marker yet.
-One owner, so a future call site cannot forget. Kinds that are matched
+`comment`, `create_issue` and `create_pull` on both forges (`GitHubClient`
+and `LocalForge`) prepend `<!-- outerloop:kernel -->` when the body has no
+`outerloop:` marker yet. One owner per forge, so a future call site cannot
+forget. Kinds that are matched
 today (`claimed`, `followup` and the rest) keep their own markers.
 
 ### Who armed auto-merge
 
-The kernel records the arming in the run's stage (PR number and head) when
-`arm_auto_merge_when_review_required` returns true (`attempt.py:488`).
-`_observe_auto_pr` disarms only when the stage says the kernel armed. This
-replaces the `enabled_by.login` read in every mode, so there is one way to
-know.
+The kernel records the arming in the run's stage (the PR number) when
+`arm_auto_merge_when_review_required` returns true, in both lanes that arm
+(`attempt.py:488` and `steward.py:648`), and clears the record once it
+disarms or sees auto-merge off. `_observe_auto_pr` disarms only an arm the
+stage claims. A stage without the record keeps the `enabled_by.login` read
+outside personal mode, so runs armed before the upgrade still work. The
+record is written after GitHub accepts the arm, so a crash in between
+leaves an arm the kernel does not know; in personal mode it stays until a
+follow-up publish (which disarms first) or a human removes it, and it still
+needs the required review to merge.
 
 ### The mode setting
 
@@ -100,7 +106,8 @@ bot account's PAT and a person's PAT look the same to GitHub.
 
 The reusable review and verify workflows take a matching `personal` input
 next to `bot_login`, so their PR-author checks apply the marker rule to PR
-bodies.
+bodies. This includes the shell gate in `verify-agent.yml`, which decides
+`bot_authored` by login and aliases before any Python runs.
 
 ### Setup
 
@@ -114,8 +121,8 @@ lines.
 
 The App's permissions map to a fine-grained token on the target repository
 only: Contents read and write, Pull requests read and write, Issues read and
-write, Actions read (job log tails), Metadata read. Whether a
-fine-grained token can read check runs is unconfirmed. If check runs cannot be
+write, Actions read (job log tails), Checks read (CI results), Metadata
+read. Whether a fine-grained token can read check runs is unconfirmed. If check runs cannot be
 read, the inbox already logs a warning and the run goes on without CI
 results (`inbox.py:844`). Members read is unneeded, since the person's own
 token sees their own organization membership.
@@ -142,20 +149,20 @@ when the token leaks.
    code never approves, and never merges under the manual dial", say
    plainly in the docs that GitHub no longer enforces it, and keep the
    lab's deployments and this repository on the App, where the rule stays
-   true as written. *Rejected*: treat the rule as requiring a dedicated
+   true as written. *Not chosen*: treat the rule as requiring a dedicated
    identity and do not ship personal mode.
 
 2. **Scope of the marker rule.** *Decided*: personal mode only.
    With a dedicated login the login is already unforgeable, and kernel PRs
    opened before this change have no body marker, so marker-gating App PRs
    would make the reviewer start reviewing them and the verifier skip
-   them. *Rejected*: one rule in every mode. Simpler to state, with a
+   them. *Not chosen*: one rule in every mode. Simpler to state, with a
    legacy tolerance for open App PRs that the mode avoids.
 
 3. **Default token.** *Decided*: `gh auth token` by default,
    because removing setup steps is the point; `init` prints its scopes and
    how to swap in a fine-grained token on the target repository.
-   *Rejected*: require a fine-grained token. Safer, and it brings back a
+   *Not chosen*: require a fine-grained token. Safer, and it brings back a
    web form with five permissions to tick.
 
 4. **The auto dial in personal mode.** Under `merge: auto` the kernel
@@ -163,7 +170,7 @@ when the token leaks.
    merge may pass required checks that would stop the App. *Decided*:
    allow it, keep the kernel's own bless and stale-base checks, and tell
    adopters to turn on the no-bypass setting if required checks must bind
-   the kernel. *Rejected*: refuse the auto dial in personal mode.
+   the kernel. *Not chosen*: refuse the auto dial in personal mode.
 
 5. **Switching modes on a live deployment.** App or bot to personal works
    with today's mechanism: the old login goes into `OUTERLOOP_BOT_ALIASES`
@@ -171,7 +178,7 @@ when the token leaks.
    person's login cannot become an alias without hiding their comments, so
    claims posted as the person stop counting and intake could claim those
    issues again. *Decided*: document that switch as "release or
-   close claimed issues first" and build nothing for it. *Rejected*: a
+   close claimed issues first" and build nothing for it. *Not chosen*: a
    marker-gated alias list.
 
 ## What stays the same
