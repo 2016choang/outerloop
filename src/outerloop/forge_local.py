@@ -1230,12 +1230,23 @@ class LocalForge:
         return ["MERGE"]
 
     def _merge_commit(
-        self, repo: str, tree: str, base_tip: str, head_sha: str, message: str
+        self,
+        repo: str,
+        tree: str,
+        base_tip: str,
+        head_sha: str,
+        message: str,
+        author: tuple[str, str] | None = None,
     ) -> str:
         result = _git(
             self.repo_path(repo),
             [
                 *git_identity(self.bot_login),
+                *(
+                    ["-c", f"author.name={author[0]}", "-c", f"author.email={author[1]}"]
+                    if author
+                    else []
+                ),
                 "commit-tree",
                 tree,
                 "-p",
@@ -1287,7 +1298,13 @@ class LocalForge:
         return True
 
     def merge_pull(
-        self, repo: str, number: int, method: str = "merge", expected_head: str = ""
+        self,
+        repo: str,
+        number: int,
+        method: str = "merge",
+        expected_head: str = "",
+        *,
+        author: tuple[str, str] | None = None,
     ) -> bool:
         """Directly merge a clean pull request as a merge commit (the only
         method the local forge offers). `expected_head` guarantees the head
@@ -1350,7 +1367,7 @@ class LocalForge:
                     detail = trial.stderr.decode(errors="replace").strip()
                     raise GitError(f"git merge-tree failed: {detail}", returncode=trial.returncode)
             message = f"Merge pull request #{number} from {head_ref}\n\n{record.get('title') or ''}"
-            merge_sha = self._merge_commit(repo, tree, base_tip, wanted, message)
+            merge_sha = self._merge_commit(repo, tree, base_tip, wanted, message, author=author)
             if not self._land_merge(repo, head_ref, wanted, base_ref, base_tip, merge_sha):
                 return False
         except (GitHubError, GitError) as exc:

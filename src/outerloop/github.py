@@ -680,7 +680,13 @@ class GitHubClient:
             return False
 
     def merge_pull(
-        self, repo: str, number: int, method: str = "merge", expected_head: str = ""
+        self,
+        repo: str,
+        number: int,
+        method: str = "merge",
+        expected_head: str = "",
+        *,
+        author: tuple[str, str] | None = None,
     ) -> bool:
         """Directly merge a clean pull request in auto mode (REST). `expected_head`
         rides the API's `sha` guard: GitHub refuses (409) when the head moved

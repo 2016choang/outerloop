@@ -1113,7 +1113,21 @@ def pr(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            if not forge.merge_pull(target, number, "merge", expected_head=head):
+            identity = []
+            for key in ("user.name", "user.email"):
+                try:
+                    result = subprocess.run(
+                        ["git", "config", "--get", key],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    identity.append(result.stdout.strip() if result.returncode == 0 else "")
+                except (OSError, subprocess.TimeoutExpired):
+                    identity.append("")
+            author = (identity[0], identity[1]) if all(identity) else None
+            if not forge.merge_pull(target, number, "merge", expected_head=head, author=author):
                 print(
                     f"outerloop pr: could not merge #{number}; it is not open at head "
                     f"{head[:9]} or the merge conflicts",

@@ -21,6 +21,7 @@ import getpass
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -195,6 +196,52 @@ def locate_harness(backend: str) -> str:
     env = {k: v for k, v in os.environ.items() if k != f"OUTERLOOP_{name.upper()}_BIN"}
     found = default_binary(name, env)
     return found if os.path.isabs(found) else ""
+
+
+def _check_harness_version(backend: str, binary: str) -> None:
+    """Warn when the CLI init found is older than the pinned version; a newer model
+    can refuse to run on it. The binary is kept: it may be the operator's own."""
+    name = backend or AUTHOR_BACKENDS[0]
+    if not binary or name not in ("claude", "codex"):
+        return
+    from outerloop.harness_pins import effective
+
+    try:
+        pinned = effective(name)["version"]
+        result = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=5, check=False
+        )
+        version = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout)
+        if result.returncode or not version:
+            return
+        found = version.group(1)
+        pinned_core = pinned.split("-")[0].split("+")[0]
+        if tuple(map(int, found.split("."))) >= tuple(map(int, pinned_core.split("."))):
+            return
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # an invalid pin override is reported by the configuration checks later
+        return
+    print(
+        f"  WARNING: {name} {found} at {binary} is older than the pinned {pinned}; "
+        f"run `outerloop harness upgrade {name}` to install the pinned version "
+        "under the state root and record it."
+    )
+
+
+def _panel_hint(answers: InitAnswers) -> None:
+    """Without an image the pre-PR panel is off unless opted in, and then needs a key."""
+    from outerloop.cli import DEFAULT_PANEL
+
+    # what init writes, not the shell: a shell-only opt-in is gone at the next start
+    settings = answers.preserved_env
+    panel = settings.get("OUTERLOOP_PANEL", DEFAULT_PANEL)
+    if answers.image or not panel.strip() or settings.get("OUTERLOOP_PANEL_UNCONTAINED") == "1":
+        return
+    print(
+        "  No image: the pre-PR panel stays off until OUTERLOOP_PANEL_UNCONTAINED=1 "
+        "is set; its Claude judges then read the key in OUTERLOOP_PANEL_KEY_FILE "
+        f"(default {CONFIG_DIR / 'verifier_key'})."
+    )
 
 
 def cli_install_wanted(author_bin: str, args: argparse.Namespace) -> bool:
@@ -705,6 +752,7 @@ def _github_app_recheck(answers: InitAnswers, app_json: Path) -> int:
     _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
+    _panel_hint(answers)
     print("next: outerloop start")
     return 0
 
@@ -817,6 +865,7 @@ def _github_app_setup(
     _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
+    _panel_hint(answers)
     print("next: outerloop start")
     return 0
 
@@ -1014,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
             answers.author_key_file = str(key_path)
             print(f"wrote {key_path} (0600)")
 
+    _check_harness_version(answers.author_backend, answers.author_bin)
     if cli_install_wanted(answers.author_bin, args):
         try:
             answers.author_bin = install_harness(answers.author_backend)
@@ -1025,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = env_file_values(env_path, keys=None)
         judge_keys = (
             "OUTERLOOP_PANEL",
+            "OUTERLOOP_PANEL_UNCONTAINED",
+            "OUTERLOOP_PANEL_KEY_FILE",
             "OUTERLOOP_AUTHOR_OVERRIDES",
             "REVIEW_BACKEND",
             "REVIEW_MODEL",
@@ -1058,6 +1110,7 @@ def main(argv: list[str] | None = None) -> int:
                 if backend in (answers.author_backend or AUTHOR_BACKENDS[0], "hermes"):
                     continue
                 binary = locate_harness(backend)
+                _check_harness_version(backend, binary)
                 if cli_install_wanted(binary, args):
                     binary = install_harness(backend)
                 if binary:
@@ -1186,6 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
         _claude_model_hint(answers)
         _author_key_hint(answers)
         _harness_hint(answers)
+        _panel_hint(answers)
         print("next: outerloop start")
         return 0
 
@@ -1266,6 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
     _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)
+    _panel_hint(answers)
     print("next: outerloop start")
     return 0
 

@@ -837,3 +837,20 @@ def test_multi_node_job_spec_holds_every_node(tmp_path):
     assert gpu_demand(replace(spec, array="0-5%2")) == 32
     single = eval_job_spec(script, job_name="e", account="a", partition="p", eval_minutes=30)
     assert not any(a.startswith(("--nodes", "--ntasks")) for a in single.to_argv())
+
+
+def test_candidate_snapshot_names_run_without_changing_tree_or_parent(tmp_path):
+    root = _repo(tmp_path)
+    ws = _WS(root)
+    base = ws.git("rev-parse", "HEAD").strip()
+    (root / "solver.py").write_text("x = 1\n")
+    legacy = snapshot_tree(ws, base)  # type: ignore[arg-type]
+    candidate = snapshot_tree(ws, base, run_id="run-123")  # type: ignore[arg-type]
+    assert (
+        ws.git("log", "-1", "--format=%s", candidate.commit).strip()
+        == "candidate snapshot: run-123"
+    )
+    assert candidate.tree == legacy.tree
+    assert ws.git("rev-parse", f"{candidate.commit}^").strip() == base
+    assert candidate.ref.startswith("refs/dispatch/")
+    assert ws.git("rev-parse", candidate.ref).strip() == candidate.commit
