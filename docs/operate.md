@@ -70,9 +70,12 @@ max_active_attempts = 2
 [targets."owner/repo"]
 max_gpus = 4
 max_active_attempts = 1
+slots = ["agent-04"]
 ```
 
 `defaults.max_gpus` caps aggregate fleet usage across this state root and also bounds each target. Target sections can only tighten the defaults. Attempt widths are the minimum of the operator value and the contract's `max_active_attempts`, whose default is one. Omitted keys impose no ceiling, and zero stops new admissions for that resource.
+
+A target's optional `slots` list pins its self-initiated runs to the named agent identities, in listed order: a new run takes the first free slot from the list instead of the lowest free `agent-01..agent-<width>`, so the slot keeps its research line (branch and memory) and its author binding. Identities above the attempt width are allowed, but slots never add capacity — the width still caps concurrent runs. Running agents in unlisted slots are left alone; stop them with `outerloop stop`. `slots` is a per-target key only, and an empty, duplicated or malformed list invalidates the file like any other error.
 
 Limits are re-read at admission, including inside existing runs. Invalid TOML, unknown keys, unreadable files, negative values and non-integers are logged and fail closed for GPU work and fresh attempts. Replace the file atomically.
 

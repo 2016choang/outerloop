@@ -82,7 +82,7 @@ outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
 | `--target` | prompted | the repo the agents work on, `owner/repo` |
 | `--root` | prompted | state root; on Slurm it must be on the shared filesystem |
 | `--forge` | prompted | `github`, or `local` for a bare repository under the state root |
-| `--forge-source` | empty | with `--forge local`: a repository path or URL to seed from |
+| `--forge-source` | empty | with `--forge local`: a repository path or URL to seed from; for private repositories, use a local path or a bare clone made with `git clone --bare` on a machine with access and copied over (e.g. `/path/to/repo.git`) |
 | `--account` | blank | Slurm account; blank bills your default association |
 | `--partition` | blank | Slurm partition; blank is Slurm's default, `a,b` a list |
 | `--pat-file` | prompted | path to an existing file holding a PAT |

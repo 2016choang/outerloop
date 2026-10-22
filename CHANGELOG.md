@@ -7,10 +7,15 @@ Versions follow [SemVer](https://semver.org).
 ## [Unreleased]
 
 - The `siblings` view now shows each sibling's research instead of its last chat line: the run's stated hypothesis, its three most recent launches with `--why`, state and result line, the candidate score from the kernel's own gate measurement (never the agent's claim), and its PR, plus the target's five most recent endings with outcome and report title. `climb/status.json` gains `best_result` and `launches` per live run and a top-level `ended` list. Upgrading: no action needed; a snapshot written before this change reads as before (no launches, score or endings) and the first tick republishes it once in the new shape; rolling back is safe because an older reader ignores the added fields.
+- `outerloop init` warns when the Claude or Codex CLI it finds is older than the pinned version and names `outerloop harness upgrade`, and says when the pre-PR panel stays off for lack of an image. The install guide covers seeding a private repository into the local forge.
+- `outerloop pr merge` on the local forge authors the merge commit with the operator's git identity; automatic merges keep the kernel's. Candidate snapshot commits are named `candidate snapshot: <run id>` instead of `dispatch snapshot`.
 - Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.
 - The local forge is selectable: `OUTERLOOP_FORGE=local` builds it from the state root, entry points need no GitHub credential or bot login, `outerloop init --forge local` bootstraps the bare repository, and `outerloop pr` lists, shows, comments on, merges and closes its pull requests.
+- `limits.toml` accepts a per-target `slots` list (`[targets."owner/repo"]`, `slots = ["agent-04"]`): self-initiated runs take the first free listed agent identity, in order, instead of the lowest free `agent-01..agent-<width>`, so an operator can keep a slot's research line and author binding. Slots never add capacity (the attempt width still caps concurrency), running runs in unlisted slots are untouched, and `outerloop limits` shows the list. Without `slots`, behaviour is unchanged.
+- Upgrading: existing `limits.toml` files need no change. Remove any `slots` key before rolling back to an older kernel, which treats it as unknown and fails the file closed.
+- Refresh the toolchain within the existing bounds: pydantic 2.14.1, pydantic-core 2.50.1, ruff 0.17.1 and pre-commit 4.7.0; the ruff-pre-commit hook matches the locked Ruff. No source formatting or lint changes were needed.
 
 ## [0.4.0] - 2026-10-20
 

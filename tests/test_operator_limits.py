@@ -86,6 +86,12 @@ def test_tighten_only(tmp_path, operator, expected):
         "[defaults]\nmax_gpus=1.5",
         '[targets."bad"]\nmax_gpus=1',
         "[defaults]\nmax_gpuss=2",
+        '[targets."owner/repo"]\nslots="agent-04"',
+        '[targets."owner/repo"]\nslots=[]',
+        '[targets."owner/repo"]\nslots=["agent-4"]',
+        '[targets."owner/repo"]\nslots=["agent-04","agent-04"]',
+        '[targets."owner/repo"]\nslots=[4]',
+        '[defaults]\nslots=["agent-02"]',
     ],
 )
 def test_malformed_fails_closed(tmp_path, text, caplog):
@@ -97,6 +103,30 @@ def test_malformed_fails_closed(tmp_path, text, caplog):
         submit(tmp_path, TARGET, backend, spec())
     assert not backend.submit.called
     assert "invalid limits.toml" in caplog.text
+
+
+def test_slots_are_per_target_and_ordered(tmp_path):
+    limits(
+        tmp_path,
+        f'[targets."{TARGET}"]\nmax_active_attempts=1\nslots=["agent-04","agent-10"]\n',
+    )
+    parsed = read_limits(tmp_path)
+    assert not parsed.error
+    assert parsed.slot_list(TARGET) == ("agent-04", "agent-10")
+    assert parsed.slot_list("other/repo") == ()
+    assert parsed.value(TARGET, "max_active_attempts") == 1
+
+
+def test_report_shows_slots(tmp_path):
+    limits(tmp_path, f'[targets."{TARGET}"]\nmax_active_attempts=1\nslots=["agent-04"]\n')
+    assert (
+        f'{TARGET}: max_gpus=None max_active_attempts=1 slots=["agent-04"] running/pending GPUs=0'
+    ) in report(tmp_path, compute())
+    # no slots key: the line is unchanged
+    limits(tmp_path, f'[targets."{TARGET}"]\nmax_active_attempts=1\n')
+    text = report(tmp_path, compute())
+    assert "slots=" not in text
+    assert f"{TARGET}: max_gpus=None max_active_attempts=1 running/pending GPUs=0" in text
 
 
 def test_lowering_is_live_and_never_cancels(tmp_path):
