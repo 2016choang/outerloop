@@ -572,3 +572,38 @@ def test_the_earliest_landing_of_a_head_wins(tmp_path, forge) -> None:
     assert pr["merged"] is True
     assert pr["merge_commit_sha"] == first != second
     assert pr["head"]["sha"] == head
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_cli_merge_uses_operator_git_author(tmp_path, forge, monkeypatch, configured):
+    from outerloop import cli
+
+    fashion, repo, bare = forge
+    _commit(bare, tmp_path / "topic", "topic", "main", {"notes.txt": "one\n"})
+    fashion.create_pull(repo, "Merge me", "topic", "main", "body")
+    config = tmp_path / "gitconfig"
+    config.write_text(
+        "[user]\n name = Operator\n email = operator@example.com\n" if configured else ""
+    )
+    # run from an unrelated checkout with its own repo-local identity
+    checkout = tmp_path / "elsewhere"
+    _git(tmp_path, "init", "-q", str(checkout))
+    _git(checkout, "config", "user.name", "Someone Else")
+    _git(checkout, "config", "user.email", "else@example.com")
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setenv("OUTERLOOP_FORGE", "local")
+    monkeypatch.setenv("OUTERLOOP_TARGET", repo)
+    monkeypatch.setenv("OUTERLOOP_ROOT", str(tmp_path))
+    monkeypatch.delenv("OUTERLOOP_BOT_LOGIN", raising=False)
+    assert cli.main(["pr", "merge", "1"]) == 0
+    author = _git(bare, "log", "-1", "--format=%an <%ae>", "main")
+    expected = (
+        "Operator <operator@example.com>"
+        if configured
+        else "outerloop <outerloop@users.noreply.github.com>"
+    )
+    assert author == expected
+    assert _git(bare, "log", "-1", "--format=%cn", "main") == "outerloop"

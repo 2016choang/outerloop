@@ -44,7 +44,7 @@ The loop refuses to start while a resident chain is queued or running, and a res
 
 With `OUTERLOOP_COMPUTE=local`, or with no `sbatch` on PATH, `outerloop start` runs the local loop in the foreground from the installed package. Ctrl-C stops it, and its saved records let it continue the work when you start it again. On a headless machine, run it under `nohup` or in tmux, or as a user service.
 
-Local compute has no lanes, so GPU benchmarks need no GPU partition: evaluations and the author's launches run on the machine's own GPUs, shared first come first served. Launch arrays run their tasks in parallel as GPUs become available, and `OUTERLOOP_LOCAL_GPUS` overrides automatic detection through `nvidia-smi` (`0` disables GPU allocation). The author's session itself starts with `CUDA_VISIBLE_DEVICES` empty, so an experiment that needs a GPU goes through the author's `launch` syscall, where it is recorded and metered against `gpu_hours_per_run`. Uncontained, that is a default the session could reset; containment is what keeps the GPU out of the session, which is one more reason to run with the image.
+Local compute has no lanes, so GPU benchmarks need no GPU partition: evaluations and the author's launches run on the machine's own GPUs, shared first come first served. Launch arrays run their tasks in parallel as GPUs become available, and `OUTERLOOP_LOCAL_GPUS` overrides automatic detection through `nvidia-smi` (`0` disables GPU allocation). The pool also follows the loop's own `CUDA_VISIBLE_DEVICES`: start each deployment with its own list (for example `0,1` and `2,3`) to give it its own GPUs. The author's session itself starts with `CUDA_VISIBLE_DEVICES` empty, so an experiment that needs a GPU goes through the author's `launch` syscall, where it is recorded and metered against `gpu_hours_per_run`. Uncontained, that is a default the session could reset; containment is what keeps the GPU out of the session, which is one more reason to run with the image.
 
 Without a container image, sessions run under the harness's own sandbox and evaluations run bare on your machine with your keys, and the loop says so once at start. The verification panel is off in this mode unless you set `OUTERLOOP_PANEL_UNCONTAINED=1`, because an uncontained judge holds a shell next to its own key file. A pull request opened without a panel says so. A Codex or Hermes author needs the image in every mode. For priorities, walltime accounting, or several machines, use Slurm.
 
@@ -130,7 +130,9 @@ outerloop init --forge local --compute local --target owner/repo \
 `--forge-source` takes a repository path or URL and seeds the bare repository
 from it; without it the repository starts empty. init writes
 `OUTERLOOP_FORGE=local` and no PAT or App, and re-running it leaves an
-existing forge repository alone.
+existing forge repository alone. For a private repository, use a local path or a
+bare clone made with `git clone --bare` on a machine with access and copied over
+(for example, `/path/to/repo.git`).
 
 The suggested contract setting is `merge: auto`: the kernel merges a head
 only after its own measurement and the judge panel's approval, and people

@@ -389,6 +389,9 @@ def test_array_runs_every_task(tmp_path: Path) -> None:
 def gpu_root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTERLOOP_ROOT", str(tmp_path))
     monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "2")
+    # The pool follows the loop's own CUDA_VISIBLE_DEVICES; a test must not
+    # inherit one from the machine it runs on.
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     return tmp_path
 
 
@@ -452,6 +455,49 @@ def test_multi_gpu_and_oversize(gpu_root, monkeypatch):
     assert output.read_text().strip() == "0,1"
     with pytest.raises(SlurmError, match="requests 5 GPUs; only 4 available"):
         lc.submit(replace(_spec(command="true"), gpus=5))
+
+
+def test_gpu_ids_follow_cuda_visible_devices(gpu_root, monkeypatch):
+    monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3,4")
+    assert LocalCompute._gpu_ids() == ["2", "3", "4"]
+    output = gpu_root / "visible"
+    LocalCompute().submit(
+        replace(_spec(command=f'echo "$CUDA_VISIBLE_DEVICES" > {output}'), gpus=2)
+    )
+    assert output.read_text().strip() == "2,3"  # a subset of the loop's list
+
+    # Ids are opaque: whitespace is trimmed, UUIDs are not validated.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", " GPU-a , GPU-b ")
+    assert LocalCompute._gpu_ids() == ["GPU-a", "GPU-b"]
+    # OUTERLOOP_LOCAL_GPUS caps the list, keeping the first ids.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3,4")
+    monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "1")
+    assert LocalCompute._gpu_ids() == ["2"]
+    # CUDA's spellings for "no GPUs" mean none, whatever nvidia-smi would say.
+    monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS")
+    for value in ("", "-1"):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
+        assert LocalCompute._gpu_ids() == []
+    # and a GPU job then keeps the loop's mask instead of seeing every GPU
+    LocalCompute().submit(
+        replace(_spec(command=f'echo "[$CUDA_VISIBLE_DEVICES]" > {output}'), gpus=1)
+    )
+    assert output.read_text().strip() == "[-1]"
+
+
+def test_gpu_ids_unset_match_detection(monkeypatch):
+    monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def detect(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "0\n1\n", "")
+
+    monkeypatch.setattr(subprocess, "run", detect)
+    assert LocalCompute._gpu_ids() == ["0", "1"]
+    assert LocalCompute._gpu_count() == 2
+    monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "2")
+    assert LocalCompute._gpu_ids() == ["0", "1"]
 
 
 @pytest.mark.parametrize("gpus", [0, 1])
@@ -525,9 +571,22 @@ def test_zero_gpus_preserves_environment(gpu_root, monkeypatch, requested):
             gpus=requested,
         )
     )
-    assert output.read_text().strip() == "unset"
+    # no allocation: the job keeps the loop's own view of the GPUs
+    assert output.read_text().strip() == "parent"
     assert not (gpu_root / "local_jobs/gpus.json").exists()
     assert LocalCompute().queue_snapshot() == []
+
+
+def test_inherited_gpu_mask_marker_is_dropped(gpu_root, monkeypatch):
+    """Only local compute sets the eval's mask marker; a stale one in the loop's
+    environment never reaches a job."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("OUTERLOOP_CUDA_VISIBLE_DEVICES", "2,3")
+    output = gpu_root / "marker"
+    LocalCompute().submit(
+        _spec(command=f'echo "${{OUTERLOOP_CUDA_VISIBLE_DEVICES-unset}}" > {output}')
+    )
+    assert output.read_text().strip() == "unset"
 
 
 @pytest.mark.parametrize("array", ["", "0-1%1"])
@@ -595,6 +654,7 @@ def test_gpu_release_on_start_failure(gpu_root, monkeypatch):
 
 def test_gpu_detection(monkeypatch):
     monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     def detect(argv, **kwargs):
         assert argv == ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"]
@@ -659,6 +719,7 @@ def test_submit_waits_for_another_process(gpu_root):
 
 def test_memory_pool_is_shared(tmp_path, monkeypatch):
     monkeypatch.delenv("OUTERLOOP_ROOT", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "2")
     first, second = LocalCompute(), LocalCompute()
     with first._pool() as pool:
@@ -786,6 +847,7 @@ def test_job_ownership_survives_dead_submitter(gpu_root, monkeypatch, terminal_f
 @pytest.mark.parametrize("failure", ["exit", "garbage", "timeout"])
 def test_gpu_detection_failures(monkeypatch, failure):
     monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     def detect(argv, **kwargs):
         if failure == "timeout":
@@ -874,7 +936,7 @@ def test_stale_waiter_dropped_and_heartbeat_refreshed(gpu_root, monkeypatch):
     proc = lc._allocate(
         replace(_spec(command="true"), gpus=1),
         "next",
-        1,
+        ["0"],
         lambda allocated, announce: subprocess.Popen(["true"], start_new_session=True, text=True),
         tasks,
     )

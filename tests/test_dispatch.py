@@ -3,6 +3,7 @@ layout, result parsing — the seams the design doc's review rounds hardened."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -583,6 +584,31 @@ def test_uncontained_sweep_tasks_see_their_index(tmp_path):
     assert "SWEEP_INDEX" not in single
 
 
+def test_local_gpu_mask_crosses_the_scrubbed_environment(tmp_path):
+    """Local compute's GPU mask reaches the evaluated command in both branches;
+    a job without the mask (Slurm) sets nothing."""
+    run_dir = tmp_path / "run"
+    bare = write_eval_job(
+        run_dir, "b", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image=""
+    ).read_text()
+    line = next(ln for ln in bare.splitlines() if "env -i" in ln)
+    expansion = next(word for word in line.split() if word.startswith("${OUTERLOOP_CUDA"))
+    for value, seen in (("2,3", "[2,3]"), ("", "[]"), (None, "[unset]")):
+        env = {"PATH": os.environ["PATH"]}
+        if value is not None:
+            env["OUTERLOOP_CUDA_VISIBLE_DEVICES"] = value
+        probe = f"env -i {expansion} sh -c 'echo \"[${{CUDA_VISIBLE_DEVICES-unset}}]\"'"
+        out = subprocess.run(["sh", "-c", probe], env=env, capture_output=True, text=True)
+        assert out.stdout.strip() == seen
+    contained = write_eval_job(
+        run_dir, "c", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image="/i.sif"
+    ).read_text()
+    assert (
+        'if [ -n "${OUTERLOOP_CUDA_VISIBLE_DEVICES+x}" ]; then '
+        'export APPTAINERENV_CUDA_VISIBLE_DEVICES="$OUTERLOOP_CUDA_VISIBLE_DEVICES"; fi'
+    ) in contained
+
+
 def test_job_copies_the_seed_cache_into_its_own_before_uv_runs(tmp_path):
     """The kernel-warmed seed is copied — never bound, never hardlinked — into
     the job's scratch cache, best-effort, before uv runs; no seed, no line."""
@@ -837,3 +863,20 @@ def test_multi_node_job_spec_holds_every_node(tmp_path):
     assert gpu_demand(replace(spec, array="0-5%2")) == 32
     single = eval_job_spec(script, job_name="e", account="a", partition="p", eval_minutes=30)
     assert not any(a.startswith(("--nodes", "--ntasks")) for a in single.to_argv())
+
+
+def test_candidate_snapshot_names_run_without_changing_tree_or_parent(tmp_path):
+    root = _repo(tmp_path)
+    ws = _WS(root)
+    base = ws.git("rev-parse", "HEAD").strip()
+    (root / "solver.py").write_text("x = 1\n")
+    legacy = snapshot_tree(ws, base)  # type: ignore[arg-type]
+    candidate = snapshot_tree(ws, base, run_id="run-123")  # type: ignore[arg-type]
+    assert (
+        ws.git("log", "-1", "--format=%s", candidate.commit).strip()
+        == "candidate snapshot: run-123"
+    )
+    assert candidate.tree == legacy.tree
+    assert ws.git("rev-parse", f"{candidate.commit}^").strip() == base
+    assert candidate.ref.startswith("refs/dispatch/")
+    assert ws.git("rev-parse", candidate.ref).strip() == candidate.commit

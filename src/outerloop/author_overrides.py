@@ -19,6 +19,16 @@ from outerloop.limits import (
 SETTING = "OUTERLOOP_AUTHOR_OVERRIDES"
 
 
+def is_agent_id(value: object) -> bool:
+    """Canonical agent identity: agent-NN, at least two digits, no leading zero."""
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"agent-\d{2,}", value) is not None
+        and int(value[6:]) >= 1
+        and value == f"agent-{int(value[6:]):02d}"
+    )
+
+
 @dataclass(frozen=True)
 class AuthorOverride:
     backend: str
@@ -94,13 +104,7 @@ def _parse_one(target: str, value: object, listed: bool) -> AuthorOverride:
     if "slots" in value and (
         not isinstance(slots, list)
         or not slots
-        or any(
-            not isinstance(s, str)
-            or not re.fullmatch(r"agent-\d{2,}", s)
-            or int(s[6:]) < 1
-            or s != f"agent-{int(s[6:]):02d}"
-            for s in slots
-        )
+        or any(not is_agent_id(s) for s in slots)
         or len(set(slots)) != len(slots)
     ):
         raise ValueError(f"{target}: slots must be distinct agent identities (agent-01, ...)")
