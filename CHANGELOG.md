@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- Session records and the session index now carry the Claude Code version that ran, read from the binary's resolved path (the native installer's `versions/<x.y.z>` and the kernel's managed `harnesses/claude/<x.y.z>/` installs; the pin is not used, since an operator can point the kernel at any binary), so a resumed Claude session prices its cumulative resume totals once at the newest leg when it ran on Claude Code 2.1.277 or later. Codex is unchanged, and a Claude entry without a usable version keeps summing its legs (#515). Upgrading: no action needed; index entries written before this change carry no version, so a resumed Claude session captured before the upgrade still overstates its cost until those entries age out.
 - `outerloop init` warns when the Claude or Codex CLI it finds is older than the pinned version and names `outerloop harness upgrade`, and says when the pre-PR panel stays off for lack of an image. The install guide covers seeding a private repository into the local forge.
 - `outerloop pr merge` on the local forge authors the merge commit with the operator's git identity; automatic merges keep the kernel's. Candidate snapshot commits are named `candidate snapshot: <run id>` instead of `dispatch snapshot`.
 - Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).

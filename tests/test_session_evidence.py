@@ -112,7 +112,9 @@ def test_prices_unknown_zero_and_cached(monkeypatch):
         assert price("model", tokens) is None
 
 
-def fake_run(backend, ws, native, prompt="brief", resume=None, *, contained=False):
+def fake_run(
+    backend, ws, native, prompt="brief", resume=None, *, contained=False, session="session-1"
+):
     class Adapter:
         api_key = "synthetic-secret"
         model = "test-model"
@@ -123,11 +125,11 @@ def fake_run(backend, ws, native, prompt="brief", resume=None, *, contained=Fals
             state = active.get()
             assert state is not None
             if backend == "hermes":
-                state["native_id"] = "session-1"
+                state["native_id"] = session
                 state["prompt"] = "Prior context\n" + brief if resume_session_id else brief
             capture = workspace.parent / "capture.json"
             capture.write_text("{}")
-            return SessionResult("completed", False, 0.42, 2, "session-1", "done", str(capture))
+            return SessionResult("completed", False, 0.42, 2, session, "done", str(capture))
 
     return Adapter().run(prompt, ws, resume)
 
@@ -488,10 +490,7 @@ def test_codex_failed_invocation_has_unknown_cost(tmp_path, monkeypatch, failure
 def test_resumed_codex_thread_totals_to_its_last_leg(tmp_path, monkeypatch):
     """A codex resume reports the thread's cumulative usage as each leg's
     usage (#479), so three legs of one thread price the thread once, at the
-    newest leg. Claude legs are summed instead: the CLI version that ran a
-    session is not recorded, and only Claude Code 2.1.277+ reports
-    cumulative resume totals, so newest-leg pricing could undercount an
-    older CLI."""
+    newest leg."""
     monkeypatch.setenv(
         "OUTERLOOP_TOKEN_PRICES",
         json.dumps({"test-model": {"input_tokens": 2, "output_tokens": 10}}),
@@ -521,6 +520,90 @@ def test_resumed_codex_thread_totals_to_its_last_leg(tmp_path, monkeypatch):
     totals = session_totals(tmp_path)
     assert totals["session_cost_usd"] == pytest.approx((600_000 * 2 + 12_000 * 10) / 1_000_000)
     assert totals["captured_sessions"] == 3
+
+
+def test_claude_legs_are_cumulative_from_2_1_277(tmp_path, monkeypatch):
+    """Claude Code reports cumulative resume totals from 2.1.277: those legs
+    price once, at the newest, while an older recorded CLI keeps the previous
+    summed behaviour (which can overstate, never undercount)."""
+
+    class Adapter:
+        api_key = "synthetic-secret"
+        model = "test-model"
+        binary = ""
+
+        def __init__(self, costs):
+            self.costs = iter(costs)
+
+        @capture_session("claude")
+        def run(self, brief, workspace, resume_session_id=None):
+            return SessionResult("completed", False, next(self.costs), 1, "session-1", "done", "")
+
+    def three_legs(version):
+        # the version comes from the binary that ran, not from the pin
+        directory = tmp_path / version
+        ws = directory / "ws"
+        ws.mkdir(parents=True)
+        # a native install: bin/claude links into versions/<x.y.z>
+        target = directory / "share" / "claude" / "versions" / version
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        (directory / "bin").mkdir()
+        (directory / "bin" / "claude").symlink_to(target)
+        adapter = Adapter([0.1, 0.2, 0.3])
+        adapter.binary = str(directory / "bin" / "claude")
+        adapter.run("brief", ws)
+        adapter.run("wake", ws, "session-1")
+        adapter.run("wake again", ws, "session-1")
+        return directory
+
+    current = three_legs("2.1.277")
+    assert session_totals(current)["session_cost_usd"] == pytest.approx(0.3)
+    records = [json.loads(p.read_text()) for p in current.glob("*.session.json")]
+    assert {record["cli_version"] for record in records} == {"2.1.277"}
+    index = json.loads((current / "session-index.json").read_text())["sessions"]
+    assert {entry["cli_version"] for entry in index.values()} == {"2.1.277"}
+
+    older = three_legs("2.1.276")
+    assert session_totals(older)["session_cost_usd"] == pytest.approx(0.6)
+
+    # a later leg on an older CLI keeps its own cost beside the cumulative one
+    data = json.loads((current / "session-index.json").read_text())
+    data["sessions"]["later-older"] = {
+        **next(iter(data["sessions"].values())),
+        "cost_usd": 0.2,
+        "cli_version": "2.1.276",
+    }
+    (current / "session-index.json").write_text(json.dumps(data))
+    assert session_totals(current)["session_cost_usd"] == pytest.approx(0.5)
+
+
+def test_cli_version_reads_only_claude_install_layouts(tmp_path):
+    """A version directory that belongs to something else (a node install) is
+    not Claude's version."""
+    from outerloop.session_evidence import cli_version
+
+    node = tmp_path / "Cellar/node/22.0.0/lib/node_modules/claude-code/cli.js"
+    node.parent.mkdir(parents=True)
+    node.write_text("")
+    node.chmod(0o755)
+    assert cli_version(str(node)) is None
+    managed = tmp_path / "harnesses/claude/2.1.285/install-x/claude"
+    managed.parent.mkdir(parents=True)
+    managed.write_text("")
+    managed.chmod(0o755)
+    assert cli_version(str(managed)) == "2.1.285"
+
+
+def test_legacy_index_without_version_is_summed(tmp_path):
+    """An index written before CLI versions were recorded keeps today's
+    summed Claude pricing; nothing is backfilled."""
+    index = Path(__file__).parent / "fixtures/session_index_legacy.json"
+    (tmp_path / "session-index.json").write_text(index.read_text())
+    totals = session_totals(tmp_path)
+    assert totals["session_cost_usd"] == pytest.approx(0.3)
+    assert totals["captured_sessions"] == 2
 
 
 def test_resumed_hermes_hash_identifies_delivered_prompt(tmp_path):
@@ -587,7 +670,7 @@ def fresh_totals(directory):
 
 def test_persisted_totals_accumulate_after_restart_and_stay_unverified(tmp_path):
     ws = tmp_path / "ws"
-    fake_run("claude", ws, None, contained=True)
+    fake_run("claude", ws, None, contained=True, session="one")
     assert fresh_totals(tmp_path)["verified"] is True
     # A fresh kernel must preserve earlier contributions when adding its own.
     subprocess.run(
@@ -602,7 +685,7 @@ def test_persisted_totals_accumulate_after_restart_and_stay_unverified(tmp_path)
         ],
         check=True,
     )
-    fake_run("claude", ws, None, contained=True)
+    fake_run("claude", ws, None, contained=True, session="two")
     totals = fresh_totals(tmp_path)
     assert totals["session_cost_usd"] == pytest.approx(1.42)
     assert totals["captured_sessions"] == 3

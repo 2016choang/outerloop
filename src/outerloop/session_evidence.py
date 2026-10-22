@@ -10,6 +10,8 @@ import json
 import logging
 import math
 import os
+import re
+import shutil
 import stat
 import time
 import uuid
@@ -35,11 +37,46 @@ NATIVE_MAX_SECONDS = 0.25
 SESSION_INDEX = "session-index.json"
 
 # A resumed codex thread reports the whole thread's usage as each leg's.
-# Claude Code reports cumulative resume totals only since 2.1.277 and the
-# CLI version that ran a session is not recorded (an override can pin an
-# older CLI), so its legs are summed instead: an overstatement on a
-# current CLI never undercounts a leg on an older one.
+# Claude Code reports cumulative resume totals only since 2.1.277, and an
+# override can pin an older CLI, so a Claude leg is cumulative only when its
+# recorded version is at least that. An entry without a usable version (an
+# older kernel wrote it, or the pin is unparsable) keeps the old behaviour
+# and is summed: that can overstate a current CLI's resumed session, but it
+# never undercounts a leg on an older one.
 CUMULATIVE_BACKENDS = frozenset({"codex"})
+CUMULATIVE_CLAUDE_VERSION = (2, 1, 277)
+
+
+def _version(value: Any) -> tuple[int, ...] | None:
+    """A comparable x.y.z core, or None for anything unusable."""
+    if not isinstance(value, str):
+        return None
+    parts = value.strip().split("-", 1)[0].split("+", 1)[0].split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError:
+        return None
+
+
+def cli_version(binary: str) -> str | None:
+    """The version of the CLI binary that ran the session, read from its resolved
+    path: the native installer links into `versions/<x.y.z>` and the kernel's
+    managed installs live under `harnesses/<name>/<x.y.z>/`. Not the pin, since an
+    operator can point the kernel at any binary. Anything else stays unknown."""
+    try:
+        found = shutil.which(binary) if binary else None
+        path = os.path.realpath(found) if found else ""
+    except OSError:
+        return None
+    # recognized layouts only: a version directory elsewhere in the path (a node
+    # or python install) says nothing about Claude Code
+    layout = re.search(
+        r"(?:/claude/versions/|/harnesses/claude/|/Cellar/claude-code/)(\d+\.\d+\.\d+)(?:/|$)",
+        path,
+    )
+    return layout.group(1) if layout else None
 
 
 class NativeLookupLimit(OSError):
@@ -244,6 +281,9 @@ def capture_session(
                 "prompt": brief_text,
                 "started_at": datetime.now(UTC).isoformat(),
             }
+            if backend == "claude":
+                # read before the run: an auto-update can move the link mid-session
+                state["cli_version"] = cli_version(str(getattr(self, "binary", "") or ""))
             token = active.set(state)
             try:
                 result = run(self, brief_text, workspace, resume_session_id)
@@ -381,6 +421,8 @@ def save(
         "schema_version": 1,
         "invocation_id": invocation,
         "backend": backend,
+        # only Claude's pricing depends on it (codex is always cumulative)
+        "cli_version": state.get("cli_version"),
         "model": redact(harness.model, secrets),
         "session_id": redact(
             result.session_id
@@ -454,6 +496,8 @@ def index_session(
             # The session id groups a cumulative backend's legs; older entries omit both.
             "backend": record.get("backend") or "",
             "session_id": record.get("session_id") or "",
+            # The CLI version decides whether claude legs are cumulative.
+            "cli_version": record.get("cli_version") or "",
         }
         temporary = _write_private(
             directory,
@@ -476,22 +520,37 @@ def session_totals(directory: Path) -> dict[str, Any]:
 
     A resumed session of a cumulative backend reports the whole session's
     usage as its leg's usage, so only the newest leg of each such session is
-    priced. Entries without a session id keep their recorded cost.
+    priced. Codex is always cumulative; a Claude leg is cumulative only when
+    its recorded CLI version is at least 2.1.277, so an entry without a usable
+    version is summed as before. Entries without a session id keep their cost.
     """
     try:
         sessions = read_index(directory)
     except (OSError, ValueError):
         log.warning("could not read session index in %s", directory, exc_info=True)
         sessions = {}
+
+    def cumulative(entry: Mapping[str, Any]) -> bool:
+        version = _version(entry.get("cli_version"))
+        return bool(entry.get("session_id")) and (
+            entry.get("backend") in CUMULATIVE_BACKENDS
+            or (
+                entry.get("backend") == "claude"
+                and version is not None
+                and version >= CUMULATIVE_CLAUDE_VERSION
+            )
+        )
+
     latest: dict[tuple[str, str], str] = {}
     for invocation, entry in sessions.items():
-        if entry.get("backend") in CUMULATIVE_BACKENDS and entry.get("session_id"):
+        if cumulative(entry):
             latest[(entry["backend"], entry["session_id"])] = invocation
     costs = tuple(
         number(entry["cost_usd"])
         for invocation, entry in sessions.items()
-        # the default keeps untracked entries; tracked legs keep only their newest
-        if latest.get((entry.get("backend"), entry.get("session_id")), invocation) == invocation
+        # a cumulative leg is priced only as its session's newest cumulative leg;
+        # every other leg (older or unknown CLI) keeps its own cost
+        if not cumulative(entry) or latest[(entry["backend"], entry["session_id"])] == invocation
     )
     known = sum(cost for cost in costs if cost is not None)
     unknown = sum(cost is None for cost in costs)
