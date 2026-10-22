@@ -21,7 +21,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -1114,24 +1113,27 @@ def pr(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            # the operator's own identity (system, global and their includes),
-            # read outside any repository so a repo-local identity from whatever
-            # checkout the command runs in does not become the author
+            # the operator's own identity: global config (with its includes), then
+            # system config, never the repo-local config of whatever checkout the
+            # command runs in
             identity = []
             for key in ("user.name", "user.email"):
-                try:
-                    result = subprocess.run(
-                        ["git", "config", "--get", key],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                        check=False,
-                        cwd=tempfile.gettempdir(),
-                        env={**os.environ, "GIT_CEILING_DIRECTORIES": tempfile.gettempdir()},
-                    )
-                    identity.append(result.stdout.strip() if result.returncode == 0 else "")
-                except (OSError, subprocess.TimeoutExpired):
-                    identity.append("")
+                value = ""
+                for scope in ("--global", "--system"):
+                    try:
+                        result = subprocess.run(
+                            ["git", "config", scope, "--includes", "--get", key],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            check=False,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        continue
+                    value = result.stdout.strip() if result.returncode == 0 else ""
+                    if value:
+                        break
+                identity.append(value)
             author = (identity[0], identity[1]) if all(identity) else None
             if not forge.merge_pull(target, number, "merge", expected_head=head, author=author):
                 print(
