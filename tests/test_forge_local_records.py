@@ -585,7 +585,12 @@ def test_cli_merge_uses_operator_git_author(tmp_path, forge, monkeypatch, config
     config.write_text(
         "[user]\n name = Operator\n email = operator@example.com\n" if configured else ""
     )
-    monkeypatch.chdir(tmp_path)
+    # run from an unrelated checkout with its own repo-local identity
+    checkout = tmp_path / "elsewhere"
+    _git(tmp_path, "init", "-q", str(checkout))
+    _git(checkout, "config", "user.name", "Someone Else")
+    _git(checkout, "config", "user.email", "else@example.com")
+    monkeypatch.chdir(checkout)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
     monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(tmp_path / ".env"))

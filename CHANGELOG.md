@@ -7,7 +7,7 @@ Versions follow [SemVer](https://semver.org).
 ## [Unreleased]
 
 - `outerloop init` warns when the Claude or Codex CLI it finds is older than the pinned version and names `outerloop harness upgrade`, and says when the pre-PR panel stays off for lack of an image. The install guide covers seeding a private repository into the local forge.
-- `outerloop pr merge` on the local forge authors the merge commit with the operator's git identity; automatic merges keep the kernel's. Candidate snapshot commits are named `candidate snapshot: <run id>` instead of `dispatch snapshot`.
+- `outerloop pr merge` on the local forge authors the merge commit with the operator's global git identity (a repo-local identity in the directory it runs from is ignored); automatic merges keep the kernel's. Candidate snapshot commits are named `candidate snapshot: <run id>` instead of `dispatch snapshot`.
 - Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.

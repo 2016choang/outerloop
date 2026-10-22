@@ -1113,11 +1113,13 @@ def pr(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # the operator's own identity: --global, so a repo-local identity from
+            # whatever checkout the command runs in does not become the author
             identity = []
             for key in ("user.name", "user.email"):
                 try:
                     result = subprocess.run(
-                        ["git", "config", "--get", key],
+                        ["git", "config", "--global", "--get", key],
                         capture_output=True,
                         text=True,
                         timeout=5,
