@@ -119,8 +119,10 @@ The author's session never sees a raw comment body outside a fence, never
 sees the seed, and never sees a message the kernel did not write into the
 inbox. Advisory findings are delivered like blocking ones; the author decides
 what to do with them. The sibling view is refreshed at every wake, not only
-at start, and `siblings` shows each live run's hypothesis and PR link, including
-runs in review. The hypothesis survives publication for the rest of the run.
+at start, and `siblings` shows each live run's stated hypothesis, its recent
+launches with their reasons and result lines, its best measured score and its
+PR link, including runs in review, plus the target's recent endings. The
+hypothesis survives publication for the rest of the run.
 When to check the view — before choosing a direction and again before a
 submit, taking an unused direction unless its angle is distinct — is guidance,
 not a kernel step: the brief states the refresh, the pack carries the advice.

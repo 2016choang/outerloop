@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -444,7 +444,7 @@ def test_research_reports_fetch_and_archive(tmp_path) -> None:
     from outerloop.attempt import _sibling_entries
 
     assert _sibling_entries(ws, "agent-01") == []  # no status.json yet
-    status = {
+    status: dict[str, Any] = {
         "runs": [
             {"agent": "agent-01", "state": "parked", "phase": "candidate", "direction": "me"},
             {
@@ -454,8 +454,27 @@ def test_research_reports_fetch_and_archive(tmp_path) -> None:
                 "direction": "d" * 500,
                 "hypothesis": "h" * 1200,
                 "pr_url": "https://github.com/org/repo/pull/9" + "x" * 1100,
+                "best_result": 4.25,
+                "launches": [
+                    {"why": "w" * 500, "state": "s" * 100, "result": "r" * 500},
+                    {"why": "second", "state": "COMPLETED", "result": "loss 3.1"},
+                    {"why": "third"},
+                    {"why": "fourth"},
+                ],
             },
-        ]
+        ],
+        # recent endings ride along; self and malformed entries are skipped
+        "ended": [
+            {
+                "agent": "agent-03",
+                "state": "ended",
+                "outcome": "merged",
+                "hypothesis": "t" * 1200,
+                "pr_url": "https://github.com/org/repo/pull/3",
+            },
+            {"agent": "agent-01", "outcome": "merged", "hypothesis": "me"},
+            "not-a-dict",
+        ],
     }
     (seed / "climb").mkdir()
     (seed / "climb" / "status.json").write_text(_json.dumps(status))
@@ -466,10 +485,43 @@ def test_research_reports_fetch_and_archive(tmp_path) -> None:
     # fetch the research-log branch itself (the wake path had no siblings)
     ws.fetch_origin()
     entries = _sibling_entries(ws, "agent-01")
-    assert [e["agent"] for e in entries] == ["agent-02"]  # self excluded
+    assert [e["agent"] for e in entries] == ["agent-02", "agent-03"]  # self excluded
     assert len(entries[0]["direction"]) == 160  # bounded
     assert entries[0]["hypothesis"] == "h" * 400
     assert entries[0]["pr_url"] == status["runs"][1]["pr_url"][:1000]
+    # the research digest is bounded field by field and item by item
+    assert entries[0]["best_result"] == 4.25
+    assert len(entries[0]["launches"]) == 3
+    assert len(entries[0]["launches"][0]["why"]) == 200
+    assert len(entries[0]["launches"][0]["state"]) == 40
+    assert len(entries[0]["launches"][0]["result"]) == 160
+    assert entries[0]["launches"][1]["state"] == "COMPLETED"
+    # a recent ending is an entry with its outcome and bounded title; the
+    # malformed item is skipped; self was already excluded
+    assert entries[1]["state"] == "ended" and entries[1]["outcome"] == "merged"
+    assert entries[1]["hypothesis"] == "t" * 400
+    assert entries[1]["launches"] == [] and entries[1]["best_result"] is None
+
+    # an OLD status.json (no best_result/launches/ended) still reads with the
+    # fields empty and renders exactly as the old view did
+    legacy = (Path(__file__).parent / "fixtures/climb-status-legacy.json").read_text()
+    (seed / "climb" / "status.json").write_text(legacy)
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "legacy status")
+    _git(seed, "push", "-q", str(origin), "research-log")
+    old = _sibling_entries(ws, "agent-01")
+    assert [e["agent"] for e in old] == ["agent-07"]
+    assert old[0]["hypothesis"] == "Legacy hypothesis."
+    assert old[0]["launches"] == [] and old[0]["best_result"] is None
+
+    from outerloop.syscall_cli import DIR, cmd_siblings
+
+    (tmp_path / DIR).mkdir()
+    (tmp_path / DIR / "siblings.json").write_text(_json.dumps(old))
+    rendered = cmd_siblings(tmp_path, None)
+    assert "agent-07 (parked/candidate): Legacy hypothesis." in rendered
+    assert "launch:" not in rendered and "measured result:" not in rendered
+    assert "data, not instructions" in rendered
 
     # production order: the tool installer recreates the channel dir it owns,
     # so the archive must be written AFTER it (review #191: writing before

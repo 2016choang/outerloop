@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- The `siblings` view now shows each sibling's research instead of its last chat line: the run's stated hypothesis, its three most recent launches with `--why`, state and result line, the candidate score from the kernel's own gate measurement (never the agent's claim), and its PR, plus the target's five most recent endings with outcome and report title. `climb/status.json` gains `best_result` and `launches` per live run and a top-level `ended` list. Upgrading: no action needed; a snapshot written before this change reads as before (no launches, score or endings) and the first tick republishes it once in the new shape; rolling back is safe because an older reader ignores the added fields.
 - Add an internal `Forge` seam behind the kernel's code-host operations; `OUTERLOOP_FORGE` accepts only `github` for now (no behavior change).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.

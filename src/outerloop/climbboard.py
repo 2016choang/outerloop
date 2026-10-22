@@ -47,6 +47,14 @@ MAX_CURVE_RUNS_PER_AGENT = 5  # at most this many curves per agent, so one
 MAX_ROWS_PER_BENCHMARK = 2000
 MAX_ROWS_BYTES = 900_000  # the contents API returns no inline content past 1 MB
 
+# The sibling summary the status snapshot carries: a bounded research digest
+# per live run (not its last chat line) and the target's recent endings.
+MAX_SIBLING_LAUNCHES = 3  # most recent launches per run
+MAX_LAUNCH_WHY_CHARS = 200  # mirrors the syscall's MAX_WHY_CHARS
+MAX_LAUNCH_RESULT_CHARS = 160  # a job's last line (launchlog.last_line's cap)
+MAX_ENDED_ROWS = 5  # recently ended runs kept for later agents
+MAX_REPORT_TITLE_BYTES = 64_000  # bound on the report read for its title
+
 
 @dataclass(frozen=True)
 class ClimbRow:
@@ -1086,6 +1094,88 @@ def _experiment_progress(root: Path, record: Any) -> tuple[int, int, int]:
     return (done, len(names), minutes)
 
 
+def _launch_rows(root: Path, record: RunRecord) -> list[dict[str, str]]:
+    """The run's recent launches: each launch's `--why`, how its last job
+    ended, and the job's final line (its score or failure). Read from the
+    kernel's launch journal — the same source the queue view labels a launch
+    from — most recent first and capped."""
+    from outerloop.launchlog import history
+
+    try:
+        entries = history(run_dir(root, record.run_id))
+    except Exception:
+        return []
+    rows: list[dict[str, str]] = []
+    for entry in reversed(entries):
+        jobs = [j for j in entry.get("jobs") or [] if isinstance(j, dict)]
+        why = str(entry.get("why") or "").strip()
+        state, result = "not back", ""
+        if jobs:
+            last = jobs[-1]
+            code = last.get("exit_code")
+            state = str(last.get("state") or "").strip()
+            if not state:
+                state = "failed" if code not in (None, 0) else "done" if code == 0 else "back"
+            result = str(last.get("last_line") or "").strip()
+            if not result and code is not None:
+                result = f"exit {code}"
+        if not why and not result:
+            continue
+        rows.append(
+            {
+                "why": why[:MAX_LAUNCH_WHY_CHARS],
+                "state": state[:40],
+                "result": result[:MAX_LAUNCH_RESULT_CHARS],
+            }
+        )
+        if len(rows) >= MAX_SIBLING_LAUNCHES:
+            break
+    return rows
+
+
+def _read_report(root: Path, record: RunRecord) -> str:
+    """A run's report, bounded; "" when it has not written one."""
+    try:
+        with (run_dir(root, record.run_id) / "report.md").open("rb") as fh:
+            return fh.read(MAX_REPORT_TITLE_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _best_result(record: RunRecord) -> float | None:
+    """The candidate score from the kernel's own gate measurement of this run.
+    Report text and the agent's claim are left out, since either can carry a
+    self-reported number. None when the kernel has measured nothing yet."""
+    judged = (record.stage or {}).get("judged")
+    value = judged.get("candidate") if isinstance(judged, dict) else None
+    finite = isinstance(value, int | float) and not isinstance(value, bool)
+    return float(value) if finite and math.isfinite(float(value)) else None  # type: ignore[arg-type]
+
+
+def _report_title(root: Path, record: RunRecord) -> str:
+    """The report's own hypothesis paragraph is the run's title; the stated
+    hypothesis in the record is the fallback."""
+    stated = str((record.stage or {}).get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
+    return report_hypothesis(_read_report(root, record)) or stated
+
+
+def _ended_rows(root: Path, target: str, records: list[RunRecord]) -> list[dict[str, Any]]:
+    """The target's recently ended runs, newest first: outcome and report
+    title, so a later agent can build on finished work. Bounded."""
+    ended = [r for r in records if r.target == target and r.state == ENDED]
+    ended.sort(key=lambda r: r.updated or r.created, reverse=True)
+    return [
+        {
+            "agent": r.agent_id,
+            "benchmark": r.benchmark,
+            "outcome": r.ending or "ended",
+            "hypothesis": _report_title(root, r),
+            "pr_url": r.pr_url,
+        }
+        for r in ended[:MAX_ENDED_ROWS]
+    ]
+
+
 def collect_status(
     root: Path,
     target: str,
@@ -1119,7 +1209,10 @@ def collect_status(
 
         blocked = resume_config_block(stage)
         note = blocked or str(stage.get("report") or "")
-        hyp = report_hypothesis(note) or str(stage.get("hypothesis") or "")[:MAX_HYPOTHESIS_CHARS]
+        # the run's STATED hypothesis wins: a later session's note (often just
+        # its last chat line) must not replace the research direction
+        stated = str(stage.get("hypothesis") or "").strip()[:MAX_HYPOTHESIS_CHARS]
+        hyp = stated or report_hypothesis(note)
         exp_done, exp_total, exp_minutes = _experiment_progress(root, record)
         depth_k, sleep_k, bench_minutes = budgets.get(record.benchmark, (None, None, 0))
         gpu_ceiling = gpu_budget
@@ -1168,13 +1261,22 @@ def collect_status(
                 "gpu_hours_used": float(stage.get("gpu_hours_used") or 0.0),  # type: ignore[arg-type]
                 "gpu_hours_budget": gpu_ceiling,
                 "pr_url": record.pr_url,
+                # the bounded research digest: what it is trying, what came
+                # back, and the best measured score it has so far
+                "best_result": _best_result(record),
+                "launches": _launch_rows(root, record),
                 "waiting": _waiting_on(
                     record, exp_done, exp_total, wake_pending(run_dir(root, record.run_id), record)
                 ),
             }
         )
     runs.sort(key=lambda r: str(r.get("run_id")))
-    status: dict[str, Any] = {"target": target, "published": now, "runs": runs}
+    status: dict[str, Any] = {
+        "target": target,
+        "published": now,
+        "runs": runs,
+        "ended": _ended_rows(root, target, records),
+    }
     if queue is not None:  # a snapshot was taken (Slurm); the local loop has no queue
         status["queue"] = queue_rows(root, target, queue, records)
     return status
@@ -1227,6 +1329,8 @@ def service_status(
                 "direction",
                 "hypothesis",
                 "pr_url",
+                "best_result",
+                "launches",
                 "exp_done",
                 "exp_total",
                 "exp_minutes",
@@ -1236,6 +1340,18 @@ def service_status(
                 "sleep_k",
             )
             shape = lambda runs: [{k: r.get(k) for k in keys} for r in runs]
+            # the recent endings move when a run ends or its report is
+            # archived; a snapshot without the key (pre-upgrade) is republished
+            # once, then compares equal
+            eshape = lambda ended: (
+                None
+                if not isinstance(ended, list)
+                else [
+                    (e.get("agent"), e.get("outcome"), e.get("hypothesis"))
+                    for e in ended
+                    if isinstance(e, dict)
+                ]
+            )
             # the queue's shape is which jobs exist, their state, partition and
             # attribution (an eval claimed by its marker one tick later must
             # republish); elapsed time drifts every tick and is left out
@@ -1259,6 +1375,7 @@ def service_status(
                 isinstance(existing, dict)
                 and isinstance(existing.get("runs"), list)
                 and shape(existing["runs"]) == shape(status["runs"])
+                and eshape(existing.get("ended")) == eshape(status.get("ended"))
                 and qshape(existing.get("queue")) == qshape(status.get("queue"))
             ):
                 return False
