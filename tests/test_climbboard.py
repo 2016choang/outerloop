@@ -997,6 +997,157 @@ def test_review_status_keeps_published_hypothesis(tmp_path: Path) -> None:
     assert run["pr_url"] == record.pr_url
 
 
+def test_status_carries_research_digest_and_recent_endings(tmp_path: Path) -> None:
+    """Each live run's entry is a bounded research summary: the STATED
+    hypothesis (not a later note's chatter), its recent launches with their
+    `--why`, state and result line, its best measured score, and the target's
+    recently ended runs with outcome and report title."""
+    from outerloop.climbboard import collect_status
+    from outerloop.launchlog import append_ended, append_submitted
+    from outerloop.syscall import Launch, LaunchResult
+
+    record = RunRecord(
+        run_id="live-digest",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        benchmark="speedrun",
+        agent_id="agent-02",
+        created=1.0,
+        updated=2.0,
+        claimed_value=1.0,  # the agent's own claim: never shown as a result
+        claimed_baseline=10.0,
+        stage={
+            "phase": "author-sleep",
+            "hypothesis": "Warmdown length is the lever.",
+            # a session note that must NOT replace the stated hypothesis
+            "report": "Launch committed.\n\nHypothesis: a later note.",
+            "judged": {"candidate": 4.5, "baseline": 10.0},
+        },
+    )
+    save_record(tmp_path, record, 2.0)
+    directory = run_dir(tmp_path, record.run_id)
+    # a published report records its measured candidate; it is the best yet
+    (directory / "report.md").write_text("## Result\nCandidate: 2.0\n")
+    launches = tuple(
+        Launch(name=f"l{i}", command="true", minutes=5, why=f"why {i}" + "x" * 500)
+        for i in range(4)
+    )
+    append_submitted(directory, sleep=1, launches=launches, job_ids=["1", "2", "3", "4"], at=1.0)
+    append_ended(
+        directory,
+        sleep=1,
+        results=(
+            LaunchResult(
+                name="l3",
+                exit_code=0,
+                stdout_tail="step 1\nfinal score 2.5\n",
+                stderr_tail="",
+                delivered=(),
+                skipped=(),
+            ),
+            LaunchResult(
+                name="l2",
+                exit_code=1,
+                stdout_tail="",
+                stderr_tail="boom\n",
+                delivered=(),
+                skipped=(),
+            ),
+        ),
+        at=2.0,
+    )
+    # seven endings: only the newest five stay, newest first, with the
+    # report's own title (falling back to the stated hypothesis)
+    for i in range(7):
+        ended = RunRecord(
+            run_id=f"end-{i}",
+            target="org/repo",
+            task_title="t",
+            state="ended",
+            ending="merged" if i == 6 else "negative-result",
+            benchmark="speedrun",
+            agent_id=f"agent-1{i}",
+            created=float(i),
+            updated=float(i + 10),
+            stage={"hypothesis": f"stated {i}"},
+        )
+        save_record(tmp_path, ended, float(i + 10))
+        if i != 6:  # the newest has a report title
+            (run_dir(tmp_path, ended.run_id) / "report.md").write_text(
+                f"- **Hypothesis:** ended title {i}.\n"
+            )
+    status = collect_status(tmp_path, "org/repo", 20.0)
+    (run,) = status["runs"]
+    assert run["hypothesis"] == "Warmdown length is the lever."
+    assert run["direction"] == "Warmdown length is the lever."
+    # the kernel's gate measurement only: report text (2.0) and the claim (1.0)
+    # can be self-reported
+    assert run["best_result"] == 4.5
+    assert [row["why"][:6] for row in run["launches"]] == ["why 3x", "why 2x", "why 1x"]
+    assert len(run["launches"]) == 3  # capped, most recent first
+    assert len(run["launches"][0]["why"]) == 200  # bounded
+    assert run["launches"][0]["state"] == "done"
+    assert run["launches"][0]["result"] == "final score 2.5"
+    assert run["launches"][1]["state"] == "failed" and run["launches"][1]["result"] == "exit 1"
+    assert run["launches"][2]["state"] == "not back"
+    ended = status["ended"]
+    assert len(ended) == 5 and [e["agent"] for e in ended] == [
+        "agent-16",
+        "agent-15",
+        "agent-14",
+        "agent-13",
+        "agent-12",
+    ]
+    assert ended[0]["outcome"] == "merged" and ended[0]["hypothesis"] == "stated 6"
+    assert ended[1]["outcome"] == "negative-result"
+    assert ended[1]["hypothesis"].startswith("ended title 5")
+
+
+def test_array_launch_is_not_done_until_every_task_is_back(tmp_path: Path) -> None:
+    from outerloop.climbboard import collect_status
+    from outerloop.launchlog import append_ended, append_submitted
+    from outerloop.syscall import Launch, LaunchResult
+
+    record = RunRecord(
+        run_id="live-sweep",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        benchmark="speedrun",
+        agent_id="agent-03",
+        created=1.0,
+        updated=2.0,
+        stage={"phase": "author-sleep", "hypothesis": "h"},
+    )
+    save_record(tmp_path, record, 2.0)
+    directory = run_dir(tmp_path, record.run_id)
+    sweep = Launch(name="sweep", command="true", minutes=5, why="lr sweep", array=3)
+    append_submitted(directory, sleep=1, launches=(sweep,), job_ids=["9"], at=1.0)
+    first = LaunchResult(
+        name="sweep.0",
+        exit_code=0,
+        stdout_tail="score 3.1\n",
+        stderr_tail="",
+        delivered=(),
+        skipped=(),
+    )
+    append_ended(directory, sleep=1, results=(first,), at=2.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0]["state"] == "1 of 3 tasks back"
+    # all back: a failed task is not hidden by a later success
+    failed = dc_replace(first, name="sweep.1", exit_code=1, stdout_tail="")
+    last = dc_replace(first, name="sweep.2")
+    append_ended(directory, sleep=1, results=(failed, last), at=3.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0]["state"] == "1 of 3 tasks failed"
+    # a launch without a --why still shows while it is out
+    bare = Launch(name="bare", command="true", minutes=5)
+    append_submitted(directory, sleep=2, launches=(bare,), job_ids=["10"], at=4.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0] == {"why": "", "state": "not back", "result": ""}
+
+
 def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:
     """A run that submitted without launching and without --minutes must
     still render meters: zero launches/spend, the contract's eval cap."""
