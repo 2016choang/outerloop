@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -1113,17 +1114,20 @@ def pr(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            # the operator's own identity: --global, so a repo-local identity from
-            # whatever checkout the command runs in does not become the author
+            # the operator's own identity (system, global and their includes),
+            # read outside any repository so a repo-local identity from whatever
+            # checkout the command runs in does not become the author
             identity = []
             for key in ("user.name", "user.email"):
                 try:
                     result = subprocess.run(
-                        ["git", "config", "--global", "--get", key],
+                        ["git", "config", "--get", key],
                         capture_output=True,
                         text=True,
                         timeout=5,
                         check=False,
+                        cwd=tempfile.gettempdir(),
+                        env={**os.environ, "GIT_CEILING_DIRECTORIES": tempfile.gettempdir()},
                     )
                     identity.append(result.stdout.strip() if result.returncode == 0 else "")
                 except (OSError, subprocess.TimeoutExpired):
