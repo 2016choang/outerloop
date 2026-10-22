@@ -580,7 +580,11 @@ The memory, in GB, a dispatched GPU eval asks for per GPU.
 ### `OUTERLOOP_LOCAL_GPUS`
 
 The number of GPUs the local compute pool offers, when automatic
-detection gets it wrong or misses them.
+detection gets it wrong or misses them. If the loop starts with
+`CUDA_VISIBLE_DEVICES` set to a list of GPU ids, that list is the pool
+instead and this value caps it, keeping the first listed ids; an empty value
+or `-1` means no GPUs. Start each deployment with its own
+`CUDA_VISIBLE_DEVICES` (for example `0,1` and `2,3`) to give it its own GPUs.
 
 - Default: auto-detected
 - Constraint: a non-negative integer

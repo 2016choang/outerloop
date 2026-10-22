@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from outerloop.compute import JobSpec
+from outerloop.compute import LOCAL_GPU_MASK, JobSpec
 from outerloop.github import (
     SAFE_GIT_FLAGS,
     GitError,
@@ -512,8 +512,14 @@ def write_eval_job(
     ]
     for key, value in injected.items():
         lines.append(f"export {key}={shlex.quote(value)} APPTAINERENV_{key}={shlex.quote(value)}")
+    mask = f'"${LOCAL_GPU_MASK}"'
+    # only a local job's own mask counts: one inherited into a Slurm job is stale
+    lines.append(f'if [ -n "${{SLURM_JOB_ID-}}" ]; then unset {LOCAL_GPU_MASK}; fi')
     if image:
         lines += [
+            # local compute's GPU mask crosses --cleanenv; set only by local jobs
+            f'if [ -n "${{{LOCAL_GPU_MASK}+x}}" ]; then '
+            f"export APPTAINERENV_CUDA_VISIBLE_DEVICES={mask}; fi",
             # the jail: identical flags to SubprocessEvaluator._run; stdout is
             # redirected OUTSIDE apptainer, so the result lands in the run dir
             # without the jailed process ever seeing it
@@ -549,6 +555,9 @@ def write_eval_job(
             # a sweep task's index, as the contained branch passes it
             + (['SWEEP_INDEX="$SWEEP_INDEX"'] if array > 1 else [])
             + (_rendezvous_env(gpus) if nodes > 1 else [])
+            # local compute's GPU mask, when a local job carries one (an
+            # empty mask stays empty)
+            + [f"${{{LOCAL_GPU_MASK}+CUDA_VISIBLE_DEVICES={mask}}}"]
             + [f"{key}={shlex.quote(value)}" for key, value in injected.items()]
         )
         lines += [

@@ -3,6 +3,7 @@ layout, result parsing — the seams the design doc's review rounds hardened."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -581,6 +582,31 @@ def test_uncontained_sweep_tasks_see_their_index(tmp_path):
         run_dir, "launch-one", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image=""
     ).read_text()
     assert "SWEEP_INDEX" not in single
+
+
+def test_local_gpu_mask_crosses_the_scrubbed_environment(tmp_path):
+    """Local compute's GPU mask reaches the evaluated command in both branches;
+    a job without the mask (Slurm) sets nothing."""
+    run_dir = tmp_path / "run"
+    bare = write_eval_job(
+        run_dir, "b", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image=""
+    ).read_text()
+    line = next(ln for ln in bare.splitlines() if "env -i" in ln)
+    expansion = next(word for word in line.split() if word.startswith("${OUTERLOOP_CUDA"))
+    for value, seen in (("2,3", "[2,3]"), ("", "[]"), (None, "[unset]")):
+        env = {"PATH": os.environ["PATH"]}
+        if value is not None:
+            env["OUTERLOOP_CUDA_VISIBLE_DEVICES"] = value
+        probe = f"env -i {expansion} sh -c 'echo \"[${{CUDA_VISIBLE_DEVICES-unset}}]\"'"
+        out = subprocess.run(["sh", "-c", probe], env=env, capture_output=True, text=True)
+        assert out.stdout.strip() == seen
+    contained = write_eval_job(
+        run_dir, "c", repo_root=tmp_path, snapshot_sha="a" * 40, command="true", image="/i.sif"
+    ).read_text()
+    assert (
+        'if [ -n "${OUTERLOOP_CUDA_VISIBLE_DEVICES+x}" ]; then '
+        'export APPTAINERENV_CUDA_VISIBLE_DEVICES="$OUTERLOOP_CUDA_VISIBLE_DEVICES"; fi'
+    ) in contained
 
 
 def test_job_copies_the_seed_cache_into_its_own_before_uv_runs(tmp_path):
