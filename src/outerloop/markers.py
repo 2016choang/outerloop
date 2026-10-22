@@ -8,6 +8,7 @@ documentation use `marker` / `label_name`.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 PREFIX = "outerloop"
@@ -23,11 +24,15 @@ def has_marker(body: str, kind: str) -> bool:
     return marker(kind) in body
 
 
+_ANY_MARKER = re.compile(rf"<!-- {PREFIX}:[a-z][a-z-]*(?: [^<>]*)? -->")
+
+
 def has_outerloop_marker(body: str) -> bool:
-    """Does `body` carry any `outerloop:` HTML-comment marker? Personal mode
-    uses this, not a specific kind, to tell a marked kernel post from the
-    person's unmarked writing under the same login."""
-    return f"<!-- {PREFIX}:" in body
+    """Does `body` carry a whole `outerloop:` HTML-comment marker (a kind, and
+    an argument for some kinds)? Personal mode uses this, not a specific kind,
+    to tell a marked kernel post from the person's writing under the same
+    login."""
+    return bool(_ANY_MARKER.search(body))
 
 
 def with_kernel_marker(body: str) -> str:

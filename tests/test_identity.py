@@ -45,10 +45,28 @@ def test_a_marked_kernel_post_is_still_the_kernels(monkeypatch) -> None:
 
     monkeypatch.setenv("OUTERLOOP_IDENTITY", "personal")
     assert is_kernel_post(_item("person", "<!-- outerloop:kernel -->\nhi"), "person")
+    assert is_kernel_post(_item("person", "<!-- outerloop:reply-id 7 -->\nok"), "person")
+    # the person typing the prefix in prose is not a marker
+    assert not is_kernel_post(_item("person", "markers look like <!-- outerloop:"), "person")
     # outside personal mode the login alone decides
     monkeypatch.delenv("OUTERLOOP_IDENTITY")
     assert is_kernel_post(_item("person", "unmarked, but a dedicated login"), "person")
     assert not is_kernel_post(_item("person", "unmarked"), "someone-else")
+
+
+def test_reviewer_and_verifier_tell_the_persons_pr_from_the_kernels(monkeypatch) -> None:
+    from outerloop.review import PullRequest, skip_reason
+    from outerloop.verifier import verify_skip_reason
+
+    monkeypatch.setenv("OUTERLOOP_IDENTITY", "personal")
+    monkeypatch.delenv("OUTERLOOP_BOT_ALIASES", raising=False)
+    diff = "+one line\n"
+    kernel = PullRequest("o/r", 1, "t", "<!-- outerloop:kernel -->\nbody", diff, "person")
+    person = PullRequest("o/r", 2, "t", "a hand-made change", diff, "person")
+    assert skip_reason(kernel, "person") is not None
+    assert skip_reason(person, "person") is None
+    assert verify_skip_reason(kernel, "person") is None
+    assert verify_skip_reason(person, "person") is not None
 
 
 def test_an_alias_login_keeps_the_login_check_alone(monkeypatch) -> None:
