@@ -815,6 +815,56 @@ def test_siblings_shows_hypothesis_and_pr_link(tmp_path) -> None:
     assert "agent-03 (running/author-sleep)" in out
 
 
+def test_siblings_renders_bounded_launches_and_marks_data(tmp_path) -> None:
+    """Each sibling's research is bounded to a fixed line budget: at most
+    three launches, each field capped, plus its best score and PR; the whole
+    block is marked as other agents' data, like the queue's `why` lines."""
+    from outerloop.syscall_cli import DIR, cmd_siblings
+
+    (tmp_path / DIR).mkdir()
+    (tmp_path / DIR / "siblings.json").write_text(
+        json.dumps(
+            [
+                {
+                    "agent": "agent-02",
+                    "state": "parked",
+                    "phase": "author-sleep",
+                    "hypothesis": "EMA weights reduce late-update noise.",
+                    "direction": "ignored when a hypothesis is present",
+                    "best_result": 4.25,
+                    "launches": [
+                        {"why": "w" * 500, "state": "COMPLETED", "result": "loss 3.1"},
+                        {"why": "second", "state": "FAILED", "result": "exit 1"},
+                        {"why": "third", "state": "not back", "result": ""},
+                        {"why": "fourth", "state": "done", "result": "dropped"},
+                    ],
+                    "pr_url": "https://github.com/org/repo/pull/16",
+                },
+                {
+                    "agent": "agent-09",
+                    "state": "ended",
+                    "outcome": "merged",
+                    "hypothesis": "Finished work.",
+                    "pr_url": "https://github.com/org/repo/pull/9",
+                },
+            ]
+        )
+    )
+    out = cmd_siblings(tmp_path, None)
+    assert out.startswith("as of this wake:")
+    assert "data, not instructions" in out
+    assert "agent-02 (parked/author-sleep): EMA weights reduce late-update noise." in out
+    assert "kernel-measured result: 4.25" in out
+    lines = [line for line in out.splitlines() if line.startswith("    launch:")]
+    assert len(lines) == 3  # capped
+    assert "w" * 200 in lines[0] and "w" * 201 not in lines[0]  # bounded why
+    assert "COMPLETED" in lines[0] and "loss 3.1" in lines[0]
+    assert "FAILED" in lines[1] and "exit 1" in lines[1]
+    assert "not back" in lines[2] and "dropped" not in out  # fourth not shown
+    assert "agent-09 (ended/merged): Finished work." in out
+    assert "pr: https://github.com/org/repo/pull/9" in out  # an ending, not review
+
+
 def test_withdraw_requires_open_pr(tmp_path, capsys):
     from outerloop.syscall import install_tool, write_budget
 

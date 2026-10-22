@@ -15,6 +15,7 @@ import argparse
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -2705,13 +2706,49 @@ def submission_paths(
             ws.git("reset")
 
 
+MAX_SIBLING_LAUNCHES = 3  # mirrors climbboard.MAX_SIBLING_LAUNCHES
+MAX_SIBLING_ENDED = 5  # mirrors climbboard.MAX_ENDED_ROWS
+
+
+def _sibling_launches(raw: object) -> list[dict[str, str]]:
+    """A sibling's launch digest, bounded: the status branch is bot-written
+    but never trusted with unbounded memory."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw[:MAX_SIBLING_LAUNCHES]:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "why": str(item.get("why", ""))[:200],
+                "state": str(item.get("state", ""))[:40],
+                "result": str(item.get("result", ""))[:160],
+            }
+        )
+    return out
+
+
+def _sibling_score(raw: object) -> float | None:
+    """A finite number or None — a hostile value is neither shown nor trusted."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:  # a JSON integer too large for a float
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
-    """The other agents' live directions from the research-log's
-    status.json, fetched here so every caller (the fresh climb and each
-    wake) reads the branch and not whatever FETCH_HEAD last pointed at.
-    Size-checked BEFORE show like the report blobs, entries and fields
-    bounded — the branch is bot-written but never trusted with unbounded
-    memory. Any failure means no siblings known, never a crash."""
+    """The other agents' research from the research-log's status.json,
+    fetched here so every caller (the fresh climb and each wake) reads the
+    branch and not whatever FETCH_HEAD last pointed at. Size-checked BEFORE
+    show like the report blobs, entries and fields bounded — the branch is
+    bot-written but never trusted with unbounded memory. Any failure means no
+    siblings known, never a crash. Recent endings ride along so later agents
+    can build on finished work; an old snapshot without the new fields still
+    reads (they are simply empty)."""
     try:
         if getattr(ws, "channels", None) and not ws._offered_branch(RESEARCH_LOG_BRANCH):
             return _isolated_research_read(ws, lambda reader: _sibling_entries(reader, self_agent))
@@ -2720,7 +2757,10 @@ def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
         if int(ws.git("cat-file", "-s", blob).strip()) > 1_000_000:
             raise ValueError("status snapshot oversized; skipped")
         fleet = json.loads(ws.git("show", blob))
-        return [
+        if not isinstance(fleet, dict):
+            return []
+        runs = fleet.get("runs")
+        entries = [
             {
                 "agent": str(r.get("agent", ""))[:64],
                 "state": str(r.get("state", ""))[:32],
@@ -2728,10 +2768,29 @@ def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
                 "direction": str(r.get("direction", ""))[:160],
                 "hypothesis": str(r.get("hypothesis", ""))[:400],
                 "pr_url": str(r.get("pr_url", ""))[:1000],
+                "best_result": _sibling_score(r.get("best_result")),
+                "launches": _sibling_launches(r.get("launches")),
             }
-            for r in fleet.get("runs", [])[:64]
+            for r in (runs[:64] if isinstance(runs, list) else [])
             if isinstance(r, dict) and r.get("agent") != self_agent
         ]
+        ended = fleet.get("ended")
+        for r in ended[:MAX_SIBLING_ENDED] if isinstance(ended, list) else ():
+            if not isinstance(r, dict) or r.get("agent") == self_agent:
+                continue
+            entries.append(
+                {
+                    "agent": str(r.get("agent", ""))[:64],
+                    "state": "ended",
+                    "outcome": str(r.get("outcome", ""))[:64],
+                    "hypothesis": str(r.get("hypothesis", ""))[:400],
+                    "direction": "",
+                    "pr_url": str(r.get("pr_url", ""))[:1000],
+                    "best_result": None,
+                    "launches": [],
+                }
+            )
+        return entries
     except Exception as exc:
         log.info("no sibling snapshot for this session (%s)", exc)
         return []

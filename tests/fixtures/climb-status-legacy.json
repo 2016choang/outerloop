@@ -1,0 +1,24 @@
+{
+ "target": "org/repo",
+ "published": 1787900000.0,
+ "runs": [
+  {
+   "run_id": "legacy-1",
+   "agent": "agent-01",
+   "state": "parked",
+   "phase": "candidate",
+   "direction": "self entry",
+   "hypothesis": "self entry",
+   "pr_url": ""
+  },
+  {
+   "run_id": "legacy-2",
+   "agent": "agent-07",
+   "state": "parked",
+   "phase": "candidate",
+   "direction": "Legacy direction.",
+   "hypothesis": "Legacy hypothesis.",
+   "pr_url": "https://github.com/org/repo/pull/7"
+  }
+ ]
+}
