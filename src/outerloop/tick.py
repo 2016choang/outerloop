@@ -29,6 +29,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from outerloop.author_overrides import AuthorOverride
+from outerloop.brief import code_fence
 from outerloop.compute import (
     GONE,
     Compute,
@@ -497,7 +498,7 @@ def contract_alarm(
                 f"consecutive ticks. The error below names the cause — a "
                 f"contract that failed to load, or a panel config the climb "
                 f"would reject.\n\n"
-                f"{_fence(safe_error)}\n{safe_error}\n{_fence(safe_error)}\n\n"
+                f"{code_fence(safe_error)}\n{safe_error}\n{code_fence(safe_error)}\n\n"
                 f"This issue closes itself when a tick passes cleanly.",
             )
             if number:
@@ -526,11 +527,6 @@ def _contract_text(github: Any, target: str, ref: str) -> str | None:
 
     found = find_contract(lambda name: github.get_file_content(target, name, ref))
     return found[1] if found else None
-
-
-def _fence(content: str) -> str:
-    longest = max((len(run) for run in re.findall(r"`+", content)), default=0)
-    return "`" * max(3, longest + 1)
 
 
 def _find_alarm_issue(github: Any, target: str, bot_login: str) -> int:
