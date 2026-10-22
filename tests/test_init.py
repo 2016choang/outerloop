@@ -399,13 +399,15 @@ def test_main_github_app_writes_app_env(tmp_path: Path, monkeypatch, capsys) -> 
     monkeypatch.setattr(appmanifest, "convert_manifest", lambda code, **k: conv)
     monkeypatch.setattr(appmanifest, "capture_installation_id", lambda *a, **k: 999)
     monkeypatch.setattr("builtins.input", lambda *a: "")  # author prompts + the install-Enter
-    rc = init.main(["--github-app", "--compute", "local", "--target", "o/r"])
+    (tmp_path / ".env").write_text("OUTERLOOP_IDENTITY=personal\n")  # switching to the App
+    rc = init.main(["--github-app", "--force", "--compute", "local", "--target", "o/r"])
     assert rc == 0
     app_json = tmp_path / "github_app.sl.json"
     assert json.loads(app_json.read_text())["installation_id"] == 999
     env = (tmp_path / ".env").read_text()
     assert f"OUTERLOOP_GITHUB_APP_FILE={app_json}" in env
     assert "OUTERLOOP_PAT_FILE" not in env
+    assert "OUTERLOOP_IDENTITY" not in env  # a dedicated identity, not personal mode
 
 
 KEEP = "OUTERLOOP_TARGET=keep/me\n"
@@ -821,6 +823,127 @@ def test_pat_path_records_the_tokens_login(tmp_path: Path, monkeypatch) -> None:
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", str(pat)]
     assert init.main(base) == 0
     assert "OUTERLOOP_BOT_LOGIN=someone" in (tmp_path / ".env").read_text()
+
+
+def test_personal_init_writes_the_gh_token_login_and_identity(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """--personal takes `gh auth token` (captured, never echoed), writes it 0600
+    to the default PAT file, records its login, and turns the mode on."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init.shutil, "which", lambda name: "/usr/bin/gh")
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return init.subprocess.CompletedProcess(argv, 0, "ghp_personal\n", "")
+
+    monkeypatch.setattr(init.subprocess, "run", fake_run)
+    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+    monkeypatch.setattr(init, "_token_login", lambda token: "octocat")
+    argv = [
+        "--yes",
+        "--personal",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--claude-model",
+        "m",
+        "--no-image",
+        "--no-install-harness",
+    ]
+    assert init.main(argv) == 0
+    assert ["gh", "auth", "token"] in seen
+    pat = tmp_path / "bot_pat"
+    assert pat.read_text() == "ghp_personal"
+    assert stat.S_IMODE(pat.stat().st_mode) == 0o600
+    env = (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_BOT_LOGIN=octocat" in env
+    assert "OUTERLOOP_IDENTITY=personal" in env
+    captured = capsys.readouterr()
+    assert "ghp_personal" not in captured.out + captured.err
+
+
+def test_personal_without_gh_falls_back_to_a_pasted_token(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        init, "_ask", lambda prompt, default="", **kw: default
+    )  # author prompts take their defaults
+    monkeypatch.setattr(
+        init.getpass,
+        "getpass",
+        lambda prompt: "ghp_pasted" if "token" in prompt.lower() else "",
+    )
+    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+    monkeypatch.setattr(init, "_token_login", lambda token: "octocat")
+    argv = [
+        "--personal",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--claude-model",
+        "m",
+        "--no-image",
+        "--no-install-harness",
+    ]
+    assert init.main(argv) == 0
+    assert (tmp_path / "bot_pat").read_text() == "ghp_pasted"
+    assert "OUTERLOOP_IDENTITY=personal" in (tmp_path / ".env").read_text()
+    out = capsys.readouterr().out
+    assert "gh auth token" in out and "fine-grained" in out
+
+
+def test_personal_refuses_the_app_and_the_local_forge(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    base = [
+        "--yes",
+        "--personal",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--claude-model",
+        "m",
+    ]
+    assert init.main([*base, "--forge", "local"]) == 2
+    assert "GitHub-only" in capsys.readouterr().err
+    assert init.main([*base, "--github-app"]) == 2
+    assert "different identities" in capsys.readouterr().err
+    assert not (tmp_path / ".env").exists()
+
+
+def test_a_rerun_without_personal_keeps_the_mode(tmp_path: Path, monkeypatch) -> None:
+    """The mode is deployment state, not a credential: updating a model without
+    --personal must not silently turn the marker rule off."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+    (tmp_path / ".env").write_text(
+        "OUTERLOOP_COMPUTE=local\n"
+        "OUTERLOOP_TARGET=o/r\n"
+        "OUTERLOOP_PAT_FILE=/some/pat\n"
+        "OUTERLOOP_IDENTITY=personal\n"
+    )
+    argv = [
+        "--yes",
+        "--force",
+        "--compute",
+        "local",
+        "--target",
+        "o/r",
+        "--pat-file",
+        "/some/pat",
+        "--claude-model",
+        "m",
+        "--no-image",
+        "--no-install-harness",
+    ]
+    assert init.main(argv) == 0
+    assert "OUTERLOOP_IDENTITY=personal" in (tmp_path / ".env").read_text()
 
 
 def test_init_records_the_harness_binary_or_says_how_to_install_it(

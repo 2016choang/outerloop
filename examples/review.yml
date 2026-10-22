@@ -34,6 +34,8 @@ jobs:
       # PRs authored by this login are never reviewed (so the bot never
       # reviews its own PRs). Use your own bot/app login.
       bot_login: your-bot-login
+      # set it when the kernel runs with your own token (personal mode)
+      # personal: true
       backend: claude          # claude | hermes | codex
       model: claude-sonnet-5-5   # required for claude: it has no default model
     secrets:

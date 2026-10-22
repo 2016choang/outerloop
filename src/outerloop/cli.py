@@ -85,6 +85,7 @@ TICK_ENV_KEYS = (
     "OUTERLOOP_VERTEX_SMALL_MODEL",
     "OUTERLOOP_TARGET",
     "OUTERLOOP_FORGE",
+    "OUTERLOOP_IDENTITY",
     "OUTERLOOP_GITHUB_APP_FILE",
     "OUTERLOOP_BOT_LOGIN",
     "OUTERLOOP_BOT_ALIASES",
@@ -995,6 +996,7 @@ def pr(args: argparse.Namespace) -> int:
     values = env_file_values(
         keys=(
             "OUTERLOOP_FORGE",
+            "OUTERLOOP_IDENTITY",
             "OUTERLOOP_TARGET",
             "OUTERLOOP_ROOT",
             "OUTERLOOP_BOT_LOGIN",
