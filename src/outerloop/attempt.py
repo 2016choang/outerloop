@@ -467,10 +467,12 @@ def _arm_unless_base_moved(
     measured_base_sha: str,
     secrets: tuple[str, ...],
     merge_mode: str = "manual",
-) -> None:
-    """Manual arming requires the measured base to contain the current tip."""
+) -> bool:
+    """Manual arming requires the measured base to contain the current tip.
+    Returns whether it armed, so the caller records who armed in the stage."""
     if merge_mode == "auto":
-        return
+        return False
+    armed: list[bool] = []
 
     def _check_and_arm() -> None:
         ws.git_network("fetch", str(ws.url or ws.remote_url()), base_branch)
@@ -486,9 +488,11 @@ def _arm_unless_base_moved(
                 measured_base_sha,
             )
             return
-        github.arm_auto_merge_when_review_required(target, int(pr_number))
+        if github.arm_auto_merge_when_review_required(target, int(pr_number)):
+            armed.append(True)
 
     _best_effort("auto-merge arming", _check_and_arm, secrets)
+    return bool(armed)
 
 
 def _title_pair(a: float, b: float) -> str:
@@ -575,6 +579,7 @@ STAGE_RETAINED_KEYS = (
     "base_branch",
     "publish",
     "review_topup",
+    "auto_merge_armed",
     "hypothesis",
     "message_counter",
     "message_delivery",
@@ -4300,6 +4305,7 @@ def publish(
             disarmed = False
         if not disarmed:
             return refuse("Publish refused: auto-merge could not be confirmed disarmed.")
+        record = dc_replace(record, stage={**record.stage, "auto_merge_armed": {}})
         head = str((pr.get("head") or {}).get("sha", ""))
         branch = str((pr.get("head") or {}).get("ref", ""))
         journal = record.stage.get("publish", {})
@@ -4636,8 +4642,9 @@ def publish(
                 contract,
                 now,
             )
+        armed = False
         if pr_number.isdigit() and not draft and result.provenance != "self_reported":
-            _arm_unless_base_moved(
+            armed = _arm_unless_base_moved(
                 github,
                 ws,
                 config.target,
@@ -4670,12 +4677,17 @@ def publish(
                 ),
                 secrets,
             )
+        stage = {**record.stage, "review_topup": True}
+        if armed:
+            # who armed auto-merge is read from the record, not GitHub's
+            # `enabled_by` (personal mode shares the person's login)
+            stage["auto_merge_armed"] = {"pr": int(pr_number)}
         final = RunRecord(
             **{
                 **record.__dict__,
                 "state": PARKED,
                 "pr_url": pr_url,
-                "stage": {**record.stage, "review_topup": True},
+                "stage": stage,
                 "auto_blessed_head": blessed_head,
                 "auto_bless_reason": bless_reason,
                 "auto_bless_reason_kind": "base_moved"

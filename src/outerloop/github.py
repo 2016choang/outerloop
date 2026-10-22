@@ -38,6 +38,7 @@ from typing import Any, Protocol
 from outerloop.contract import CONTRACT_NAME, find_contract, read_guidance
 from outerloop.forge import BODY_EDIT_MARKER as _BODY_EDIT_MARKER
 from outerloop.forge import body_with_addendum, candidate_row_body
+from outerloop.markers import with_kernel_marker
 
 
 def bot_login_from_env(default: str = "") -> str:
@@ -72,6 +73,19 @@ def bot_aliases_from_env() -> tuple[str, ...]:
     PAT account)."""
     raw = os.environ.get("OUTERLOOP_BOT_ALIASES", "")
     return tuple(dict.fromkeys(a.strip() for a in raw.split(",") if a.strip()))
+
+
+IDENTITY_ENV = "OUTERLOOP_IDENTITY"
+PERSONAL_IDENTITY = "personal"
+
+
+def personal_identity() -> bool:
+    """Whether the kernel posts as a person (`OUTERLOOP_IDENTITY=personal`).
+
+    Read here, once, next to the alias list: personal mode shares the person's
+    login, so `is_kernel_post` additionally requires a body marker. `init`
+    writes the setting (step 2); blank means a dedicated identity, as before."""
+    return os.environ.get(IDENTITY_ENV, "").strip().casefold() == PERSONAL_IDENTITY
 
 
 def is_own_login(login: str, bot_login: str) -> bool:
@@ -402,7 +416,13 @@ class GitHubClient:
         data = self._request(
             "POST",
             path,
-            {"title": title, "head": head, "base": base, "body": body, "draft": draft},
+            {
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": with_kernel_marker(body),
+                "draft": draft,
+            },
         )
         if not isinstance(data, dict) or "html_url" not in data:
             raise GitHubError(0, path, f"unexpected create_pull response: {str(data)[:200]}")
@@ -853,7 +873,7 @@ class GitHubClient:
         if self.dry_run:
             log.info("[dry-run] issue on %s: %s", repo, title)
             return 0
-        payload: dict[str, Any] = {"title": title, "body": body}
+        payload: dict[str, Any] = {"title": title, "body": with_kernel_marker(body)}
         if labels:
             payload["labels"] = list(labels)
         data = self._request(
@@ -1031,6 +1051,7 @@ class GitHubClient:
         if self.dry_run:
             log.info("[dry-run] comment on %s#%s (%d chars)", repo, issue_number, len(body))
             return
+        body = with_kernel_marker(body)
         path = f"/repos/{urllib.parse.quote(repo)}/issues/{issue_number}/comments"
         self._request("POST", path, {"body": body})
 

@@ -12,6 +12,7 @@ import pytest
 from outerloop import forge_local
 from outerloop.forge_local import RECORDS_REF, LocalForge, bootstrap_local_repo
 from outerloop.github import GitError, GitHubError
+from outerloop.markers import marker
 
 CONTRACT = """\
 benchmarks:
@@ -123,7 +124,7 @@ def test_pull_record_lifecycle(tmp_path, forge) -> None:
     fashion.comment(repo, 1, "answer")
     comments = fashion.list_comments(repo, 1)
     assert [c["id"] for c in comments] == [1, 2]
-    assert comments[0]["body"] == "question"
+    assert comments[0]["body"] == f"{marker('kernel')}\nquestion"
     assert comments[0]["user"]["login"] == "outerloop"
     assert comments[0]["author_association"] == "NONE"
     assert comments[0]["created_at"].endswith("Z")

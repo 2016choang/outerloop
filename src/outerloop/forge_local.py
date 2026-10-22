@@ -33,6 +33,7 @@ from outerloop.github import (
     GitHubError,
     git_identity,
 )
+from outerloop.markers import with_kernel_marker
 
 log = logging.getLogger(__name__)
 
@@ -1045,6 +1046,7 @@ class LocalForge:
         if self.dry_run:
             log.info("[dry-run] PR on %s: %s (%s -> %s)", repo, title, head, base)
             return self.ref_for(repo, "pull", "dry-run")[1]
+        body = with_kernel_marker(body)
         created: dict[str, int] = {}
 
         def mutate(files: dict[str, str]) -> dict[str, str]:
@@ -1419,7 +1421,7 @@ class LocalForge:
 
     def comment(self, repo: str, issue_number: int, body: str) -> None:
         """Append one kernel comment to an issue's or pull request's thread."""
-        self._append_comment(repo, issue_number, body, self.bot_login, "NONE")
+        self._append_comment(repo, issue_number, with_kernel_marker(body), self.bot_login, "NONE")
 
     def comment_as(
         self,
@@ -1500,6 +1502,7 @@ class LocalForge:
         if self.dry_run:
             log.info("[dry-run] issue on %s: %s", repo, title)
             return 0
+        body = with_kernel_marker(body)
         created: dict[str, int] = {}
 
         def mutate(files: dict[str, str]) -> dict[str, str]:

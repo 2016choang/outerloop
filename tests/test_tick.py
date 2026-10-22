@@ -4588,6 +4588,95 @@ def test_auto_sweep_withdraws_arm_and_reports_each_head_once(
 
 
 @pytest.mark.parametrize(
+    "stage,personal,disarms",
+    [
+        # the stage says the kernel armed this PR (whatever its head now):
+        # withdraw, though `enabled_by` cannot tell the kernel from the person
+        ({"auto_merge_armed": {"pr": 9}}, True, True),
+        # a record for another PR is not this PR's arm
+        ({"auto_merge_armed": {"pr": 8}}, True, False),
+        # cleared after a withdrawal: an arm under the same login is a human's
+        ({"auto_merge_armed": {}}, True, False),
+        # personal mode never reads `enabled_by`
+        ({}, True, False),
+        # no record with a dedicated identity: `enabled_by` decides, as before
+        ({}, False, True),
+    ],
+)
+def test_auto_sweep_honors_the_stage_arm_record(
+    tmp_path, stage, personal, disarms, caplog, monkeypatch
+):
+    from outerloop.runstate import release_lease
+    from outerloop.tick import sweep
+
+    enabled_by = "bot"
+
+    record = waiting_run(
+        tmp_path,
+        experiment_job_id="",
+        deadline=0,
+        state="running",
+        pr_url="https://github.com/org/repo/pull/9",
+        stage={**stage, "base_sha": "base"},
+    )
+
+    class GitHub(QuietPRGitHub):
+        disarms = 0
+
+        def __init__(self):
+            super().__init__()
+            self.head = "human-1"
+            self.armed = True
+
+        def get_pull_request(self, *args):
+            pr = dict(
+                self.pr,
+                auto_merge={"enabled_by": {"login": enabled_by}} if self.armed else None,
+            )
+            pr["head"] = {"sha": self.head}
+            return pr
+
+        def get_file_content(self, *args, **kwargs):
+            return (
+                "benchmarks: [{name: x, command: echo, metric: score, direction: max}]\n"
+                "budgets: {gpu_hours_per_run: 1, runs_per_week: 3}\n"
+                "scope: {allowed: [src/]}\nroadmap: docs/roadmap.md\nmerge: auto"
+            )
+
+        def disable_auto_merge(self, *args):
+            self.disarms += 1
+            self.armed = False
+            return True
+
+        def merge_pull(self, *args, **kwargs):
+            raise AssertionError("a running record must not merge")
+
+    monkeypatch.delenv("OUTERLOOP_BOT_ALIASES", raising=False)
+    if personal:
+        monkeypatch.setenv("OUTERLOOP_IDENTITY", "personal")
+    else:
+        monkeypatch.delenv("OUTERLOOP_IDENTITY", raising=False)
+    github = GitHub()
+    caplog.set_level("INFO")
+    release_lease(tmp_path, record.run_id)
+    sweep(
+        tmp_path,
+        FakeSlurm().compute(),
+        RecordingDispatcher(),
+        NOW,
+        github=github,
+        bot_login="bot",
+    )
+    assert github.disarms == int(disarms)
+    if disarms:
+        assert "auto-merge withdrawal" in caplog.text
+    if stage.get("auto_merge_armed"):
+        # withdrawn, or not this PR's: a later arm is a human's, so the
+        # record no longer claims one
+        assert load_record(tmp_path, record.run_id).stage["auto_merge_armed"] == {}
+
+
+@pytest.mark.parametrize(
     "changed",
     [
         "",

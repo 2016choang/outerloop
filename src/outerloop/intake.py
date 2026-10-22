@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from outerloop.brief import MAX_TASK_CHARS, cap, code_fence
 from outerloop.contract import Contract
-from outerloop.github import is_own_login
+from outerloop.forge import is_kernel_post
 from outerloop.inbox import QUALIFYING_ASSOCIATIONS
 from outerloop.markers import has_label, has_marker, marker
 
@@ -65,7 +65,7 @@ def disqualification(issue: dict, bot_login: str, *, vouching_label: str | None 
     the App's token, and an App without the members permission sees a private
     org member as CONTRIBUTOR. The reason is what the skip log says."""
     author = str((issue.get("user") or {}).get("login", ""))
-    if is_own_login(author, bot_login):
+    if is_kernel_post(issue, bot_login):
         return "the kernel's own issue"  # research log, alarms: never orders
     if not str(issue.get("title") or "").strip():
         return "no title"
@@ -107,8 +107,7 @@ def pick_issue(github, repo: str, contract: Contract, bot_login: str) -> IssueTa
         claimed = False
         attempts = 0
         for c in github.list_comments(repo, number):
-            author = str((c.get("user") or {}).get("login", ""))
-            if not is_own_login(author, bot_login):
+            if not is_kernel_post(c, bot_login):
                 continue  # only the bot's own markers count — no forged releases
             body = str(c.get("body", ""))
             if has_marker(body, "claimed"):

@@ -1604,6 +1604,9 @@ def test_improvement_arms_auto_merge(tmp_path, target_repo) -> None:
     )
     assert outcome.outcome == "improved"
     assert github.armed == [("org/pilot", 1)]
+    # who armed is recorded in the stage, not read back from `enabled_by`
+    record = load_record(tmp_path / "state", "tsp-arm")
+    assert record.stage["auto_merge_armed"] == {"pr": 1}
 
 
 def test_arming_failure_never_fails_the_publish(tmp_path, target_repo) -> None:
