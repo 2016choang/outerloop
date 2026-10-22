@@ -25,6 +25,11 @@
   The pure functions were extracted with Python AST to avoid starting Hermes or
   importing its optional runtime integrations.
 
+`session_index_legacy.json` is a session index from before entries recorded
+the backend CLI version: two Claude legs share a session id and stay summed,
+as the kernel did before cumulative Claude resume pricing. Readers tolerate
+the missing field and never backfill it.
+
 The other fixtures carry their originating kernel commit in their filenames.
 
 - `author_route_missing_model.json` and `author_route_missing_route.json`: synthetic

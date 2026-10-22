@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "sessions": {
+    "legacy-claude-1": {
+      "record_path": "ws-claude-legacy-claude-1.session.json",
+      "cost_usd": 0.1,
+      "verified": true,
+      "backend": "claude",
+      "session_id": "legacy-session"
+    },
+    "legacy-claude-2": {
+      "record_path": "ws-claude-legacy-claude-2.session.json",
+      "cost_usd": 0.2,
+      "verified": true,
+      "backend": "claude",
+      "session_id": "legacy-session"
+    }
+  }
+}
