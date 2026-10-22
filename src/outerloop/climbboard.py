@@ -1155,8 +1155,13 @@ def _best_result(record: RunRecord) -> float | None:
     self-reported number. None when the kernel has measured nothing yet."""
     judged = (record.stage or {}).get("judged")
     value = judged.get("candidate") if isinstance(judged, dict) else None
-    finite = isinstance(value, int | float) and not isinstance(value, bool)
-    return float(value) if finite and math.isfinite(float(value)) else None  # type: ignore[arg-type]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:  # an integer too large for a float
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _report_title(root: Path, record: RunRecord) -> str:

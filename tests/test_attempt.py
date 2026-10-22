@@ -388,9 +388,20 @@ def test_launch_hours_are_reconciled_once_from_the_parks_launch_jobs(tmp_path, m
 
 def test_an_oversized_sibling_score_drops_only_that_score() -> None:
     from outerloop.attempt import _sibling_score
+    from outerloop.climbboard import _best_result
 
     assert _sibling_score(10**400) is None
     assert _sibling_score(4.25) == 4.25
+    # the producer drops it too instead of failing the status publish
+    record = RunRecord(
+        run_id="r",
+        target="o/r",
+        task_title="t",
+        state="parked",
+        benchmark="b",
+        stage={"judged": {"candidate": 10**400}},
+    )
+    assert _best_result(record) is None
 
 
 def test_research_reports_fetch_and_archive(tmp_path) -> None:
