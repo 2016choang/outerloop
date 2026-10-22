@@ -23,6 +23,14 @@ on:
         type: string
         required: false
         default: ''
+      personal:
+        description: >-
+          True when the kernel runs with a person's own token (personal mode):
+          bot_login is then that person, and only PRs whose body carries an
+          outerloop marker are the kernel's.
+        type: boolean
+        required: false
+        default: false
       verifier_repo:
         description: Repo holding the verifier (change this if you forked).
         type: string
@@ -85,14 +93,26 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BOT_LOGIN: ${{ inputs.bot_login }}
           BOT_ALIASES: ${{ inputs.bot_aliases }}
-        # exact match against the bot login or ANY trimmed alias, case-insensitive
+          PERSONAL: ${{ inputs.personal }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        # exact match against the bot login or ANY trimmed alias, case-insensitive;
+        # in personal mode the login is a person's, so it also needs a marked body
         run: |
           ok=false
+          norm() { printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
           author=$(printf '%s' "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')
-          for name in "$BOT_LOGIN" ${BOT_ALIASES//,/ }; do
-            name=$(printf '%s' "$name" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          for name in ${BOT_ALIASES//,/ }; do
+            name=$(norm "$name")
             [ -n "$name" ] && [ "$name" = "$author" ] && ok=true
           done
+          login=$(norm "$BOT_LOGIN")
+          if [ -n "$login" ] && [ "$login" = "$author" ]; then
+            if [ "$PERSONAL" != "true" ]; then
+              ok=true
+            elif printf '%s' "$PR_BODY" | grep -Eq '<!-- outerloop:[a-z][a-z-]*( [^<>]*)? -->'; then
+              ok=true
+            fi
+          fi
           echo "bot_authored=$ok" >> "$GITHUB_OUTPUT"
 
   verify:
@@ -177,6 +197,7 @@ jobs:
           PR_REPO: ${{ github.repository }}
           REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
           OUTERLOOP_BOT_ALIASES: ${{ inputs.bot_aliases }}
+          OUTERLOOP_IDENTITY: ${{ inputs.personal && 'personal' || '' }}
           VERIFY_MODEL: ${{ inputs.model }}
           OUTERLOOP_CLAUDE_MODEL: ${{ vars.OUTERLOOP_CLAUDE_MODEL }}
           # The parent of the two checkouts (pr-head/ and base/).
@@ -257,5 +278,6 @@ jobs:
           PR_REPO: ${{ github.repository }}
           REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
           OUTERLOOP_BOT_ALIASES: ${{ inputs.bot_aliases }}
+          OUTERLOOP_IDENTITY: ${{ inputs.personal && 'personal' || '' }}
           VERIFY_EMIT_FILE: ${{ runner.temp }}/verdict.json
         run: uv run python -m outerloop.verify_post_cli

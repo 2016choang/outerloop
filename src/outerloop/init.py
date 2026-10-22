@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ from outerloop.cli import (
     env_file_values,
     operator_env_file,
 )
+from outerloop.github import IDENTITY_ENV
 from outerloop.harness import HARNESS_INSTALL, default_binary
 from outerloop.hermes_install import hermes_ready
 from outerloop.image import ensure_image
@@ -68,6 +70,7 @@ class InitAnswers:
     image: str = ""  # the agent image (OUTERLOOP_IMAGE)
     uncontained: bool = False  # --no-image: write OUTERLOOP_IMAGE= so no image is picked up
     author_bin: str = ""  # absolute binary or Hermes source path, when ready
+    personal: bool = False  # --personal: the token is the person's (OUTERLOOP_IDENTITY)
 
     # Existing deployment values untouched by a focused GitHub App update.
     preserved_env: dict[str, str] = field(default_factory=dict)
@@ -118,6 +121,9 @@ def render_env(
         # every own-comment filter and own-PR scan keys on this login; without
         # it the kernel assumes a default that is not this adopter's identity
         lines.append(f"OUTERLOOP_BOT_LOGIN={bot_login}")
+    if a.personal:
+        # shares the person's login, so own posts are told apart by body marker
+        lines.append("OUTERLOOP_IDENTITY=personal")
     if a.claude_model:
         lines.append(f"OUTERLOOP_CLAUDE_MODEL={a.claude_model}")
     if a.author_backend:
@@ -244,6 +250,20 @@ def _panel_hint(answers: InitAnswers) -> None:
     )
 
 
+def _personal_tradeoffs() -> None:
+    """What changes when the kernel acts as the person (personal-token.md risks)."""
+    print(
+        "  personal mode: the kernel posts and pushes as you; GitHub sends you no\n"
+        "  notifications for its own activity, so check `outerloop status`.\n"
+        "  The `gh` token reaches every repository you can write. To narrow it, put a\n"
+        "  fine-grained token on the target in the PAT file: Contents, Pull requests\n"
+        "  and Issues read/write; Actions, Checks and Metadata read.\n"
+        '  With an admin token, turn on "Do not allow bypassing the above settings"\n'
+        "  if required checks must bind the kernel. In the reviewer workflow set\n"
+        "  `personal: true` (examples/review.yml)."
+    )
+
+
 def cli_install_wanted(author_bin: str, args: argparse.Namespace) -> bool:
     """Install the author's CLI only in the full setup, when none was found and
     the operator did not opt out; the focused --github-app run sets up the App."""
@@ -303,6 +323,22 @@ def _token_login(token: str) -> str:
             return str(json.loads(resp.read()).get("login") or "")
     except (urllib.error.URLError, OSError, ValueError):
         return ""
+
+
+def _gh_auth_token() -> str:
+    """The token `gh auth token` prints, or "" when gh is missing or logged out.
+
+    Captured, never printed or logged, and never passed on another command
+    line. `init --personal` writes it to the PAT file like a pasted token."""
+    if not shutil.which("gh"):
+        return ""
+    try:
+        done = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
 
 
 def _auth_is_fatal(problem: str) -> bool:
@@ -597,6 +633,10 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
             # leave the deployment on the local forge while writing GitHub
             # credentials
             "OUTERLOOP_FORGE",
+            # the App is a dedicated identity; keeping personal mode would
+            # apply the marker rule to the App's unmarked old posts
+            # (personal-token.md decision 5)
+            "OUTERLOOP_IDENTITY",
         ):
             preserved.pop(key, None)
     compute = args.compute or (_ask("Compute: slurm or local", "slurm") if interactive else "slurm")
@@ -652,6 +692,7 @@ def _collect(args: argparse.Namespace, interactive: bool) -> tuple[InitAnswers, 
         author_key_file=preserved.get(author_key_env(backend), ""),
         author_bin=preserved.get(author_bin_env(backend), "") or locate_harness(backend),
         uncontained=bool(args.no_image) and not image,
+        personal=bool(args.personal),
         preserved_env=preserved,
     )
     return answers, (args.pat_file or "")
@@ -913,6 +954,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="create your own GitHub App in a browser (one click) instead of a PAT",
     )
+    parser.add_argument(
+        "--personal",
+        action="store_true",
+        help="use your own token (default: `gh auth token`) so the kernel posts as you; "
+        "GitHub only",
+    )
     parser.add_argument("--app-name", dest="app_name", help="name for the created GitHub App")
     parser.add_argument("--org", help="create the App under this org (default: your account)")
     parser.add_argument(
@@ -1003,6 +1050,18 @@ def main(argv: list[str] | None = None) -> int:
     if answers.forge != "github" and args.github_app:
         print("outerloop init: --github-app needs the github forge", file=sys.stderr)
         return 2
+    if args.personal and answers.forge != "github":
+        print(
+            "outerloop init: --personal needs the github forge (personal mode is GitHub-only)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.personal and args.github_app:
+        print(
+            "outerloop init: --personal and --github-app are different identities; pick one",
+            file=sys.stderr,
+        )
+        return 2
     if args.forge_source and answers.forge != "local":
         print("outerloop init: --forge-source needs --forge local", file=sys.stderr)
         return 2
@@ -1073,6 +1132,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.github_app:
         settings = env_file_values(env_path, keys=None)
+        # The mode is not a credential: a re-run that does not say --personal
+        # keeps it, so updating a model cannot silently turn the marker rule
+        # off. Choosing the App (decision 5) or the local forge (personal mode
+        # is GitHub-only) drops it, below.
+        if answers.forge == "github" and settings.get(IDENTITY_ENV, "").strip():
+            answers.preserved_env[IDENTITY_ENV] = settings[IDENTITY_ENV]
         judge_keys = (
             "OUTERLOOP_PANEL",
             "OUTERLOOP_PANEL_UNCONTAINED",
@@ -1181,7 +1246,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"outerloop init: {error}; configure Hermes and rerun init", file=sys.stderr)
             return 2
 
-    if not args.forge and not args.github_app and not pat_file and interactive:
+    if (
+        not args.forge
+        and not args.github_app
+        and not pat_file
+        and interactive
+        and not args.personal
+    ):
         # The code host is asked with the credential question it replaces; a
         # supplied PAT or App already says GitHub.
         choice = _ask(
@@ -1192,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
             answers.forge = "local"
 
     if answers.forge == "local":
+        answers.preserved_env.pop(IDENTITY_ENV, None)
         # A local deployment has no GitHub credential: it reads and writes a
         # bare repository under the state root. Bootstrap it now, before
         # writing settings, so a bad source leaves the deployment untouched.
@@ -1245,7 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # The App is the recommended credential (scoped, revocable, no plaintext
     # token); the PAT is the fallback. Offer it first when interactive.
-    if not args.github_app and not pat_file and interactive:
+    if not args.github_app and not pat_file and interactive and not args.personal:
         choice = _ask(
             "Auth — [app] create your own GitHub App (recommended) or [pat] paste a token",
             "app",
@@ -1253,6 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
         if choice.startswith("a"):
             args.github_app = True
     if args.github_app:
+        answers.preserved_env.pop(IDENTITY_ENV, None)
         org = args.org or ""
         if not org and interactive:
             # a private App installs only on the account that created it, so
@@ -1269,7 +1342,28 @@ def main(argv: list[str] | None = None) -> int:
         return _github_app_setup(answers, args.app_name or "", org, interactive=interactive)
 
     token = ""
-    if not pat_file and interactive:
+    if args.personal and not pat_file:
+        # `--pat-file` already names a token file; otherwise take gh's token
+        # (captured, never echoed) and write it with the pasted-token path
+        token = _gh_auth_token()
+        if token:
+            print("  using the token from `gh auth token`")
+        elif interactive:
+            print(
+                "  `gh auth token` is unavailable or not logged in; paste a fine-grained "
+                "token for the target instead"
+            )
+            token = getpass.getpass(
+                "Paste a fine-grained GitHub token for the target (hidden): "
+            ).strip()
+        if not token:
+            print(
+                "outerloop init: --personal needs a token: run `gh auth login`, or pass "
+                "--pat-file PATH to a file holding one",
+                file=sys.stderr,
+            )
+            return 2
+    elif not pat_file and interactive:
         # re-collect only the token here so _collect stays pure of getpass in tests
         token = getpass.getpass(
             "Paste a GitHub PAT with write access to the target (hidden; blank to skip): "
@@ -1317,6 +1411,8 @@ def main(argv: list[str] | None = None) -> int:
             )
     else:
         print("  no PAT set — add OUTERLOOP_PAT_FILE before the agents can open PRs")
+    if args.personal:
+        _personal_tradeoffs()
     _claude_model_hint(answers)
     _author_key_hint(answers)
     _harness_hint(answers)

@@ -39,6 +39,14 @@ on:
         type: string
         required: false
         default: ''
+      personal:
+        description: >-
+          True when the kernel runs with a person's own token (personal mode):
+          bot_login is then that person, and only PRs whose body carries an
+          outerloop marker are skipped as the kernel's.
+        type: boolean
+        required: false
+        default: false
       backend:
         description: Review backend (claude | hermes | codex).
         type: string
@@ -244,6 +252,7 @@ jobs:
           PR_REPO: ${{ github.repository }}
           REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
           OUTERLOOP_BOT_ALIASES: ${{ inputs.bot_aliases }}
+          OUTERLOOP_IDENTITY: ${{ inputs.personal && 'personal' || '' }}
           REVIEW_CHECKOUT: ${{ github.workspace }}/pr-head
           REVIEW_LENS: ${{ inputs.lens }}
           REVIEW_EMIT_FILE: ${{ runner.temp }}/findings.json
@@ -325,6 +334,7 @@ jobs:
           PR_NUMBER: ${{ env.PR_NUMBER }}
           REVIEW_BOT_LOGIN: ${{ inputs.bot_login }}
           OUTERLOOP_BOT_ALIASES: ${{ inputs.bot_aliases }}
+          OUTERLOOP_IDENTITY: ${{ inputs.personal && 'personal' || '' }}
           REVIEW_EMIT_FILE: ${{ runner.temp }}/findings.json
           REVIEW_OPINION_LABEL: ${{ inputs.opinion_label }}
         run: uv run python -m outerloop.review_post_cli

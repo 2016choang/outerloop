@@ -344,7 +344,7 @@ def test_local_start_execs_the_loop_with_env_knobs(
         env_file(
             clean_env,
             "OUTERLOOP_TARGET=o/r\nOUTERLOOP_PANEL=\nOUTERLOOP_CADENCE_MIN=15\n"
-            "OUTERLOOP_PAT_FILE=/home/me/pat\n",
+            "OUTERLOOP_PAT_FILE=/home/me/pat\nOUTERLOOP_IDENTITY=personal\n",
         ),
     )
     monkeypatch.setenv("OUTERLOOP_TARGET", "shell/wins")
@@ -375,6 +375,7 @@ def test_local_start_execs_the_loop_with_env_knobs(
     assert env["OUTERLOOP_PANEL"] == ""  # an off-switch in the file still lands
     assert env["OUTERLOOP_CADENCE_MIN"] == "15"  # the loop's cadence comes from .env too
     assert env["OUTERLOOP_PAT_FILE"] == "/home/me/pat"
+    assert env["OUTERLOOP_IDENTITY"] == "personal"  # the mode reaches every tick
 
 
 def test_local_start_needs_no_checkout(clean_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
