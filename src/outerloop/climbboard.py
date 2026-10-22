@@ -1119,6 +1119,13 @@ def _launch_rows(root: Path, record: RunRecord) -> list[dict[str, str]]:
             result = str(last.get("last_line") or "").strip()
             if not result and code is not None:
                 result = f"exit {code}"
+            try:
+                tasks = max(int(entry.get("array") or 1), 1)
+            except (TypeError, ValueError):
+                tasks = 1
+            if len(jobs) < tasks:
+                # an array launch is not back until every task is
+                state = f"{len(jobs)} of {tasks} tasks back"
         if not why and not result:
             continue
         rows.append(

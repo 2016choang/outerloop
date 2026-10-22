@@ -1104,6 +1104,39 @@ def test_status_carries_research_digest_and_recent_endings(tmp_path: Path) -> No
     assert ended[1]["hypothesis"].startswith("ended title 5")
 
 
+def test_array_launch_is_not_done_until_every_task_is_back(tmp_path: Path) -> None:
+    from outerloop.climbboard import collect_status
+    from outerloop.launchlog import append_ended, append_submitted
+    from outerloop.syscall import Launch, LaunchResult
+
+    record = RunRecord(
+        run_id="live-sweep",
+        target="org/repo",
+        task_title="t",
+        state="parked",
+        benchmark="speedrun",
+        agent_id="agent-03",
+        created=1.0,
+        updated=2.0,
+        stage={"phase": "author-sleep", "hypothesis": "h"},
+    )
+    save_record(tmp_path, record, 2.0)
+    directory = run_dir(tmp_path, record.run_id)
+    sweep = Launch(name="sweep", command="true", minutes=5, why="lr sweep", array=3)
+    append_submitted(directory, sleep=1, launches=(sweep,), job_ids=["9"], at=1.0)
+    first = LaunchResult(
+        name="sweep.0",
+        exit_code=0,
+        stdout_tail="score 3.1\n",
+        stderr_tail="",
+        delivered=(),
+        skipped=(),
+    )
+    append_ended(directory, sleep=1, results=(first,), at=2.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0]["state"] == "1 of 3 tasks back"
+
+
 def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:
     """A run that submitted without launching and without --minutes must
     still render meters: zero launches/spend, the contract's eval cap."""

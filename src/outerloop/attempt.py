@@ -2732,7 +2732,10 @@ def _sibling_score(raw: object) -> float | None:
     """A finite number or None — a hostile value is neither shown nor trusted."""
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
-    value = float(raw)
+    try:
+        value = float(raw)
+    except OverflowError:  # a JSON integer too large for a float
+        return None
     return value if math.isfinite(value) else None
 
 

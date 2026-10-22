@@ -386,6 +386,13 @@ def test_launch_hours_are_reconciled_once_from_the_parks_launch_jobs(tmp_path, m
     assert _reconcile_launch_hours(old_sleep, d, 0, sweep) == 0.0  # type: ignore[arg-type]
 
 
+def test_an_oversized_sibling_score_drops_only_that_score() -> None:
+    from outerloop.attempt import _sibling_score
+
+    assert _sibling_score(10**400) is None
+    assert _sibling_score(4.25) == 4.25
+
+
 def test_research_reports_fetch_and_archive(tmp_path) -> None:
     """A fresh attempt pulls the target's research-log reports: newest first
     for the brief, full texts into the channel archive; a target without the

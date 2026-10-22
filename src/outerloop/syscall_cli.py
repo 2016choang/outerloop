@@ -791,7 +791,8 @@ def cmd_siblings(root: Path, _args) -> str:
         lines.append(f"  - {who} ({label}): {what}" if what else f"  - {who} ({label})")
         if not ended:
             best = e.get("best_result")
-            if isinstance(best, int | float) and not isinstance(best, bool) and math.isfinite(best):
+            # the kernel writes a float; anything else (a huge int) is not shown
+            if isinstance(best, float) and math.isfinite(best):
                 lines.append(f"    kernel-measured result: {best:.6g}")
             launches = e.get("launches")
             for launch in launches[:MAX_SIBLING_LAUNCHES] if isinstance(launches, list) else []:
