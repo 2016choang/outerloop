@@ -1135,6 +1135,12 @@ def test_array_launch_is_not_done_until_every_task_is_back(tmp_path: Path) -> No
     append_ended(directory, sleep=1, results=(first,), at=2.0)
     (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
     assert run["launches"][0]["state"] == "1 of 3 tasks back"
+    # all back: a failed task is not hidden by a later success
+    failed = dc_replace(first, name="sweep.1", exit_code=1, stdout_tail="")
+    last = dc_replace(first, name="sweep.2")
+    append_ended(directory, sleep=1, results=(failed, last), at=3.0)
+    (run,) = collect_status(tmp_path, "org/repo", 20.0)["runs"]
+    assert run["launches"][0]["state"] == "1 of 3 tasks failed"
 
 
 def test_bare_submit_still_gets_meters(tmp_path: Path) -> None:

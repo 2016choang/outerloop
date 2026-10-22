@@ -1123,9 +1123,15 @@ def _launch_rows(root: Path, record: RunRecord) -> list[dict[str, str]]:
                 tasks = max(int(entry.get("array") or 1), 1)
             except (TypeError, ValueError):
                 tasks = 1
+            failed = sum(1 for j in jobs if j.get("exit_code") not in (None, 0))
             if len(jobs) < tasks:
                 # an array launch is not back until every task is
                 state = f"{len(jobs)} of {tasks} tasks back"
+                if failed:
+                    state += f", {failed} failed"
+            elif tasks > 1 and failed:
+                # one task's success must not hide another's failure
+                state = f"{failed} of {tasks} tasks failed"
         if not why and not result:
             continue
         rows.append(
