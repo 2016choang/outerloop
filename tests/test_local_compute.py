@@ -577,6 +577,18 @@ def test_zero_gpus_preserves_environment(gpu_root, monkeypatch, requested):
     assert LocalCompute().queue_snapshot() == []
 
 
+def test_inherited_gpu_mask_marker_is_dropped(gpu_root, monkeypatch):
+    """Only local compute sets the eval's mask marker; a stale one in the loop's
+    environment never reaches a job."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("OUTERLOOP_CUDA_VISIBLE_DEVICES", "2,3")
+    output = gpu_root / "marker"
+    LocalCompute().submit(
+        _spec(command=f'echo "${{OUTERLOOP_CUDA_VISIBLE_DEVICES-unset}}" > {output}')
+    )
+    assert output.read_text().strip() == "unset"
+
+
 @pytest.mark.parametrize("array", ["", "0-1%1"])
 @pytest.mark.parametrize("command, state", [("exit 3", "FAILED"), ("sleep 10", "TIMEOUT")])
 def test_gpu_release_on_terminal_state(gpu_root, command, state, array):

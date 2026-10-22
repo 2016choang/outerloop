@@ -901,7 +901,9 @@ class LocalCompute:
         job_env.update(cache_environment(os.environ))
         # a job never sees GPUs outside the loop's own view: without an
         # allocation (a CPU job, or an empty or `-1` mask) it inherits that
-        # view; an allocation narrows it further at launch
+        # view; an allocation narrows it further at launch. The mask marker is
+        # only ever the one set here, never one inherited through OUTERLOOP_*.
+        job_env.pop(LOCAL_GPU_MASK, None)
         if "CUDA_VISIBLE_DEVICES" in os.environ:
             job_env["CUDA_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"]
             job_env[LOCAL_GPU_MASK] = os.environ["CUDA_VISIBLE_DEVICES"]
