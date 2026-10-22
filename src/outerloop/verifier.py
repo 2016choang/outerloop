@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from outerloop.brief import code_fence
 from outerloop.github import GitHubClient, is_own_login
 from outerloop.markers import has_label, marker
 from outerloop.review import (
@@ -36,7 +37,6 @@ from outerloop.review import (
     Finding,
     PullRequest,
     ReviewResult,
-    _fence,
     guidance_section,
     sanitize,
     verdict_line,
@@ -240,8 +240,8 @@ def verify_skip_reason(pr: PullRequest, bot_login: str) -> str | None:
 def _fenced(text: str) -> str:
     """Wrap `text` in a computed fence longer than any backtick run inside
     it, so attacker content cannot close the fence and forge structure.
-    (review._fence returns the fence STRING; this returns the block.)"""
-    fence = _fence(text)
+    (brief.code_fence returns the fence STRING; this returns the block.)"""
+    fence = code_fence(text)
     return f"{fence}\n{text}\n{fence}"
 
 

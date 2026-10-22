@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from outerloop.brief import code_fence
 from outerloop.github import is_own_login
 from outerloop.markers import has_label, label_name, marker
 from outerloop.style import PLAIN_STYLE
@@ -198,13 +199,6 @@ def sanitize(text: str, limit: int) -> str:
     return flat
 
 
-def _fence(text: str) -> str:
-    """A code fence longer than any backtick run in `text`, so attacker
-    content cannot close the fence and forge prompt structure."""
-    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
-    return "`" * max(3, longest + 1)
-
-
 # The tool invocation the caller passes when it knows the workspace; the default
 # (workspace-relative) is for callers/tests that don't. `syscall.tool_command`
 # renders the absolute form — needed because not every backend's cwd is the
@@ -302,7 +296,7 @@ def build_summarizer_brief(opinions: list[dict], *, syscall_cmd: str = DEFAULT_S
     blocks = []
     for op in opinions:
         raw = json.dumps(op.get("data") or {}, indent=2)
-        fence = _fence(raw)
+        fence = code_fence(raw)
         blocks.append(
             # an unlensed opinion is the GENERAL full-rubric session — name it
             f"## Opinion — lens: {op.get('lens') or 'general'}\n{fence}json\n{raw}\n{fence}"
@@ -407,7 +401,7 @@ def build_prompt(pr: PullRequest, today: str | None = None) -> str:
         )
     header = f"Today's date: {today}\n" if today else ""
     header += f"Repository: {pr.repo} — PR #{pr.number} by {pr.author}\n\n"
-    diff_fence = _fence(diff)
+    diff_fence = code_fence(diff)
     return (
         header + MEASUREMENT_PROVENANCE_CAUTION + "\n\n" + f"Pull request: {pr.title}\n\n"
         f"Description:\n{pr.body or '(none)'}\n\n"

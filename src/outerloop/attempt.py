@@ -1834,6 +1834,7 @@ def _wake_author_sleep(
             ws.git("rev-parse", "HEAD").strip(),
             exclude=LINE_MEMORY_PATHS if wake_line else (),
             author=config.bot_login,
+            run_id=run_id,
         )
         snapshots.append(snap)
         return snap.commit
@@ -5104,6 +5105,7 @@ def live_attempt(
                 ws.git("rev-parse", "HEAD").strip(),
                 exclude=LINE_MEMORY_PATHS if lines_active else (),
                 author=config.bot_login,
+                run_id=run_id,
             )
             snapshots.append(snap)
             return snap.commit

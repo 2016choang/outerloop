@@ -145,6 +145,7 @@ def snapshot_tree(
     force: tuple[str, ...] = (),
     author: str = "",
     restore_from_base: tuple[str, ...] = (),
+    run_id: str = "",
 ) -> Snapshot:
     """Snapshot the workspace's current CONTENT as a commit parented on
     `base_sha`, without touching the working index, and retain it under a
@@ -226,7 +227,7 @@ def snapshot_tree(
                 "-p",
                 base_sha,
                 "-m",
-                "dispatch snapshot",
+                f"candidate snapshot: {run_id}" if run_id else "candidate snapshot",
             ],
             60,
         )
