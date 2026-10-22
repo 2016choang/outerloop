@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from outerloop.markers import marker
+from outerloop.markers import has_outerloop_marker, marker
 
 if TYPE_CHECKING:
     from outerloop.github import TokenProvider
@@ -172,6 +172,26 @@ def forge_name() -> str:
     """The selected backend, per `OUTERLOOP_FORGE` (default `github`). This
     helper is the only reader of the setting, so mode checks cannot drift."""
     return os.environ.get(FORGE_ENV, "").strip().lower() or GITHUB
+
+
+def is_kernel_post(item: Mapping[str, Any], bot_login: str) -> bool:
+    """Whether an issue, comment or pull request was written by the kernel.
+
+    `item` is a GitHub-shaped record (`user.login`, `body`); the local forge
+    keeps the same shape. The login must be one of the kernel's, and in
+    personal mode — where the kernel shares the person's login — the body must
+    also carry an `outerloop:` marker. Alias logins are former dedicated
+    identities and keep the login check alone: their posts predate markers."""
+    from outerloop.github import bot_aliases_from_env, is_own_login, personal_identity
+
+    login = str((item.get("user") or {}).get("login") or "")
+    if not is_own_login(login, bot_login):
+        return False
+    if login.strip().casefold() in {a.casefold() for a in bot_aliases_from_env()}:
+        return True
+    if not personal_identity():
+        return True
+    return has_outerloop_marker(str(item.get("body") or ""))
 
 
 def forge_identity(forge: Forge) -> str:

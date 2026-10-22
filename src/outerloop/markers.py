@@ -23,6 +23,21 @@ def has_marker(body: str, kind: str) -> bool:
     return marker(kind) in body
 
 
+def has_outerloop_marker(body: str) -> bool:
+    """Does `body` carry any `outerloop:` HTML-comment marker? Personal mode
+    uses this, not a specific kind, to tell a marked kernel post from the
+    person's unmarked writing under the same login."""
+    return f"<!-- {PREFIX}:" in body
+
+
+def with_kernel_marker(body: str) -> str:
+    """`body` with the generic kernel marker prepended, unless it already
+    carries an `outerloop:` marker (a specific kind wins)."""
+    if has_outerloop_marker(body):
+        return body
+    return f"{marker('kernel')}\n{body}"
+
+
 def label_name(kind: str) -> str:
     """The label we apply and document for `kind`, e.g. `outerloop:review`."""
     return f"{PREFIX}:{kind}"

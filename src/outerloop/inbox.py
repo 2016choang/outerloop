@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from outerloop.brief import MAX_COMMENT_CHARS, cap, code_fence
-from outerloop.forge import Forge
-from outerloop.github import GitHubError, is_own_login
+from outerloop.forge import Forge, is_kernel_post
+from outerloop.github import GitHubError
 from outerloop.harness import redact
 from outerloop.markers import has_marker
 from outerloop.verifier import VERIFY_MARKER
@@ -673,7 +673,7 @@ def qualifying_comments(
         if not isinstance(cid, int) or cid <= since_id:
             continue
         author = str((comment.get("user") or {}).get("login", ""))
-        if is_own_login(author, bot_login):
+        if is_kernel_post(comment, bot_login):
             continue
         body = str(comment.get("body") or "")
         if not body.strip():

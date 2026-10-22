@@ -296,6 +296,29 @@ def test_list_comments_paginates(provider: FileTokenProvider) -> None:
     assert len(client.list_comments("org/repo", 7)) == 101
 
 
+def test_kernel_writes_stamp_the_marker_unless_one_is_present(
+    provider: FileTokenProvider,
+) -> None:
+    from outerloop.markers import marker
+
+    transport = FakeTransport(
+        [{}, {"number": 5}, {"html_url": "https://github.com/org/repo/pull/9"}, {}]
+    )
+    client = GitHubClient(auth=provider, transport=transport)
+    client.comment("org/repo", 1, "hello")
+    client.create_issue("org/repo", "title", "issue body")
+    client.create_pull("org/repo", "title", "head", "main", "pr body")
+    client.comment("org/repo", 1, f"{marker('claimed')}\nclaim")
+    bodies = [json.loads(cast(bytes, request.data))["body"] for request in transport.requests]
+    stamped = f"{marker('kernel')}\n"
+    assert bodies == [
+        f"{stamped}hello",
+        f"{stamped}issue body",
+        f"{stamped}pr body",
+        f"{marker('claimed')}\nclaim",  # a specific kind wins
+    ]
+
+
 def test_file_content_decodes_base64(provider: FileTokenProvider) -> None:
     payload = {
         "type": "file",

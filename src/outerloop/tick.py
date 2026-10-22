@@ -44,7 +44,14 @@ from outerloop.compute import (
 )
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.endpoint_wait import EndpointWaitReason
-from outerloop.forge import LOCAL, Forge, forge_from_env, forge_identity, forge_name
+from outerloop.forge import (
+    LOCAL,
+    Forge,
+    forge_from_env,
+    forge_identity,
+    forge_name,
+    is_kernel_post,
+)
 from outerloop.gpu_lanes import GpuLane, gpu_lanes_from_env
 from outerloop.harness import DEFAULT_MAX_TURNS, ClaudeModelUnset, default_claude_model, redact
 from outerloop.housekeeping import shed_ended_workspaces
@@ -534,14 +541,12 @@ def _find_alarm_issue(github: Any, target: str, bot_login: str) -> int:
     """Only the BOT'S own marker'd issue counts: the marker is a public
     string, and adopting a stranger's issue would let anyone suppress the
     real alarm or get their issue closed by the bot."""
-    from outerloop.github import is_own_login
-
     return next(
         (
             int(issue.get("number", 0))
             for issue in github.list_open_issues(target, max_pages=10)
             if has_marker(str(issue.get("body", "")), "contract-alarm")
-            and is_own_login(str((issue.get("user") or {}).get("login", "")), bot_login)
+            and is_kernel_post(issue, bot_login)
         ),
         0,
     )
@@ -596,24 +601,83 @@ def _base_dial(
         return "manual"
 
 
-def _observe_auto_pr(
-    root: Path, record: RunRecord, github: Any, pr: dict, now: float, bot_login: str
+def _kernel_armed_auto_merge(record: RunRecord, number: int) -> bool | None:
+    """Whether the run's stage records the KERNEL arming auto-merge on this PR
+    and not disarming it since. None means the stage has no record."""
+    if "auto_merge_armed" not in record.stage:
+        return None
+    armed = record.stage.get("auto_merge_armed")
+    if not isinstance(armed, dict):
+        return False
+    try:
+        return int(armed.get("pr") or 0) == number
+    except (TypeError, ValueError):
+        return False
+
+
+def _settle_auto_merge(
+    root: Path,
+    run_id: str,
+    github: Any,
+    number: int,
+    auto: bool,
+    bot_login: str,
+    holder: str,
+    now: float,
 ) -> None:
-    from outerloop.github import is_own_login
+    """Under the lease, with the record and PR re-read: withdraw the kernel's
+    own arm under the auto dial, and clear the stage record once the kernel
+    holds no arm (withdrawn, off, or another PR's), so a later arm on this PR
+    is a human's. A busy lease leaves it all for the next sweep."""
+    from outerloop.github import is_own_login, personal_identity
+
+    if not holder or not acquire_lease(root, run_id, holder, "", now):
+        return
+    try:
+        record = load_record(root, run_id)
+        pr = github.get_pull_request(record.target, number)
+        armed = _kernel_armed_auto_merge(record, number)
+        if armed is None and not personal_identity():
+            # No stage record (armed before the field, or never armed): GitHub's
+            # `enabled_by` still tells a dedicated identity's arm from a human's.
+            # Personal mode shares the login, so there it is never read.
+            armed = is_own_login(
+                str(((pr.get("auto_merge") or {}).get("enabled_by") or {}).get("login") or ""),
+                bot_login,
+            )
+        held = bool(armed and pr.get("auto_merge"))
+        if held and auto:
+            disarmed = github.disable_auto_merge(record.target, number)
+            log.info("auto-merge withdrawal on %s#%s: %s", record.target, number, disarmed)
+            held = not disarmed
+        if record.stage.get("auto_merge_armed") and not held:
+            stage = {**record.stage, "auto_merge_armed": {}}
+            save_record(root, RunRecord(**{**record.__dict__, "stage": stage}), now)
+    finally:
+        release_lease(root, run_id)
+
+
+def _observe_auto_pr(
+    root: Path,
+    record: RunRecord,
+    github: Any,
+    pr: dict,
+    now: float,
+    bot_login: str,
+    holder: str = "",
+) -> None:
     from outerloop.inbox import Message, append, thread_for
 
-    if _base_dial(github, record.target, pr, None) != "auto":
-        return
+    auto = _base_dial(github, record.target, pr, None) == "auto"
     number = int(record.pr_url.rstrip("/").split("/")[-1])
-    if is_own_login(
-        str(((pr.get("auto_merge") or {}).get("enabled_by") or {}).get("login") or ""),
-        bot_login,
-    ):
-        disarmed = github.disable_auto_merge(record.target, number)
-        log.info("auto-merge withdrawal on %s#%s: %s", record.target, number, disarmed)
-    if record.state != PARKED:
+    on = bool(pr.get("auto_merge"))
+    if (auto and on) or (not on and record.stage.get("auto_merge_armed")):
+        _settle_auto_merge(root, record.run_id, github, number, auto, bot_login, holder, now)
+    if not auto:
         return
     head = str((pr.get("head") or {}).get("sha") or "")
+    if record.state != PARKED:
+        return
     if record.auto_blessed_head and head and head != record.auto_blessed_head:
         append(
             run_dir(root, record.run_id),
@@ -758,7 +822,6 @@ def _merge_blessed_pr(
             return False
         reason = why_not(record, pr, dial, tip, contains_base)
         if reason:
-            from outerloop.github import is_own_login
             from outerloop.markers import has_marker, marker
 
             reason = redact(reason, _client_secrets(github))
@@ -773,10 +836,7 @@ def _merge_blessed_pr(
                         str(c.get("body") or "")
                         for c in reversed(comments)
                         if has_marker(str(c.get("body") or ""), "self-merge-status")
-                        and is_own_login(
-                            str((c.get("user") or {}).get("login") or ""),
-                            bot_login or _bot_login_default(),
-                        )
+                        and is_kernel_post(c, bot_login or _bot_login_default())
                     ),
                     "",
                 )
@@ -1197,7 +1257,7 @@ def sweep(
                     pr = github.get_pull_request(
                         record.target, int(record.pr_url.rstrip("/").split("/")[-1])
                     )
-                    _observe_auto_pr(root, record, github, pr, now, bot_login)
+                    _observe_auto_pr(root, record, github, pr, now, bot_login, holder)
                     if record.state == PARKED:
                         gather_github_messages(
                             run_dir(root, record.run_id), record, github, bot_login, now, pr

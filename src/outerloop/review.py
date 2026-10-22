@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from outerloop.brief import code_fence
-from outerloop.github import is_own_login
+from outerloop.forge import is_kernel_post
 from outerloop.markers import has_label, label_name, marker
 from outerloop.style import PLAIN_STYLE
 
@@ -172,7 +172,7 @@ def skip_reason(pr: PullRequest, bot_login: str) -> str | None:
     """Why this PR must not be reviewed, or None if it may be. The reviewer
     never comments on its own PRs (an echo chamber); the opt-out label
     suppresses review on any PR."""
-    if is_own_login(pr.author, bot_login):
+    if is_kernel_post({"user": {"login": pr.author}, "body": pr.body}, bot_login):
         return "bot-authored PR: the reviewer never comments on its own work"
     if has_label(pr.labels, "no-review"):
         return f"opted out via the {OPT_OUT_LABEL} label"

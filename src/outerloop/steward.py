@@ -38,13 +38,12 @@ from outerloop.attempt import (
 )
 from outerloop.contract import Contract, contract_text_in_tree, load_contract
 from outerloop.dispatch import image_file_arg
-from outerloop.forge import Forge, forge_from_env, forge_identity
+from outerloop.forge import Forge, forge_from_env, forge_identity, is_kernel_post
 from outerloop.github import (
     TokenProvider,
     Workspace,
     bot_login_from_env,
     handoff_git_dir,
-    is_own_login,
 )
 from outerloop.harness import (
     ClaudeModelUnset,
@@ -228,8 +227,7 @@ def pick_steward_issue(
             # a release (or an outage release) must be able to neither
             # free a claimed order, nor burn its attempts, nor erase them
             # into an unbounded paid retry loop.
-            author = str((c.get("user") or {}).get("login", ""))
-            if not is_own_login(author, bot_login):
+            if not is_kernel_post(c, bot_login):
                 continue
             body = str(c.get("body", ""))
             if has_marker(body, "claimed"):
@@ -296,8 +294,7 @@ def release_orphaned_claims(
         claimed = False
         claim_time = ""
         for c in github.list_comments(repo, number):
-            author = str((c.get("user") or {}).get("login", ""))
-            if not is_own_login(author, bot_login):
+            if not is_kernel_post(c, bot_login):
                 continue  # same identity gate as pick_steward_issue
             body = str(c.get("body", ""))
             if has_marker(body, "claimed"):
@@ -638,21 +635,27 @@ def live_steward(
                 contract,
                 now,
             )
+        armed: dict[str, object] = {}
         if (
             pr_number.isdigit()
             and bench.verification != "self_report"
             and getattr(contract, "merge", "manual") != "auto"
         ):
-            _best_effort(
-                "auto-merge arming",
-                lambda: github.arm_auto_merge_when_review_required(config.target, int(pr_number)),
-                secrets,
-            )
+
+            def _arm() -> None:
+                if github.arm_auto_merge_when_review_required(config.target, int(pr_number)):
+                    armed.update(pr=int(pr_number))
+
+            _best_effort("auto-merge arming", _arm, secrets)
+        stage = {**record.stage}
+        if armed:
+            stage["auto_merge_armed"] = armed  # who armed, as in attempt.publish
         final = RunRecord(
             **{
                 **record.__dict__,
                 "state": PARKED,
                 "pr_url": pr_url,
+                "stage": stage,
                 "resume_session_id": session.session_id or "",
                 "ending_note": pr_url,
             }

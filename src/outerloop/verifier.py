@@ -23,7 +23,8 @@ import logging
 from typing import Any
 
 from outerloop.brief import code_fence
-from outerloop.github import GitHubClient, is_own_login
+from outerloop.forge import is_kernel_post
+from outerloop.github import GitHubClient
 from outerloop.markers import has_label, marker
 from outerloop.review import (
     CONFIDENCES,
@@ -79,7 +80,7 @@ def _standing(comment: dict, bot_login: str) -> bool:
     login = str((comment.get("user") or {}).get("login", ""))
     if str(comment.get("author_association", "")) in QUALIFYING_ASSOCIATIONS:
         return True
-    if is_own_login(login, bot_login):
+    if is_kernel_post(comment, bot_login):
         return True
     return login.casefold() == ACTIONS_BOT_LOGIN.casefold() and body.lstrip().startswith(
         VERIFY_MARKER
@@ -228,7 +229,7 @@ def verify_skip_reason(pr: PullRequest, bot_login: str) -> str | None:
     """
     if not bot_login:
         return "bot login unknown: cannot identify bot-authored PRs (fail closed)"
-    if not is_own_login(pr.author, bot_login):
+    if not is_kernel_post({"user": {"login": pr.author}, "body": pr.body}, bot_login):
         return "human-authored PR: integrity verification covers bot PRs only"
     if has_label(pr.labels, "no-review"):
         return f"opted out via the {OPT_OUT_LABEL} label"
