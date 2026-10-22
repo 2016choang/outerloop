@@ -22,7 +22,7 @@ data, not accounts: every commit is authored by the one bot account with an
 | **Author session** ("climber") | model | live | One hypothesis per run: reads the brief, edits inside the contract's scope, requests experiment batches (any size the budget covers), self-validates, writes the research report | touch the ruler (frozen evals/tests), the contract, progress files; see the PAT; publish anything itself; submit jobs directly |
 | **Follow-up responder** | model | live | The *same* author or steward session resumed when a qualifying human comments on its open PR: replies with evidence, pushes fixes (re-validated/re-measured by the orchestrator, under the resuming role's own key and scope); the verifier's rounds ride along as fenced context | anything the resumed role couldn't; resurrect an ended run; treat context comments as instructions |
 | **Advisory reviewer** | model | live | Adversarial *correctness* review of human/dev PRs; findings-only, sanitized, never an approval | review bot PRs automatically (echo-chamber guard); block CI; approve |
-| **Verifier** | model | built; deploy pending | Adversarial *integrity* review of bot PRs: hunts gaming (harness exploits, ruler-fishing, leakage, unsupported claims) with contract + eval code + numbers + report in context; "silence is not endorsement" header | approve; block; review human PRs |
+| **Verifier** | model | live (the panel's `verify` lens) | Adversarial *integrity* review of bot PRs: hunts gaming (harness exploits, ruler-fishing, leakage, unsupported claims) with contract + eval code + numbers + report in context; "silence is not endorsement" header | approve; block; review human PRs |
 | **Planner** | model | designed (scaling.md pt 1) | Owns a target's search *program*: reads leader/lessons/reports, emits vetoable plan issues motivated twice (hypothesis + economics) | enact plans (humans/veto-window do); write `vision:` |
 | **Steward** | model | built; deploy pending | Keeps benchmarks discriminating and GROWS them (maintainer direction 2026-08-09): restores headroom, hardens metrics, adds literature-grounded evaluations, and — maturing toward a research scientist — invents new benchmarks, implementing env/eval/tests and PROPOSING the contract entry for the human to enact | share identity/credentials/budget with any solver; be scored on solver metrics; write the contract's benchmark list |
 | **Watchdog** | code | designed | Off-cluster heartbeat monitor: alerts when the tick chain goes quiet | act on the cluster |
@@ -80,7 +80,7 @@ their issue. Killed jobs (no signal on some clusters) are ended by the
 sweep from Slurm truth, with the self-deadline providing rich endings ahead
 of walltime.
 
-## Experiments and hibernation (GPU targets; mechanisms live, glue pending)
+## Experiments and hibernation (GPU targets; live)
 
 On GPU-bearing targets the diagram grows a detour between the session and
 the candidate measurement — the runs-span-sessions model:
@@ -135,11 +135,10 @@ sbatch — budget enforcement is unavoidable), a session blocked on a
 48-hour job would burn money doing nothing, and every request ever made
 is an auditable artifact in the run dir.
 
-Status: the mechanisms are live-verified (parked state, afterany wake on
-any termination, deadlines, resume across nodes, wake prompts) but the
-launch glue — the request-artifact format and validation, GPU-hour
-accounting, the real wake dispatcher — is pending; it gates the first GPU
-target alongside the verifier.
+Status: live. The mechanisms (parked state, afterany wake on any
+termination, deadlines, resume across nodes, wake prompts) and the launch
+glue (request validation, GPU-hour accounting, the wake dispatcher
+`JobWakeDispatcher` in tick.py) run on GPU targets.
 
 ## The planning and stewardship loop (designed; scaling.md, meta.md)
 
@@ -190,7 +189,7 @@ their own capped budget line.
 ```mermaid
 flowchart LR
     HPR["PR by human / dev assistant"] --> AR["advisory reviewer<br/>(correctness lens)"]
-    BPR["PR by the bot"] --> VF["verifier<br/>(gaming lens) - deploy pending"]
+    BPR["PR by the bot"] --> VF["verifier<br/>(gaming lens)"]
     AR --> HM{human merges}
     VF --> HM
     L["outerloop:review label<br/>= one fresh round on the head"] --> AR
