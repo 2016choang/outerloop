@@ -133,7 +133,13 @@ class Forge(Protocol):
     def disable_auto_merge(self, repo: str, number: int) -> bool: ...
     def allowed_merge_methods(self, repo: str) -> list[str]: ...
     def merge_pull(
-        self, repo: str, number: int, method: str = "merge", expected_head: str = ""
+        self,
+        repo: str,
+        number: int,
+        method: str = "merge",
+        expected_head: str = "",
+        *,
+        author: tuple[str, str] | None = None,
     ) -> bool: ...
     def close_issue(self, repo: str, number: int) -> None: ...
 

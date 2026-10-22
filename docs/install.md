@@ -130,7 +130,9 @@ outerloop init --forge local --compute local --target owner/repo \
 `--forge-source` takes a repository path or URL and seeds the bare repository
 from it; without it the repository starts empty. init writes
 `OUTERLOOP_FORGE=local` and no PAT or App, and re-running it leaves an
-existing forge repository alone.
+existing forge repository alone. For a private repository, use a local path or a
+bare clone made with `git clone --bare` on a machine with access and copied over
+(for example, `/path/to/repo.git`).
 
 The suggested contract setting is `merge: auto`: the kernel merges a head
 only after its own measurement and the judge panel's approval, and people
