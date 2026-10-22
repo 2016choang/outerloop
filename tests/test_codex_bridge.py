@@ -196,6 +196,62 @@ def request(history, tools):
 """
 
 
+def test_locked_bridge_wraps_custom_tool_input_as_json_arguments(bridge_python):
+    """Freeform input reaches the chat provider as a JSON-object arguments string.
+
+    Strict providers reject a ``tool_calls[].function.arguments`` that is not a
+    JSON object. The locked Responses -> Chat translation must declare a custom
+    tool as a function and replay its raw text wrapped in an object, so this
+    runs against the pinned runtime without a model or a socket.
+    """
+    source = """
+import json
+from litellm.responses.litellm_completion_transformation.transformation import (
+    LiteLLMCompletionResponsesConfig,
+)
+
+patch = "*** Begin Patch\\n*** Add File: a.txt\\n+x\\n*** End Patch\\n"
+tools = [
+    {"type": "custom", "name": "apply_patch", "description": "Apply patch",
+     "format": {"type": "text"}},
+    {"type": "function", "name": "shell",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}},
+]
+history = [
+    {"role": "user", "content": "edit"},
+    {"type": "custom_tool_call", "call_id": "call-a", "name": "apply_patch", "input": patch},
+    {"type": "custom_tool_call_output", "call_id": "call-a", "output": "ok"},
+    {"type": "function_call", "call_id": "call-b", "name": "shell", "arguments": "{}"},
+    {"type": "function_call_output", "call_id": "call-b", "output": "ok"},
+]
+chat = LiteLLMCompletionResponsesConfig.transform_responses_api_request_to_chat_completion_request(
+    model="test-model", input=history, responses_api_request={"tools": tools},
+)
+declared = {tool["function"]["name"]: tool["function"] for tool in chat["tools"]}
+parameters = declared["apply_patch"]["parameters"]
+assert parameters["type"] == "object", parameters
+assert parameters["required"] == ["content"], parameters
+assert parameters["properties"]["content"]["type"] == "string", parameters
+calls = {
+    call["id"]: call
+    for message in chat["messages"]
+    for call in message.get("tool_calls", [])
+}
+arguments = calls["call-a"]["function"]["arguments"]
+assert isinstance(arguments, str), arguments
+assert json.loads(arguments) == {"content": patch}, arguments
+assert json.loads(calls["call-b"]["function"]["arguments"]) == {}, calls["call-b"]
+"""
+    result = subprocess.run(
+        [bridge_python, "-c", source],
+        env={**os.environ, "LITELLM_LOCAL_MODEL_COST_MAP": "True", "LITELLM_LOG": "ERROR"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_real_proxy_parallel_custom_reasoning_replay(bridge_python, tmp_path):
     patch = "*** Begin Patch\n*** Add File: sample.txt\n+héllo\\world\n*** End Patch\n"
     with upstream() as (url, requests, streams):

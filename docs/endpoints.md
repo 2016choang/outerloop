@@ -74,6 +74,15 @@ bridge supports text, reasoning, function tools and freeform tools such as
 `apply_patch`. It rejects hosted tools, images, WebSockets, server-side
 response references and remote compaction.
 
+The bridge is selected when the profile includes `chat` but not
+`responses`. A profile that includes `responses` therefore depends on the
+gateway's own Responses translation, which may replay a freeform tool's raw
+text as `function.arguments` and be rejected by a strict chat provider after
+the first file edit. A profile without `responses` goes through the kernel's
+pinned bridge, the controlled path: it declares a freeform tool as a function
+taking one `content` string and replays a non-empty call as
+`{"content": "..."}`, a JSON object.
+
 ## Selecting a profile for each role
 
 Each role selects its own profile and credential.
