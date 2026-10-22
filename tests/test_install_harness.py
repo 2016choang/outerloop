@@ -33,7 +33,11 @@ def test_init_install(tmp_path, monkeypatch, capsys, backend, mode):
     monkeypatch.setattr(init, "locate_harness", lambda _: str(target) if mode == "present" else "")
     calls = []
 
-    def run(argv, *, check):
+    def run(argv, *, check, **kwargs):
+        if argv == [str(target), "--version"]:
+            from outerloop.harness_pins import effective
+
+            return subprocess.CompletedProcess(argv, 0, effective(backend)["version"], "")
         calls.append(argv)
         assert check
         assert argv == ["bash", str(ROOT / f"scripts/install_{backend}.sh"), str(target)]
@@ -189,7 +193,11 @@ def test_init_installs_hermes_judges(tmp_path, monkeypatch, setting, mode):
         provision()
     calls = []
 
-    def run(argv, *, check):
+    def run(argv, *, check, **kwargs):
+        if argv == ["/bin/claude", "--version"]:
+            from outerloop.harness_pins import effective
+
+            return subprocess.CompletedProcess(argv, 0, effective("claude")["version"], "")
         calls.append(argv)
         assert argv == ["bash", str(ROOT / "scripts/install_hermes.sh"), str(repo)]
         if mode == "failure":

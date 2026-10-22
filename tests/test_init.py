@@ -1400,3 +1400,37 @@ def test_init_selects_separate_settings_and_credentials(tmp_path, monkeypatch):
     assert pat == selected.parent / "bot_pat"
     selected.chmod(0o622)
     assert init.main(["--yes", "--force"]) == 2
+
+
+def test_init_warns_on_harness_older_than_pin(tmp_path, monkeypatch, capsys):
+    from outerloop.harness_pins import effective
+
+    pinned = effective("claude")["version"]
+    reported = ["claude 0.0.1\n"]
+    monkeypatch.setattr(
+        init.subprocess,
+        "run",
+        lambda argv, **kw: init.subprocess.CompletedProcess(argv, 0, reported[0], ""),
+    )
+    init._check_harness_version("claude", str(tmp_path / "claude"))
+    output = capsys.readouterr().out
+    assert "0.0.1" in output and pinned in output
+    assert "outerloop harness upgrade claude" in output
+    reported[0] = f"{pinned} (Claude Code)\n"
+    init._check_harness_version("claude", str(tmp_path / "claude"))
+    assert capsys.readouterr().out == ""
+
+
+def test_panel_hint_requires_no_image_and_nonempty_panel(capsys):
+    answers = InitAnswers(compute="local", target="o/r", uncontained=True)
+    init._panel_hint(answers)
+    output = capsys.readouterr().out
+    assert "OUTERLOOP_PANEL_UNCONTAINED=1" in output
+    assert "OUTERLOOP_PANEL_KEY_FILE" in output
+    assert "verifier_key" in output
+    answers.preserved_env["OUTERLOOP_PANEL"] = ""
+    init._panel_hint(answers)
+    answers.preserved_env["OUTERLOOP_PANEL"] = "verify,review"
+    answers.image = "/path/to/agent.sif"
+    init._panel_hint(answers)
+    assert capsys.readouterr().out == ""
