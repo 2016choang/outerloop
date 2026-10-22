@@ -1421,7 +1421,8 @@ def test_init_warns_on_harness_older_than_pin(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_panel_hint_requires_no_image_and_nonempty_panel(capsys):
+def test_panel_hint_requires_no_image_and_nonempty_panel(capsys, monkeypatch):
+    monkeypatch.setenv("OUTERLOOP_PANEL_UNCONTAINED", "1")  # shell-only: not written
     answers = InitAnswers(compute="local", target="o/r", uncontained=True)
     init._panel_hint(answers)
     output = capsys.readouterr().out
@@ -1431,6 +1432,20 @@ def test_panel_hint_requires_no_image_and_nonempty_panel(capsys):
     answers.preserved_env["OUTERLOOP_PANEL"] = ""
     init._panel_hint(answers)
     answers.preserved_env["OUTERLOOP_PANEL"] = "verify,review"
+    answers.preserved_env["OUTERLOOP_PANEL_UNCONTAINED"] = "1"
+    init._panel_hint(answers)
     answers.image = "/path/to/agent.sif"
     init._panel_hint(answers)
     assert capsys.readouterr().out == ""
+
+
+def test_init_keeps_panel_opt_in_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init, "locate_harness", lambda _: "")
+    monkeypatch.setenv("OUTERLOOP_PANEL_UNCONTAINED", "1")
+    monkeypatch.setenv("OUTERLOOP_PANEL_KEY_FILE", str(tmp_path / "panel_key"))
+    argv = ["--yes", "--compute", "local", "--target", "o/r", "--no-image"]
+    assert init.main([*argv, "--no-install-harness"]) == 0
+    written = (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_PANEL_UNCONTAINED=1" in written
+    assert f"OUTERLOOP_PANEL_KEY_FILE={tmp_path / 'panel_key'}" in written

@@ -206,19 +206,20 @@ def _check_harness_version(backend: str, binary: str) -> None:
         return
     from outerloop.harness_pins import effective
 
-    pinned = effective(name)["version"]
     try:
+        pinned = effective(name)["version"]
         result = subprocess.run(
             [binary, "--version"], capture_output=True, text=True, timeout=5, check=False
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return
-    version = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout)
-    if result.returncode or not version:
-        return
-    found = version.group(1)
-    pinned_core = pinned.split("-")[0].split("+")[0]
-    if tuple(map(int, found.split("."))) >= tuple(map(int, pinned_core.split("."))):
+        version = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout)
+        if result.returncode or not version:
+            return
+        found = version.group(1)
+        pinned_core = pinned.split("-")[0].split("+")[0]
+        if tuple(map(int, found.split("."))) >= tuple(map(int, pinned_core.split("."))):
+            return
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # an invalid pin override is reported by the configuration checks later
         return
     print(
         f"  WARNING: {name} {found} at {binary} is older than the pinned {pinned}; "
@@ -231,7 +232,8 @@ def _panel_hint(answers: InitAnswers) -> None:
     """Without an image the pre-PR panel is off unless opted in, and then needs a key."""
     from outerloop.cli import DEFAULT_PANEL
 
-    settings = {**answers.preserved_env, **os.environ}
+    # what init writes, not the shell: a shell-only opt-in is gone at the next start
+    settings = answers.preserved_env
     panel = settings.get("OUTERLOOP_PANEL", DEFAULT_PANEL)
     if answers.image or not panel.strip() or settings.get("OUTERLOOP_PANEL_UNCONTAINED") == "1":
         return
@@ -1073,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = env_file_values(env_path, keys=None)
         judge_keys = (
             "OUTERLOOP_PANEL",
+            "OUTERLOOP_PANEL_UNCONTAINED",
+            "OUTERLOOP_PANEL_KEY_FILE",
             "OUTERLOOP_AUTHOR_OVERRIDES",
             "REVIEW_BACKEND",
             "REVIEW_MODEL",
