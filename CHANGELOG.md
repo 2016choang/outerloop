@@ -10,6 +10,8 @@ Versions follow [SemVer](https://semver.org).
 - Add the local forge backend's transport, refs and files over bare repositories (clone, branch and file reads and compare-and-swap writes); `OUTERLOOP_FORGE=local` is not selectable until pull requests, threads and issues exist.
 - Add the local forge backend's records on `refs/outerloop/records`: pull requests, comment threads and the kernel's issues, with merge-commit transactions and recovery of merges made outside the kernel; user-visible inbox and self-merge text takes the forge's name.
 - The local forge is selectable: `OUTERLOOP_FORGE=local` builds it from the state root, entry points need no GitHub credential or bot login, `outerloop init --forge local` bootstraps the bare repository, and `outerloop pr` lists, shows, comments on, merges and closes its pull requests.
+- `limits.toml` accepts a per-target `slots` list (`[targets."owner/repo"]`, `slots = ["agent-04"]`): self-initiated runs take the first free listed agent identity, in order, instead of the lowest free `agent-01..agent-<width>`, so an operator can keep a slot's research line and author binding. Slots never add capacity (the attempt width still caps concurrency), running runs in unlisted slots are untouched, and `outerloop limits` shows the list. Without `slots`, behaviour is unchanged.
+- Upgrading: existing `limits.toml` files need no change. Remove any `slots` key before rolling back to an older kernel, which treats it as unknown and fails the file closed.
 
 ## [0.4.0] - 2026-10-20
 

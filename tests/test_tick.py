@@ -2766,6 +2766,88 @@ roadmap: docs/roadmap.md
     assert "agent-02" in dict(list_pendings(tmp_path, "org/pilot"))
 
 
+def _slots_contract(width: int) -> Any:
+    from outerloop.contract import load_contract
+
+    return load_contract(
+        f"""
+benchmarks:
+  - {{name: tsp, command: c, metric: m, direction: min}}
+budgets:
+  gpu_hours_per_run: 1
+  runs_per_week: 500
+  attempt_cooldown_minutes: 0
+  max_active_attempts: {width}
+scope: {{allowed: [src/]}}
+roadmap: docs/roadmap.md
+""",
+        "org/pilot",
+    )
+
+
+def _slots_spec(tmp_path: Path) -> Any:
+    from outerloop.tick import ServiceSpec
+
+    return ServiceSpec(
+        target="org/pilot",
+        account="acct",
+        partition="part",
+        run_root=tmp_path,
+        image="img.sif",
+        home=tmp_path,
+        bot_login="bot",
+        panel_key_file=str(_panel_key(tmp_path)),
+    )
+
+
+def test_operator_slots_choose_listed_agents(tmp_path: Path) -> None:
+    """limits.toml slots pin self-initiated runs to the listed identities,
+    in listed order, even above the contract's width; the width still caps
+    concurrency, so slots never add capacity."""
+    from outerloop.tick import service_self_initiated
+
+    contract, spec = _slots_contract(2), _slots_spec(tmp_path)
+    (tmp_path / "limits.toml").write_text(
+        '[targets."org/pilot"]\nslots = ["agent-04", "agent-07", "agent-09"]\n'
+    )
+    submitted: list[str] = []
+    job_ids = iter(["101", "102", "103"])
+
+    def runner(argv, timeout_s):
+        if argv[0] == "sbatch":
+            submitted.append(" ".join(argv))
+            return CommandResult(0, next(job_ids) + "\n", "")
+        return CommandResult(0, "RUNNING\n", "")  # both holders alive
+
+    compute = SlurmCompute(runner=runner)
+    assert service_self_initiated(tmp_path, compute, spec, contract, NOW) == ("tsp", "101")
+    assert "--agent-id agent-04" in submitted[0]
+    assert service_self_initiated(tmp_path, compute, spec, contract, NOW + 60) == ("tsp", "102")
+    assert "--agent-id agent-07" in submitted[1]
+    # width 2 is full: agent-09 is listed and free, but slots add no capacity
+    assert service_self_initiated(tmp_path, compute, spec, contract, NOW + 120) is None
+    assert len(submitted) == 2
+
+
+def test_operator_slots_absent_keeps_lowest_free(tmp_path: Path) -> None:
+    """A limits file without slots leaves the agent-01..width choice alone."""
+    from outerloop.tick import service_self_initiated
+
+    contract, spec = _slots_contract(2), _slots_spec(tmp_path)
+    (tmp_path / "limits.toml").write_text("[defaults]\nmax_active_attempts = 2\n")
+    submitted: list[str] = []
+
+    def runner(argv, timeout_s):
+        if argv[0] == "sbatch":
+            submitted.append(" ".join(argv))
+            return CommandResult(0, "101\n", "")
+        return CommandResult(0, "RUNNING\n", "")
+
+    compute = SlurmCompute(runner=runner)
+    assert service_self_initiated(tmp_path, compute, spec, contract, NOW) == ("tsp", "101")
+    assert "--agent-id agent-01" in submitted[0]
+
+
 def test_list_pendings_is_delimited_by_target(tmp_path: Path) -> None:
     """org/pilot's marker scan must not absorb org/pilotx's markers ("/"
     encodes as "__" so a bare glob is prefix-ambiguous), nor any suffixed
