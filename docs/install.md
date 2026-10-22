@@ -107,7 +107,7 @@ For an organization that already runs a machine user, or one where you cannot cr
 
 - Resource owner: your organization, not the bot's personal account.
 - Repository access: only the repos you opt in.
-- Permissions: contents, pull requests, issues, read and write. No workflow permission.
+- Permissions: contents, pull requests, issues, read and write. No workflow permission. Fine-grained tokens get no checks permission, so runs see no CI results.
 - Expiration: 90 days, with a rotation reminder.
 
 Add the bot as a direct collaborator with **Write** on every target repo, not to a team, which grants more than it needs and inherits future grants. Without that grant the tick cannot even read the contract and idles silently on that target. A pasted token is stored at `~/.config/outerloop/bot_pat` (0600), and `--pat-file` records a path you give. When the check against the target succeeds, init records the token's login as `OUTERLOOP_BOT_LOGIN`, and the tick does not service a target without it.
@@ -121,7 +121,7 @@ The kernel then posts as you. Every comment, issue and pull request it writes ca
 What you give up:
 
 - **GitHub no longer enforces "the bot never merges and is never a code owner".** The kernel acts with your rights, usually admin and code owner. Its code still never approves and never merges under the manual dial, but nothing on GitHub's side stops it. GitHub never counts an author's approval, so a required review now needs a second person. An admin token can merge past branch protection unless **Do not allow bypassing the above settings** is on; with `merge: auto`, turn it on if your required checks must bind the kernel.
-- **Reach.** The `gh` token has the `repo`, `read:org` and usually `workflow` scopes: it can write every repository you can, `.github/` included. The kernel keeps agents out of forbidden paths in code, so the reach matters when the token leaks. For a narrower one, make a fine-grained token on the target repository only (contents, pull requests and issues read and write; actions and metadata read) and pass it with `--pat-file`. A fine-grained token has no checks permission, and whether it reads CI results is not yet confirmed; without them a run goes on with a logged warning.
+- **Reach.** The `gh` token has the `repo`, `read:org` and usually `workflow` scopes: it can write every repository you can, `.github/` included. The kernel keeps agents out of forbidden paths in code, so the reach matters when the token leaks. For a narrower one, make a fine-grained token on the target repository only (contents, pull requests and issues read and write; actions and metadata read) and pass it with `--pat-file`. A fine-grained token cannot read check runs (GitHub offers no checks permission for it), so runs get no CI results and go on with a logged warning; the `gh` token reads them.
 - **Notifications.** GitHub does not notify you about your own activity, so the kernel's pull requests and replies send you nothing. Watch `outerloop status` and the pull request list.
 - **Attribution and limits.** Commits are authored as you and count on your contribution graph; the agent id stays in the commit trailer and pull request titles keep their `[agent]` and `[steward]` prefixes. The kernel shares your 5,000 requests an hour with your other tools.
 - **Revocation.** Revoking the token stops the kernel. An organization may block OAuth tokens or require SSO authorization for them.
