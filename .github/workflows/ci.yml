@@ -24,7 +24,7 @@ jobs:
         with:
           # Full history: gitleaks scans it (this repo handles credentials).
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
       - run: uv sync --locked
@@ -32,7 +32,11 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
+      # The locked bridge runtime, so the Codex bridge proxy tests run instead of skipping.
+      - run: bash scripts/install_bridge.sh "$RUNNER_TEMP/bridge"
       - run: uv run pytest
+        env:
+          OUTERLOOP_BRIDGE_TEST_PYTHON: ${{ runner.temp }}/bridge/venv/bin/python
       - run: uv run pytest -n0 -m serial  # the process-table tests, alone
       # Pinned CLI binary instead of gitleaks/gitleaks-action: the action
       # requires a paid GITLEAKS_LICENSE for org repos; the CLI is free (MIT).
