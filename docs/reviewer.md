@@ -31,7 +31,9 @@ You need an API key for the reviewer's model, and about five minutes.
 1. Pick the bot identity. `bot_login` names the account whose PRs are never
    reviewed, so the reviewer never comments on its own work. If you have no
    bot yet, any placeholder login works. If you run the climber with a GitHub
-   App, use the App's login.
+   App, use the App's login. If it runs in personal mode, use your own login
+   and add `personal: true`, so only your PRs that carry the kernel's marker
+   are skipped.
 
 2. Add this file to the repository as `.github/workflows/review.yml`:
 
