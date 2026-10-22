@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from outerloop.author_overrides import is_agent_id
 from outerloop.compute import Compute, JobSpec
 from outerloop.job_names import run_key
 
@@ -34,9 +35,14 @@ class OperatorLimits:
     defaults: dict[str, int] = field(default_factory=dict)
     targets: dict[str, dict[str, int]] = field(default_factory=dict)
     error: str = ""
+    # Per target only: a target's research lines live in its own slots.
+    slots: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def value(self, target: str, key: str) -> int | None:
         return minimum(self.defaults.get(key), self.targets.get(target, {}).get(key))
+
+    def slot_list(self, target: str) -> tuple[str, ...]:
+        return self.slots.get(target, ())
 
 
 def read_limits(root: Path) -> OperatorLimits:
@@ -52,15 +58,20 @@ def read_limits(root: Path) -> OperatorLimits:
         data = tomllib.loads(raw.decode())
         if set(data) - {"defaults", "targets"}:
             raise ValueError("expected only defaults and targets tables")
-        defaults = _scope(data.get("defaults", {}))
+        raw_defaults = data.get("defaults", {})
+        if isinstance(raw_defaults, dict) and "slots" in raw_defaults:
+            raise ValueError("slots is per target, not a default")
+        defaults = _scope(raw_defaults)
         targets = data.get("targets", {})
         if not isinstance(targets, dict):
             raise ValueError("targets must be a table")
+        slots: dict[str, tuple[str, ...]] = {}
+        scoped: dict[str, dict[str, int]] = {}
         for target, values in targets.items():
             if not re.fullmatch(r"[^/\s]+/[^/\s]+", target):
                 raise ValueError("target keys must be owner/repo")
-            _scope(values)
-        return OperatorLimits(defaults, targets)
+            scoped[target], slots[target] = _target_scope(values)
+        return OperatorLimits(defaults, scoped, slots=slots)
     except (ValueError, UnicodeError) as exc:
         return _invalid(str(exc))
 
@@ -71,6 +82,20 @@ def _scope(values: Any) -> dict[str, int]:
     if any(type(v) is not int or v < 0 for v in values.values()):
         raise ValueError("limits must be nonnegative integers")
     return values
+
+
+def _target_scope(values: Any) -> tuple[dict[str, int], tuple[str, ...]]:
+    if not isinstance(values, dict) or set(values) - (KEYS | {"slots"}):
+        raise ValueError("target scope accepts only max_gpus, max_active_attempts and slots")
+    slots = values.get("slots", [])
+    if "slots" in values and (
+        not isinstance(slots, list)
+        or not slots
+        or any(not is_agent_id(s) for s in slots)
+        or len(set(slots)) != len(slots)
+    ):
+        raise ValueError("slots must be a list of distinct agent identities (agent-01, ...)")
+    return _scope({k: v for k, v in values.items() if k in KEYS}), tuple(slots)
 
 
 def _invalid(detail: str) -> OperatorLimits:
@@ -215,9 +240,11 @@ def report(root: Path, compute: Compute) -> str:
         lines.append(f"fleet running/pending GPUs={sum(totals.values())}")
     lines.append(f"defaults: {limits.defaults}")
     for target in sorted(set(limits.targets) | set(totals)):
+        slots = limits.slot_list(target)
         lines.append(
             f"{target}: max_gpus={limits.value(target, 'max_gpus')} "
             f"max_active_attempts={limits.value(target, 'max_active_attempts')} "
+            f"{f'slots={json.dumps(list(slots))} ' if slots else ''}"
             f"running/pending GPUs={totals.get(target, 0) if available else 'unknown'}"
         )
     return "\n".join(lines)

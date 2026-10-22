@@ -55,6 +55,7 @@ from outerloop.limits import EffectiveLimits, bound_limits, capped_limits, effec
 from outerloop.markers import has_marker, marker
 from outerloop.operator_limits import (
     attempt_width,
+    minimum,
     read_limits,
     submit,
 )
@@ -2494,7 +2495,11 @@ def _attempt_width(contract: Any) -> int:
     return int(width) if width else MAX_ACTIVE_RUNS_PER_TARGET
 
 
-def _free_agent_slot(occupied: set[str], width: int) -> str | None:
+def _free_agent_slot(occupied: set[str], width: int, slots: Sequence[str] = ()) -> str | None:
+    # Operator-chosen slots keep their listed order; the width still caps
+    # how many of them may run at once, so slots never add capacity.
+    if slots:
+        return next((s for s in slots if s not in occupied), None)
     for i in range(1, width + 1):
         agent = f"agent-{i:02d}"
         if agent not in occupied:
@@ -2930,7 +2935,14 @@ def service_self_initiated(
     try:
         if records is None:
             records = list_runs(root)
-        width = attempt_width(root, spec.target, _attempt_width(contract))
+        # one read, so width and slots come from the same file (an invalid one
+        # sets every width to zero)
+        operator = read_limits(root)
+        operator_slots = operator.slot_list(spec.target)
+        width = minimum(
+            _attempt_width(contract), operator.value(spec.target, "max_active_attempts")
+        )
+        assert width is not None
         # WIDTH: every live pending marker occupies a slot; landed ones
         # clear; dead ones become per-benchmark tombstones and free theirs.
         occupied: set[str] = set()
@@ -2981,10 +2993,10 @@ def service_self_initiated(
             return None
         if len(occupied) >= width:
             return None
-        slot_agent = _free_agent_slot(occupied, width)
+        slot_agent = _free_agent_slot(occupied, width, operator_slots)
         while slot_agent is not None and _claim_author_error(spec, slot_agent, author_errors):
             occupied.add(slot_agent)
-            slot_agent = _free_agent_slot(occupied, width)
+            slot_agent = _free_agent_slot(occupied, width, operator_slots)
         if slot_agent is None:
             return None
         dead_attempts = read_tombstones(root, spec.target, contract, now)
