@@ -590,10 +590,15 @@ def test_cli_version_reads_only_claude_install_layouts(tmp_path):
     node.chmod(0o755)
     assert cli_version(str(node)) is None
     managed = tmp_path / "harnesses/claude/2.1.285/install-x/claude"
-    managed.parent.mkdir(parents=True)
-    managed.write_text("")
-    managed.chmod(0o755)
+    brew = tmp_path / "Cellar/claude-code/2.1.280/bin/claude"
+    for binary in (managed, brew):
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
     assert cli_version(str(managed)) == "2.1.285"
+    assert cli_version(str(brew)) == "2.1.280"
+    # a relative path resolves from the session's workspace, not from here
+    assert cli_version("harnesses/claude/2.1.285/install-x/claude") is None
 
 
 def test_legacy_index_without_version_is_summed(tmp_path):

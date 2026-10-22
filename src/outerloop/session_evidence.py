@@ -64,9 +64,12 @@ def cli_version(binary: str) -> str | None:
     """The version of the CLI binary that ran the session, read from its resolved
     path: the native installer links into `versions/<x.y.z>` and the kernel's
     managed installs live under `harnesses/<name>/<x.y.z>/`. Not the pin, since an
-    operator can point the kernel at any binary. Anything else stays unknown."""
+    operator can point the kernel at any binary. Anything else stays unknown,
+    including a relative path, which the session resolves from its own workspace."""
+    if not binary or (os.sep in binary and not os.path.isabs(binary)):
+        return None
     try:
-        found = shutil.which(binary) if binary else None
+        found = shutil.which(binary)
         path = os.path.realpath(found) if found else ""
     except OSError:
         return None
