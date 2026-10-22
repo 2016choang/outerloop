@@ -1,6 +1,6 @@
 # Personal-token mode
 
-Status: proposed. Roadmap item "Personal-token mode". It builds the
+Status: accepted 2026-10-22, decisions below. Roadmap item "Personal-token mode". It builds the
 identity seam that [forge.md](forge.md) (#488) named and left for this
 follow-up.
 
@@ -126,7 +126,7 @@ can push `.github/`. The kernel's forbidden paths and the
 no-credential-in-session rule are enforced in code, so the breadth matters
 when the token leaks.
 
-## Decisions for Mengye
+## Decisions
 
 1. **The hard rule "the bot never merges and is never a code owner".** In
    personal mode the kernel acts with the person's rights, usually admin
@@ -138,40 +138,40 @@ when the token leaks.
    by permission. The identity could merge, and an admin token may bypass
    branch protection unless "Do not allow bypassing the above settings" is
    on. A required review now needs a second person.
-   *Recommendation*: restate the rule for personal mode as "the kernel's
+   *Decided*: restate the rule for personal mode as "the kernel's
    code never approves, and never merges under the manual dial", say
    plainly in the docs that GitHub no longer enforces it, and keep the
    lab's deployments and this repository on the App, where the rule stays
-   true as written. *Alternative*: treat the rule as requiring a dedicated
+   true as written. *Rejected*: treat the rule as requiring a dedicated
    identity and do not ship personal mode.
 
-2. **Scope of the marker rule.** *Recommendation*: personal mode only.
+2. **Scope of the marker rule.** *Decided*: personal mode only.
    With a dedicated login the login is already unforgeable, and kernel PRs
    opened before this change have no body marker, so marker-gating App PRs
    would make the reviewer start reviewing them and the verifier skip
-   them. *Alternative*: one rule in every mode. Simpler to state, with a
+   them. *Rejected*: one rule in every mode. Simpler to state, with a
    legacy tolerance for open App PRs that the mode avoids.
 
-3. **Default token.** *Recommendation*: `gh auth token` by default,
+3. **Default token.** *Decided*: `gh auth token` by default,
    because removing setup steps is the point; `init` prints its scopes and
    how to swap in a fine-grained token on the target repository.
-   *Alternative*: require a fine-grained token. Safer, and it brings back a
+   *Rejected*: require a fine-grained token. Safer, and it brings back a
    web form with five permissions to tick.
 
 4. **The auto dial in personal mode.** Under `merge: auto` the kernel
    merges blessed heads through `merge_pull`. With an admin token that
-   merge may pass required checks that would stop the App. *Recommendation*:
+   merge may pass required checks that would stop the App. *Decided*:
    allow it, keep the kernel's own bless and stale-base checks, and tell
    adopters to turn on the no-bypass setting if required checks must bind
-   the kernel. *Alternative*: refuse the auto dial in personal mode.
+   the kernel. *Rejected*: refuse the auto dial in personal mode.
 
 5. **Switching modes on a live deployment.** App or bot to personal works
    with today's mechanism: the old login goes into `OUTERLOOP_BOT_ALIASES`
    and its unmarked posts stay recognized. Personal to App does not. The
    person's login cannot become an alias without hiding their comments, so
    claims posted as the person stop counting and intake could claim those
-   issues again. *Recommendation*: document that switch as "release or
-   close claimed issues first" and build nothing for it. *Alternative*: a
+   issues again. *Decided*: document that switch as "release or
+   close claimed issues first" and build nothing for it. *Rejected*: a
    marker-gated alias list.
 
 ## What stays the same
