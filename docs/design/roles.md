@@ -193,7 +193,7 @@ flowchart LR
     AR --> HM{human merges}
     VF --> HM
     L["outerloop:review label<br/>= one fresh round on the head"] --> AR
-    L -->|"on bot PRs (once deployed)"| VF
+    L -->|"on bot PRs"| VF
 ```
 
 Rounds iterate only on BLOCKING findings — a confirmed correctness,
