@@ -53,6 +53,7 @@ jobs:
     with:
       reviewer_ref: v0             # keep on the same ref as the line above
       bot_login: my-bot            # PRs by this login are never reviewed
+      # personal: true             # personal mode: skip only this login's marked PRs
       model: claude-sonnet-5-5     # required: the claude backend has no default
     secrets:
       anthropic_reviewer_key: ${{ secrets.ANTHROPIC_REVIEWER_KEY }}
