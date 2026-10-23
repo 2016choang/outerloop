@@ -842,29 +842,28 @@ def gather_github_messages(
             runs = github.list_check_runs(record.target, head)
             _APP_PERMISSION_WARNINGS.pop(record.target, None)
         except GitHubError as exc:
-            if record.target not in _APP_PERMISSION_WARNINGS:
-                from outerloop.appauth import AppInstallationTokenProvider
-                from outerloop.init import app_permission_gaps
+            from outerloop.appauth import AppInstallationTokenProvider
 
-                auth = github.credential()
-                guidance = "CI results stay out of the inbox"
-                if exc.status == 403:
-                    guidance = (
-                        "the token cannot read check runs (fine-grained tokens have no "
-                        "checks permission); CI results stay out of the inbox"
-                    )
-                if isinstance(auth, AppInstallationTokenProvider):
+            auth = github.credential()
+            if isinstance(auth, AppInstallationTokenProvider):
+                # the permission lookup is a network call: once per target
+                if record.target not in _APP_PERMISSION_WARNINGS:
+                    from outerloop.init import app_permission_gaps
+
                     guidance = "App needs checks: read permission"
                     gaps = app_permission_gaps(auth, record.target)
                     if gaps.edit_url and gaps.accept_url:
                         guidance = gaps.problem
-                _APP_PERMISSION_WARNINGS[record.target] = guidance
-            log.warning(
-                "cannot read checks for %s; %s: %s",
-                record.target,
-                _APP_PERMISSION_WARNINGS[record.target],
-                exc,
-            )
+                    _APP_PERMISSION_WARNINGS[record.target] = guidance
+                guidance = _APP_PERMISSION_WARNINGS[record.target]
+            elif exc.status == 403:
+                guidance = (
+                    "the token cannot read check runs (fine-grained tokens have no "
+                    "checks permission); CI results stay out of the inbox"
+                )
+            else:
+                guidance = "CI results stay out of the inbox"
+            log.warning("cannot read checks for %s; %s: %s", record.target, guidance, exc)
             runs = []
         for check in runs:
             if check.get("status") != "completed" or check.get("head_sha", head) != head:
