@@ -214,8 +214,8 @@ and Codex and Hermes authors need one in every mode.
 
 ### `OUTERLOOP_UNCONTAINED`
 
-`1` runs a Slurm deployment without a container: sessions under the
-harness's own sandbox, evaluations bare, as jobs on your account. The image
+`1` runs a Slurm deployment without a container: sessions with a scrubbed
+environment and a per-run home, evaluations bare, as jobs on your account. The image
 is ignored. A session can then read any file the account can, keys
 included. See [running a cluster without a container](../install.md#running-a-cluster-without-a-container).
 

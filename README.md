@@ -29,7 +29,22 @@ where it co-develops our research codebases.
 
 ## Get started
 
-Three commands and one file. You need a repo with a benchmark command, an
+To see a run first, the [quickstart](https://github.com/outerloop-science/quickstart)
+runs two CPU benchmarks on your own machine, with no GitHub account and no
+cluster. You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), Git
+2.38 or later and an Anthropic API key:
+
+```bash
+pip install outerloop-science
+outerloop init --forge local --compute local --no-image --target me/quickstart \
+  --forge-source https://github.com/outerloop-science/quickstart
+outerloop start
+```
+
+Without a container the author's session runs as your user and can read any file
+your account can, so give it a spend-capped key.
+
+For your own repository: three commands and one file. You need a repo with a benchmark command, an
 API key for the model that will write the code, and a Slurm cluster or one
 machine with a GPU.
 
