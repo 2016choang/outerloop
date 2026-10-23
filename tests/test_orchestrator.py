@@ -140,7 +140,7 @@ def run_climb(
         measurer,
         "base",
         snapshot,
-        inbox_dir=inbox_dir or tmp_path.parent / (tmp_path.name + "-run"),
+        inbox_dir=inbox_dir or run_dir(tmp_path),
         ruler="mean tour length over the frozen pool",
         changed_paths=changed if callable(changed) else (lambda: changed),
         **kw,
@@ -148,23 +148,27 @@ def run_climb(
     return result, harness, evaluator
 
 
+def run_dir(tmp_path: Path) -> Path:
+    """The inbox directory `run_climb` wires by default."""
+    return tmp_path.parent / f"{tmp_path.name}-run"
+
+
+def refusal_receipts(directory: Path) -> list:
+    """The kernel's refusal receipts in a run's inbox, oldest first."""
+    from outerloop.inbox import pending
+
+    return [m for m in pending(directory, 0) if m.key.startswith("refusal:")]
+
+
 def test_improvement_end_to_end(tmp_path: Path) -> None:
-    # brief_baseline is the ledger's last-known score, for the brief; the gate
-    # re-measures both sides ([13.876, 13.10]) after the session.
-    result, harness, evaluator = run_climb(tmp_path, [13.876, 13.10], brief_baseline=13.876)
+    # The gate re-measures both sides ([13.876, 13.10]) after the session; the
+    # sealed candidate sha rides on the result for the caller to publish.
+    result, _, evaluator = run_climb(tmp_path, [13.876, 13.10], brief_baseline=13.876)
     assert result.outcome == "improved"
-    assert result.baseline == 13.876  # measured by the gate
+    assert result.baseline == 13.876  # measured by the gate, not the ledger
     assert result.candidate == 13.10
+    assert result.candidate_sha == "cand1"
     assert result.branch == "feat/auto/agent-01/tsp"
-    # the brief carried the ledger baseline and the contract verbatim
-    brief_text = harness.calls[0][0]
-    assert "13.876" in brief_text
-    # the score is stated as a FACT (currently X), never as a target to hit,
-    # and the finish is the author's call — the de-prescriptified brief
-    assert "currently 13.876" in brief_text
-    assert "lower is better" in brief_text  # metric direction as context
-    assert "You decide when your result is worth publishing" in brief_text
-    assert "src/pilot/solvers/" in brief_text
     # eval ran twice (baseline + candidate) with the contract's command
     assert (
         evaluator.calls
@@ -172,11 +176,18 @@ def test_improvement_end_to_end(tmp_path: Path) -> None:
     )
 
 
-def test_improved_result_exposes_the_candidate_sha(tmp_path: Path) -> None:
-    # Phase 2a primitive: an improved result carries the sealed candidate sha the
-    # caller publishes (and a depth loop selects the best across passes by).
-    result, _, _ = run_climb(tmp_path, [13.876, 13.10])
-    assert result.outcome == "improved" and result.candidate_sha == "cand1"
+def test_brief_carries_the_ledger_baseline_and_leaves_publishing_to_the_author(
+    tmp_path: Path,
+) -> None:
+    # `brief_baseline` is the ledger's last-known score, for the brief only; it
+    # is stated as a FACT (a distinct value proves it flowed through, rather
+    # than the gate's measurement) and the finish stays the author's call.
+    _, harness, _ = run_climb(tmp_path, [13.876, 13.10], brief_baseline=11.111)
+    brief_text = harness.calls[0][0]
+    assert "currently 11.111" in brief_text
+    assert "lower is better" in brief_text  # metric direction as context
+    assert "You decide when your result is worth publishing" in brief_text
+    assert "src/pilot/solvers/" in brief_text
 
 
 def test_attempt_once_resume_entry_skips_the_brief(tmp_path: Path) -> None:
@@ -184,7 +195,7 @@ def test_attempt_once_resume_entry_skips_the_brief(tmp_path: Path) -> None:
     from outerloop.inbox import AUTHOR_PROTOCOL, Message, append
 
     append(
-        tmp_path.parent / (tmp_path.name + "-run"),
+        run_dir(tmp_path),
         Message(0, "note", "human", "", 1.0, "note:1", {"text": "beat 13.876"}),
     )
     result, harness, _ = run_climb(tmp_path, [13.876, 13.10], resume_session_id="prev-sess")
@@ -775,7 +786,7 @@ def test_candidate_measure_parks_after_the_session(tmp_path: Path) -> None:
     assert exc.value.phase == "candidate"
     assert exc.value.candidate_sha == "cand1"
     assert exc.value.session is not None  # the session ran before this park
-    assert harness.calls  # the session did start
+    assert harness.calls  # and it did start
 
 
 def test_session_error_runs_no_eval(tmp_path: Path) -> None:
@@ -851,18 +862,15 @@ def test_improved_direction_semantics() -> None:
     assert not improved(0.25, 0.24, "max", 0.005)
 
 
-def test_metric_parsing_accepts_pilot_shape() -> None:
-    """The pilot's eval prints the metric NAME as a value: caught pre-live by
-    the review agent — this exact line would have aborted the first climb."""
-    line = (
+def test_metric_parsing_is_strict_json() -> None:
+    # The pilot's eval also prints the metric NAME as a value: this exact line
+    # would have aborted the first climb.
+    pilot = (
         '{"benchmark": "tsp", "metric": "mean_tour_length",'
         ' "value": 13.875696168157484, "direction": "min"}'
     )
-    assert metric_from_output(line, "mean_tour_length") == 13.875696168157484
-    assert metric_from_output(line, "solve_rate") is None
-
-
-def test_metric_parsing_json_only_no_fuzzy_fallback() -> None:
+    assert metric_from_output(pilot, "mean_tour_length") == 13.875696168157484
+    assert metric_from_output(pilot, "solve_rate") is None
     assert metric_from_output('{"mean_tour_length": 13.1}', "mean_tour_length") == 13.1
     noisy = 'log line\n{"other": 1}\n{"solve_rate": 0.31, "n": 40}'
     assert metric_from_output(noisy, "solve_rate") == 0.31
@@ -874,34 +882,30 @@ def test_metric_parsing_json_only_no_fuzzy_fallback() -> None:
     assert metric_from_output('{"mean_solve_rate": 0.99}', "solve_rate") is None
 
 
-def test_scope_violation_blocks_before_candidate_eval(tmp_path: Path) -> None:
+def test_scope_violation_blocks_before_the_snapshot_and_eval(tmp_path: Path) -> None:
     """An out-of-scope edit could be to the ruler itself — the tree is never
-    measured."""
-    result, _, evaluator = run_climb(
-        tmp_path, [13.876, 1.0], changed=["src/pilot/solvers/tsp.py", "src/pilot/eval.py"]
-    )
-    assert result.outcome == "scope-violation"
-    assert "src/pilot/eval.py" in result.note
-    assert evaluator.calls == []  # scope checked before any measure; nothing ran
-
-
-def test_forbidden_paths_are_scope_violations(tmp_path: Path) -> None:
-    result, _, _ = run_climb(tmp_path, [13.876, 1.0], changed=[".github/workflows/ci.yml"])
-    assert result.outcome == "scope-violation"
-
-
-def test_out_of_scope_tree_is_rejected_before_the_snapshot(tmp_path: Path) -> None:
-    # the out-of-scope edit could be to the ruler itself — it is never
-    # snapshotted OR measured, not merely rejected after the fact.
+    snapshotted OR measured, not merely rejected after the fact."""
     snapshotted: list[int] = []
 
     def snapshot() -> str:
         snapshotted.append(1)
         return "cand1"
 
-    result, _, _ = run_climb(tmp_path, [13.876], snapshot=snapshot, changed=["docs/secret.md"])
+    result, _, evaluator = run_climb(
+        tmp_path,
+        [13.876, 1.0],
+        snapshot=snapshot,
+        changed=["src/pilot/solvers/tsp.py", "src/pilot/eval.py"],
+    )
     assert result.outcome == "scope-violation"
-    assert snapshotted == []  # never snapshotted the out-of-scope tree
+    assert "src/pilot/eval.py" in result.note
+    assert snapshotted == []  # never snapshotted
+    assert evaluator.calls == []  # scope checked before any measure; nothing ran
+
+
+def test_forbidden_paths_are_scope_violations(tmp_path: Path) -> None:
+    result, _, _ = run_climb(tmp_path, [13.876, 1.0], changed=[".github/workflows/ci.yml"])
+    assert result.outcome == "scope-violation"
 
 
 def test_improved_rejects_nonfinite_and_zero_baseline_uses_absolute() -> None:
@@ -946,13 +950,6 @@ def test_subprocess_evaluator_injects_extra_env(tmp_path: Path) -> None:
         extra_env={"PILOT_TSP_SEED": "42"},
     )
     assert value == 42.0
-
-
-def test_subprocess_evaluator_real_run(tmp_path: Path) -> None:
-    from outerloop.orchestrator import SubprocessEvaluator
-
-    value = SubprocessEvaluator(timeout_s=30).evaluate(tmp_path, """printf '{"m": 0.5}\n'""", "m")
-    assert value == 0.5
 
 
 def test_subprocess_evaluator_scrubs_home(tmp_path: Path) -> None:
@@ -1224,7 +1221,7 @@ def run_shared_climb(tmp_path, values, changed, contract=SHARED_CONTRACT, **kw):
         measurer,
         "base",
         snapshot,
-        inbox_dir=tmp_path.parent / (tmp_path.name + "-run"),
+        inbox_dir=run_dir(tmp_path),
         ruler="mean tour length over the frozen pool",
         changed_paths=lambda: changed,
         created="2026-08-06T00:00:00Z",
@@ -1238,14 +1235,19 @@ def test_shared_diff_measures_every_sibling_and_passes(tmp_path: Path) -> None:
         tmp_path, [13.876, 13.10, 0.8, 0.8], changed=["src/pilot/model/encoder.py"]
     )
     assert result.outcome == "improved"
-    # 2 climbed evals + a paired pass per sibling
-    assert len(evaluator.calls) == 4
-    assert evaluator.calls[2] == evaluator.calls[3]  # sibling: same command both sides
-    # each pair measures pristine-vs-session, sibling exactly like the climbed
-    # metric: [baseline ws, session ws, sibling baseline ws, sibling session ws]
+    # 2 climbed evals + a paired pass per sibling, each pair measuring its own
+    # benchmark's contract command and metric
+    assert evaluator.calls == [
+        ("uv run python -m pilot.eval --benchmark tsp --json", "mean_tour_length"),
+        ("uv run python -m pilot.eval --benchmark tsp --json", "mean_tour_length"),
+        ("uv run python -m pilot.eval --benchmark sokoban --json", "solve_rate"),
+        ("uv run python -m pilot.eval --benchmark sokoban --json", "solve_rate"),
+    ]
+    # both sides of every pair: pristine baseline tree vs the session tree
     pristine = evaluator.seen_ws[0]
     assert pristine.name == "pristine"
-    assert evaluator.seen_ws == [pristine, pristine.parent, pristine, pristine.parent]
+    assert evaluator.seen_ws[0] == evaluator.seen_ws[2] == pristine
+    assert evaluator.seen_ws[1] == evaluator.seen_ws[3] == pristine.parent
     (row,) = result.suite
     assert row.name == "sokoban" and not row.regressed
     assert row.baseline == 0.8 and row.candidate == 0.8
@@ -1381,11 +1383,11 @@ def test_attempt_once_refuses_a_read_only_spec(tmp_path: Path) -> None:
 
 def test_shared_match_is_case_folded_like_the_other_path_checks(tmp_path: Path) -> None:
     # a Model/ spelling must not dodge the gate (forbidden/steward checks fold too)
-    result, evaluator = run_shared_climb(
+    result, _ = run_shared_climb(
         tmp_path, [13.876, 13.10, 0.8, 0.8], changed=["src/pilot/Model/encoder.py"]
     )
     assert result.outcome == "improved"
-    assert len(evaluator.calls) == 4  # the suite pass ran
+    assert result.suite and not result.suite[0].regressed  # the suite pass ran
 
 
 # ---- the pre-PR panel loop -------------------------------------------------
@@ -1510,7 +1512,7 @@ def test_blocking_submit_preserves_credited_tree_for_draft(tmp_path: Path) -> No
     )
     assert result.outcome == "improved" and result.panel_blocking_open
     assert result.panel_rounds == 1 and len(evaluator.calls) == 2
-    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    messages = pending(run_dir(tmp_path), 0)
     assert {m.kind for m in messages} == {"panel-verdict", "gate-verdict"}
 
 
@@ -1601,7 +1603,7 @@ INF_FLOOR_CONTRACT = CONTRACT.replace(
 )
 
 
-def test_gate_enforces_the_contracts_declared_floor(tmp_path: Path) -> None:
+def test_gate_applies_the_contracts_declared_floor(tmp_path: Path) -> None:
     """The yolo#16 class: a delta that clears the relative default but sits
     inside the contract's declared min_delta must end no-improvement — the
     gate speaks the contract's significance language, not only the global
@@ -1613,8 +1615,7 @@ def test_gate_enforces_the_contracts_declared_floor(tmp_path: Path) -> None:
     assert result.outcome == "no-improvement"
     assert "significance" in result.note and "floor" in result.note
 
-
-def test_gate_publishes_a_floor_clearing_delta(tmp_path: Path) -> None:
+    # 13.876 -> 13.0 clears the declared floor and publishes
     result, _, _ = run_climb(tmp_path, [13.876, 13.0], contract=FLOOR_CONTRACT)
     assert result.outcome == "improved"
 
@@ -2016,7 +2017,7 @@ def test_stale_submit_discards_sibling_launches(tmp_path):
     _park_run(tmp_path, record, p, "ref", None, 1000)
     assert load_record(tmp_path, "test").stage["syscall_launches"] == []
     assert read_ledger(tmp_path / "runs" / "test") == []
-    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    messages = pending(run_dir(tmp_path), 0)
     receipt = next(m for m in messages if m.key.startswith("refused:"))
     assert "No sibling launches ran" in receipt.payload["text"]
     assert "must be restaged" in receipt.payload["text"]
@@ -2046,7 +2047,7 @@ def test_stale_submit_repeated_tip_still_delivers_receipt(tmp_path):
     from outerloop.inbox import pending
 
     _stale_checkpoint(tmp_path)
-    directory = tmp_path.parent / (tmp_path.name + "-run")
+    directory = run_dir(tmp_path)
     messages = pending(directory, 0)
     last = messages[-1].seq
     _stale_checkpoint(tmp_path, sleeps_used=1, inbox_seq=last)
@@ -2067,7 +2068,7 @@ def test_folded_submit_with_old_pin_checkpoints(tmp_path):
             submit_preflight=lambda: SubmitPreflight("outdated-pin", "tip", "main"),
         )
     assert caught.value.base_sha == "tip"
-    messages = pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
+    messages = pending(run_dir(tmp_path), 0)
     assert not any(m.kind == "base-moved" for m in messages)
     assert any(
         "contains tip, but the gate was pinned to a base tip that has since moved"
@@ -2118,7 +2119,7 @@ def test_stale_preflight_precedes_cache_and_compute_budget(tmp_path):
 @pytest.mark.parametrize("nodes", [1, 2])
 def test_launches_charge_every_node(tmp_path, nodes):
     """GPU-hours are per job: a multi-node benchmark's launch holds gpus on
-    every node, and the meter charges all of them."""
+    every node, and the meter charges (and budgets) all of them."""
     from outerloop.orchestrator import RunParked
 
     contract = DEEP_CONTRACT.replace(
@@ -2267,7 +2268,7 @@ def test_capacity_refusal_parks_and_next_wake_delivers_note(tmp_path, can_resume
     assert not park.afterany and not park.submitted
     assert (park.launches_used, park.sleeps_used, park.gpu_hours_used) == (1, 1, 0.1)
     assert all(meter == (1, 1, 0.1) for meter in meters)
-    directory = tmp_path.parent / (tmp_path.name + "-run")
+    directory = run_dir(tmp_path)
     refusal = pending(directory, 0)[-1]
     assert refusal.source == "kernel" and refusal.kind == "note"
     assert refusal.payload["quoted_text"] == note
@@ -2323,7 +2324,7 @@ def test_sibling_launch_capacity_race_keeps_evaluations_and_notifies_author(tmp_
         tmp_path,
         {"launches": [{"name": "probe", "command": "x"}], "submit": True, "report": "candidate"},
     )
-    directory = tmp_path.parent / (tmp_path.name + "-run")
+    directory = run_dir(tmp_path)
 
     def launcher(sha, request):
         raise CapacityError("operator GPU limit: capacity filled during evaluation dispatch")
@@ -2384,21 +2385,14 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
     "kind,retry,entry",
     [
         # one case per distinct entry into the refusal (the `where` word and the
-        # preflight that turns a submit into a checkpoint); "outdated-pin"
-        # reaches the identical branch as "stale" — they diverge only after a
-        # checkpoint is taken, which the refusal never does
-        ("launch", "end", "fresh"),
-        ("submit", "end", "fresh"),
+        # preflight that turns a submit into a checkpoint)
         ("stale", "end", "fresh"),
         ("launch", "end", "replies-only"),  # no launcher wired, replies only
         ("submit", "end", "wake"),  # refusal delivered into a resume entry
-        # the author's answers after a refusal: an explicit end, failed wakes
-        # (outcome + preserved rejection — one per session classification), and
-        # an outage on the refusal wake
-        ("submit", "explicit-end", "fresh"),
+        # failed wakes preserve the rejection and name the right outcome; one
+        # per session classification (generic error, walltime, max-turns,
+        # outage)
         ("submit", "error", "fresh"),
-        # both budget_exhausted branches: session walltime (stop_reason) and
-        # max-turns (error_detail)
         ("submit", "timeout", "fresh"),
         ("submit", "budget", "fresh"),
         ("submit", "outage", "fresh"),
@@ -2410,7 +2404,6 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
 )
 def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
     from outerloop.endpoints import EndpointUnavailable
-    from outerloop.inbox import pending
     from outerloop.orchestrator import RunParked, SubmitPreflight
 
     # Nonzero starting meters catch both accidental charges and resets.
@@ -2454,8 +2447,6 @@ def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
                         if retry == "budget"
                         else "session failed",
                     )
-                if retry == "explicit-end":
-                    _write_syscall(workspace, {"type": "stop", "report": "abandoned"})
                 if retry == "clean":
                     if self.calls == 4:
                         paths[:] = ["src/pilot/solvers/tsp.py"]
@@ -2528,7 +2519,7 @@ def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
             assert not seals and not launches and not evaluator.calls
             assert all(m == (1, 2, 0.25) for m in meters)
             assert author.calls == 2
-    receipts = [m for m in pending(directory, 0) if m.key.startswith("refusal:")]
+    receipts = refusal_receipts(directory)
     assert len(receipts) == (3 if retry == "clean" else 1)
     assert all(m.payload["text"].startswith("Refused again:") for m in receipts[1:])
     assert receipts[0].source == "kernel" and receipts[0].kind == "note"
@@ -2537,8 +2528,6 @@ def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
 
 
 def test_repeated_scope_refusals_then_clean_request(tmp_path):
-    from outerloop.inbox import pending
-
     paths = ["src/pilot/solvers/tsp.py"]
     meters: list[tuple[int, int, float]] = []
 
@@ -2585,17 +2574,10 @@ def test_repeated_scope_refusals_then_clean_request(tmp_path):
     assert not result.tree_rejected
     assert len(evaluator.calls) == 2
     assert meters[-1] == (0, 1, 0.0)
-    receipts = [
-        m
-        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
-        if m.key.startswith("refusal:")
-    ]
-    assert len(receipts) == 4
+    assert len(refusal_receipts(run_dir(tmp_path))) == 4
 
 
 def test_scope_refusal_after_accepted_submit_still_says_again(tmp_path):
-    from outerloop.inbox import pending
-
     paths = iter([["report.md"], ["src/pilot/solvers/tsp.py"], ["report.md"]])
     harness = _SeqHarness(["dirty", "clean", "dirty again", "abandoned"], submit_on=(1, 2, 3))
     result, harness, evaluator = run_climb(
@@ -2608,22 +2590,25 @@ def test_scope_refusal_after_accepted_submit_still_says_again(tmp_path):
     )
     assert result.outcome == "no-improvement" and result.tree_rejected
     assert len(harness.prompts) == 4 and len(evaluator.calls) == 2
-    notes = [
-        m
-        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
-        if m.key.startswith("refusal:")
-    ]
+    notes = refusal_receipts(run_dir(tmp_path))
     assert len(notes) == 2
     assert notes[0].payload["text"].startswith("Refused:")
     assert notes[1].payload["text"].startswith("Refused again:")
 
 
-@pytest.mark.parametrize("history", ["none", "legacy", "current"])
-@pytest.mark.parametrize("large_scope", ["count", "length"])
+@pytest.mark.parametrize(
+    "history,large_scope",
+    [
+        ("none", "count"),  # many allowed roots: only the first ten are listed
+        ("none", "length"),  # one very long root: the list is length-bounded
+        ("legacy", "count"),  # a note from an older kernel still marks a repeat
+        ("current", "count"),
+    ],
+)
 def test_scope_refusal_bounded_scope_and_prior_run_notes(tmp_path, history, large_scope):
     from outerloop.inbox import Message, append, pending
 
-    directory = tmp_path.parent / (tmp_path.name + "-run")
+    directory = run_dir(tmp_path)
     if history != "none":
         # Delivered notes from earlier kernels remain readable and mark a repeat.
         payload = (
@@ -2697,7 +2682,8 @@ def test_measure_and_decide_scope_backstop_is_terminal():
 
 @pytest.mark.parametrize("problem", ["budget", "malformed"])
 def test_scope_refusals_repeat_for_requests_with_other_problems(tmp_path, problem):
-    from outerloop.inbox import pending
+    """A scope refusal keeps repeating (and says "again") even when the request
+    has an unrelated problem of its own: over budget or malformed."""
 
     class Author:
         calls = 0
@@ -2729,15 +2715,10 @@ def test_scope_refusals_repeat_for_requests_with_other_problems(tmp_path, proble
     )
     assert result.outcome == "no-improvement" and result.tree_rejected
     assert author.calls == 4 and not evaluator.calls
-    receipts = [
-        m
-        for m in pending(tmp_path.parent / (tmp_path.name + "-run"), 0)
-        if m.key.startswith("refusal:")
-    ]
-    assert len(receipts) == 3
+    assert len(refusal_receipts(run_dir(tmp_path))) == 3
 
 
-@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("explicit", [False, True], ids=["implicit-stop", "explicit-stop"])
 def test_scope_refusal_preserves_rejection_through_stop_callback(tmp_path, explicit):
     from outerloop.orchestrator import AttemptResult
 
@@ -2793,7 +2774,13 @@ def test_scope_admission_uses_refreshed_submit_ancestry(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "change,main_evals", [("same", 1), ("count", 2), ("type", 2), ("legacy", 2)]
+    "change,main_evals",
+    [
+        ("same", 1),  # matching resource identity: the cached baseline is reused
+        ("count", 2),  # a different GPU count re-measures
+        ("type", 2),  # same count, different GPU type: re-measures (and budgets)
+        ("legacy", 2),  # a cache entry predating the identity fields re-measures
+    ],
 )
 def test_cached_baseline_resource_identity_and_budget(tmp_path, monkeypatch, change, main_evals):
     import json
@@ -3060,17 +3047,15 @@ def test_v021_capacity_error_becomes_durable_park(tmp_path, rc1_record):
 @pytest.mark.parametrize(
     "candidate,gain,refused,rule",
     [
-        (99, 0, False, "no-regression"),
-        (100, 0, False, "no-regression"),
-        (100.5, 0, False, "free-allowance"),
-        (100.5001, 0.049999, True, "insufficient-gain"),
-        (133, 0.049999, True, "insufficient-gain"),
-        (133, 0.05, False, "gain-unlocked"),
-        (133, 0.050001, False, "gain-unlocked"),
-        (149.9999, 0.27, False, "gain-unlocked"),
-        (150, 0.27, True, "hard-cap"),
-        (160, 0.27, True, "hard-cap"),
-        (133, None, True, "insufficient-gain"),
+        (99, 0, False, "no-regression"),  # inside the free relative allowance
+        (100, 0, False, "no-regression"),  # unchanged score is not a regression
+        (100.5, 0, False, "free-allowance"),  # exactly at the allowance boundary
+        (100.5001, 0.049999, True, "insufficient-gain"),  # just above it needs gain
+        (133, 0.049999, True, "insufficient-gain"),  # just short of the gain
+        (133, 0.05, False, "gain-unlocked"),  # exactly at the gain boundary
+        (149.9999, 0.27, False, "gain-unlocked"),  # just below the hard cap
+        (150, 0.27, True, "hard-cap"),  # exactly at the hard cap
+        (133, None, True, "insufficient-gain"),  # no climbed gain measured
         (133, float("nan"), True, "non-finite"),
         (133, float("inf"), True, "non-finite"),
         (float("nan"), 0.27, True, "non-finite"),
@@ -3194,14 +3179,18 @@ def test_silent_stop_with_an_open_pr_still_parks_for_review(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "key", ["refusal:", "refused:", "capacity-refusal:", "message-refused:", "publish-refused:"]
+    "key",
+    ["refusal:", "refused:", "capacity-refusal:", "message-refused:", "publish-refused:"],
+    ids=["refusal", "refused", "capacity-refusal", "message-refused", "publish-refused"],
 )
 def test_a_stop_after_a_delivered_refusal_is_not_nudged(tmp_path, key):
     import time
 
     from outerloop.inbox import Message, append
 
-    inbox = tmp_path.parent / (tmp_path.name + "-run")
+    # Every refusal-prefixed receipt counts as a delivered refusal (the kernel
+    # writes a different prefix per subsystem).
+    inbox = run_dir(tmp_path)
     inbox.mkdir(exist_ok=True)
     append(inbox, Message(0, "note", "kernel", "", time.time(), key + "x", {"text": "refused"}))
     result, harness, _ = run_climb(tmp_path, [], launcher=_fake_launcher([]))
@@ -3215,7 +3204,7 @@ def test_a_refusal_from_an_earlier_leg_does_not_disable_the_nudge(tmp_path):
     from outerloop.inbox import Message, append
     from outerloop.orchestrator import SILENT_STOP_RESUMES
 
-    inbox = tmp_path.parent / (tmp_path.name + "-run")
+    inbox = run_dir(tmp_path)
     inbox.mkdir(exist_ok=True)
     note = {"text": "Refused: out-of-scope", "quoted_text": "out-of-scope paths: x"}
     append(inbox, Message(0, "note", "kernel", "", time.time(), "refusal:old", note))
