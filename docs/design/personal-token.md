@@ -121,10 +121,11 @@ lines.
 
 The App's permissions map to a fine-grained token on the target repository
 only: Contents read and write, Pull requests read and write, Issues read and
-write, Actions read (job log tails), Checks read (CI results), Metadata
-read. Whether a fine-grained token can read check runs is unconfirmed. If check runs cannot be
-read, the inbox already logs a warning and the run goes on without CI
-results (`inbox.py:844`). Members read is unneeded, since the person's own
+write, Actions read (job log tails), Metadata read. There is no Checks
+permission for fine-grained tokens: on a scratch repository the
+check-runs endpoint answered 403 and asked for `checks=read`. The inbox
+then logs a warning and the run goes on without CI results
+(`inbox.py:844`). Members read is unneeded, since the person's own
 token sees their own organization membership.
 
 The `gh` token is an OAuth token with the `repo`, `read:org` and usually
@@ -242,14 +243,24 @@ Each step is one PR with its tests.
    the person opens an issue, comments on the kernel's PR and sees the
    author answer. The branch-protection bypass is checked there too.
 
+The live check ran on a private scratch repository with a local
+deployment in personal mode. The kernel's PR carried the kernel marker
+under the person's login. The person's unmarked comment on it woke the
+author, whose marked reply answered that comment and woke nothing. The
+person's issue was claimed, and after three runs that ended without a
+submit, intake stopped at its attempt cap, so claim comments posted as the
+person were counted as the kernel's. The bypass could not be checked:
+branch protection on a private repository needs a paid plan.
+
 ## Open questions
 
 - Should the local forge adopt the same rule? `outerloop pr comment`
   refuses when the operator's user name equals the kernel login
   (`cli.py:1093`); with the marker rule that refusal could go.
-- Can a fine-grained token read check runs, and does an admin token's
-  REST merge bypass required checks and reviews? Both need a scratch-repo
-  test.
+- Does an admin token's REST merge bypass required checks and reviews?
+  Branch protection needs a paid plan on a private repository, so the
+  scratch test could not cover it; the docs state GitHub's documented
+  behavior. (A fine-grained token cannot read check runs: answered.)
 - Should `init` warn when a plain PAT's login matches the person running
   `gh`, to catch today's silent misconfiguration on the bot-account path?
 - Does the maintenance digest's own login check

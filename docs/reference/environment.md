@@ -42,6 +42,7 @@ over the inherited environment even when it is empty.
 | [`OUTERLOOP_GITHUB_APP_FILE`](#outerloop_github_app_file) | the GitHub App config file init writes | unset |
 | [`OUTERLOOP_BOT_LOGIN`](#outerloop_bot_login) | the login the kernel acts as | unset |
 | [`OUTERLOOP_BOT_ALIASES`](#outerloop_bot_aliases) | former logins of the same bot | unset |
+| [`OUTERLOOP_IDENTITY`](#outerloop_identity) | `personal` when the kernel posts as you | unset |
 | [`OUTERLOOP_AUTHOR_BACKEND`](#outerloop_author_backend) | the author's harness | `claude` |
 | [`OUTERLOOP_AUTHOR_MODEL`](#outerloop_author_model) | the author's model | unset |
 | [`OUTERLOOP_CLAUDE_MODEL`](#outerloop_claude_model) | model for every Claude role | unset |
@@ -274,6 +275,16 @@ the settings file, or rerun `outerloop init --force` with network access.
 Former logins of the same bot, comma-separated. After an identity flip,
 recognition of the kernel's own comments stays keyed on login, so the set
 of its logins must widen by hand.
+
+- Default: unset
+
+### `OUTERLOOP_IDENTITY`
+
+`personal` when `OUTERLOOP_BOT_LOGIN` is your own login, written by
+`outerloop init --personal`. A post with that login then counts as the
+kernel's only when its body carries an `outerloop:` marker; alias logins
+still count on login alone. Any other value, or unset, keeps the login
+check. See [personal mode](../install.md#your-own-token-personal-mode).
 
 - Default: unset
 

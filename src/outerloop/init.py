@@ -257,7 +257,7 @@ def _personal_tradeoffs() -> None:
         "  notifications for its own activity, so check `outerloop status`.\n"
         "  The `gh` token reaches every repository you can write. To narrow it, put a\n"
         "  fine-grained token on the target in the PAT file: Contents, Pull requests\n"
-        "  and Issues read/write; Actions, Checks and Metadata read.\n"
+        "  and Issues read/write; Actions and Metadata read.\n"
         '  With an admin token, turn on "Do not allow bypassing the above settings"\n'
         "  if required checks must bind the kernel. In the reviewer workflow set\n"
         "  `personal: true` (examples/review.yml)."

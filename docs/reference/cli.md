@@ -69,7 +69,7 @@ files. See [the install guide](../install.md) for the whole procedure.
 outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
               [--forge {github,local}] [--forge-source FORGE_SOURCE]
               [--account ACCOUNT] [--partition PARTITION] [--pat-file PAT_FILE]
-              [--github-app] [--app-name APP_NAME] [--org ORG]
+              [--github-app] [--personal] [--app-name APP_NAME] [--org ORG]
               [--author-backend AUTHOR_BACKEND] [--no-install-harness]
               [--author-model AUTHOR_MODEL] [--claude-model CLAUDE_MODEL]
               [--image IMAGE | --no-image] [--author-key-file AUTHOR_KEY_FILE]
@@ -87,6 +87,7 @@ outerloop init [--compute {slurm,local}] [--target TARGET] [--root ROOT]
 | `--partition` | blank | Slurm partition; blank is Slurm's default, `a,b` a list |
 | `--pat-file` | prompted | path to an existing file holding a PAT |
 | `--github-app` | off | create your own GitHub App in a browser instead of a PAT |
+| `--personal` | off | post as yourself with your own token (`gh auth token` unless `--pat-file`); GitHub only |
 | `--app-name` | `outerloop-<owner>` | name for the created App |
 | `--org` | your account | create the App under this org |
 | `--author-backend` | `claude` | the climbing author's backend: `claude`, `codex` or `hermes` |
