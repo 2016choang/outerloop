@@ -168,8 +168,11 @@ def post_round_review(
     fallback_body — the FULL single-comment rendering, because the review
     body alone may say no more than "findings are attached" while the
     findings live in the rejected inline payload. `commit_id` pins the
-    review to the head that was reviewed, so a push meanwhile cannot move it."""
+    review to the head that was reviewed, so a push meanwhile cannot move it;
+    its fallback is a body-only review pinned to the same head, never an
+    unpinned comment."""
     stamp, round_label = _round_stamp(client, repo, number, marker, pr_data, reviewed_by)
+    full = fallback_body.replace(marker, f"{marker}\n{stamp}", 1)
     try:
         client.create_pr_review(
             repo,
@@ -179,21 +182,17 @@ def post_round_review(
             commit_id=commit_id,
         )
     except EXPECTED_FAILURES as exc:
-        if commit_id:
-            # a push can be why the pinned review was refused; an unpinned
-            # comment would land the old findings on the new head
-            head = client.get_pull_request(repo, number).get("head")
-            current = str(head.get("sha", "")) if isinstance(head, dict) else ""
-            if current != commit_id:
-                log.warning(
-                    "pinned review failed (%s) and the head moved (%s -> %s); nothing posted",
-                    exc,
-                    commit_id[:8],
-                    current[:8] or "unknown",
-                )
-                return ""
-        log.warning("inline review failed (%s); falling back to a comment", exc)
-        client.comment(repo, number, fallback_body.replace(marker, f"{marker}\n{stamp}", 1))
+        if not commit_id:
+            log.warning("inline review failed (%s); falling back to a comment", exc)
+            client.comment(repo, number, full)
+            return round_label
+        log.warning("pinned inline review failed (%s); retrying without inline comments", exc)
+        try:
+            client.create_pr_review(repo, number, full, [], commit_id=commit_id)
+        except EXPECTED_FAILURES as exc2:
+            # the head left the PR (force-push); nothing is posted
+            log.warning("pinned review to %s refused (%s); nothing posted", commit_id[:8], exc2)
+            return ""
     return round_label
 
 

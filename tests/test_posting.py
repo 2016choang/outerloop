@@ -188,17 +188,40 @@ def test_post_round_review_falls_back_to_a_comment_carrying_full_findings() -> N
     assert posted["kind"] == "comment" and "FULL findings in the fallback" in posted["body"]
 
 
-def test_pinned_review_has_no_fallback_once_the_head_moved() -> None:
-    # a push can be why GitHub refused the pinned review; a plain comment
-    # would put the old findings on the new head
+def test_pinned_review_falls_back_to_a_body_only_review_on_the_same_head() -> None:
+    class _NoInline(_FakeClient):
+        def create_pr_review(
+            self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+        ) -> None:
+            if comments:
+                raise GitHubError(422, "/repos/org/repo", "unprocessable")
+            self.posted.append({"body": body, "kind": "review", "commit_id": commit_id})
+
+    client = _NoInline()
+    label = posting.post_round_review(
+        client,  # type: ignore[arg-type]
+        "org/repo",
+        1,
+        _MARKER,
+        f"{_MARKER}\nsummary only",
+        [{"path": "x.py", "line": 1}],
+        {"head": {"sha": "oldhead"}},
+        fallback_body=f"{_MARKER}\nFULL findings",
+        commit_id="oldhead",
+    )
+    assert label == "**Round 1**"
+    (posted,) = client.posted
+    assert posted["kind"] == "review" and posted["commit_id"] == "oldhead"
+    assert "FULL findings" in posted["body"]
+
+
+def test_pinned_review_posts_nothing_once_the_head_left_the_pr() -> None:
+    # a plain comment would put the old findings on the new head
     class _Moved(_FakeClient):
         def create_pr_review(
             self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
         ) -> None:
             raise GitHubError(422, "/repos/org/repo", "commit_id is not part of the pull request")
-
-        def get_pull_request(self, repo: str, number: int) -> dict:
-            return {"head": {"sha": "newhead"}}
 
     client = _Moved()
     posting.post_round_review(
