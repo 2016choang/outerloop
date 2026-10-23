@@ -6,6 +6,8 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- When check runs cannot be read on a token deployment, the warning now says the token cannot read them (fine-grained tokens have no checks permission) instead of asking for an App permission.
+
 ## [0.5.0] - 2026-10-23
 
 ### Upgrading

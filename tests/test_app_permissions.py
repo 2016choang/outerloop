@@ -160,6 +160,33 @@ def test_sweep_warning_caches_guidance(app, tmp_path, monkeypatch, caplog, looku
         assert gaps.problem in caplog.text
 
 
+@pytest.mark.parametrize("status", [403, 502])
+def test_sweep_warning_names_the_token_gap(tmp_path, monkeypatch, caplog, status):
+    monkeypatch.setattr(inbox, "_APP_PERMISSION_WARNINGS", {})
+
+    class GitHub:
+        def credential(self):
+            return "a token"
+
+        def list_comments(self, *args):
+            return []
+
+        list_pr_reviews = list_comments
+        list_pr_review_comments = list_comments
+
+        def list_check_runs(self, *args):
+            raise GitHubError(status, "/checks", "forbidden")
+
+    record = RunRecord(
+        "run", "org/repo", "task", PARKED, pr_url="https://github.com/org/repo/pull/9"
+    )
+    inbox.gather_github_messages(
+        tmp_path, record, cast(GitHubClient, GitHub()), "bot", 1, {"head": {"sha": "abc"}}
+    )
+    assert ("token cannot read check runs" in caplog.text) == (status == 403)
+    assert "App needs" not in caplog.text
+
+
 @pytest.fixture
 def app_env(app, monkeypatch):
     provider, _, _ = app
