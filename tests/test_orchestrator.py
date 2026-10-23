@@ -162,7 +162,7 @@ def refusal_receipts(directory: Path) -> list:
 
 def test_improvement_end_to_end(tmp_path: Path) -> None:
     # The gate re-measures both sides ([13.876, 13.10]) after the session; the
-    # sealed candidate sha rides on the result for the caller to publish.
+    # result includes the sealed candidate sha for the caller to publish.
     result, _, evaluator = run_climb(tmp_path, [13.876, 13.10], brief_baseline=13.876)
     assert result.outcome == "improved"
     assert result.baseline == 13.876  # measured by the gate, not the ledger
@@ -2389,6 +2389,7 @@ def test_endpoint_loss_between_legs_preserves_session(tmp_path, monkeypatch):
         ("stale", "end", "fresh"),
         ("launch", "end", "replies-only"),  # no launcher wired, replies only
         ("submit", "end", "wake"),  # refusal delivered into a resume entry
+        ("submit", "explicit-end", "fresh"),  # an explicit stop, no stop callback
         # failed wakes preserve the rejection and name the right outcome; one
         # per session classification (generic error, walltime, max-turns,
         # outage)
@@ -2447,6 +2448,8 @@ def test_scope_refusal_runs_nothing_and_resumes(tmp_path, kind, retry, entry):
                         if retry == "budget"
                         else "session failed",
                     )
+                if retry == "explicit-end":
+                    _write_syscall(workspace, {"type": "stop", "report": "abandoned"})
                 if retry == "clean":
                     if self.calls == 4:
                         paths[:] = ["src/pilot/solvers/tsp.py"]
