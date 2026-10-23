@@ -81,13 +81,15 @@ def test_single_real_opinion_passes_through_without_a_session(tmp_path, monkeypa
     assert "did NOT run" in merged["data"]["notes"] and "coverage" in merged["data"]["notes"]
 
 
-def test_disagreeing_lens_heads_emit_a_clean_skip(tmp_path, monkeypatch) -> None:
-    # lenses read different heads: there is no one head to stamp the round on
+@pytest.mark.parametrize("other", ["b" * 40, ""], ids=["another-head", "unrecorded"])
+def test_disagreeing_lens_heads_emit_a_clean_skip(tmp_path, monkeypatch, other) -> None:
+    # lenses read different heads, or one cannot say which (an older ref):
+    # there is no one head to stamp the round on
     _envelope(
         tmp_path, "a", kind="findings", data={"findings": []}, lens="credentials", head_sha="a" * 40
     )
     _envelope(
-        tmp_path, "b", kind="findings", data={"findings": []}, lens="deployment", head_sha="b" * 40
+        tmp_path, "b", kind="findings", data={"findings": []}, lens="deployment", head_sha=other
     )
     merged = _run_summarize(tmp_path, monkeypatch)
     assert merged["kind"] == "skip-clean"

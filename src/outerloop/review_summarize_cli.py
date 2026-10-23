@@ -84,10 +84,13 @@ def main() -> int:
 
     envelopes = _load_envelopes(Path(src).resolve(), repo, number)
     # Lens sessions must all have read the same head; a panel split across
-    # two heads cannot be merged into one round (empty means an older ref).
+    # two heads cannot be merged into one round. Findings without a head (an
+    # older ref) cannot be shown to share it; workflow backstop stubs carry none.
     heads = {str(e.get("head_sha") or "") for e in envelopes} - {""}
-    if len(heads) > 1:
-        detail = "lens envelopes disagree on head_sha: " + ", ".join(sorted(h[:8] for h in heads))
+    unheaded = any(e.get("kind") == "findings" and not e.get("head_sha") for e in envelopes)
+    if len(heads) > 1 or (heads and unheaded):
+        named = sorted(h[:8] for h in heads) + (["unrecorded"] if unheaded else [])
+        detail = "lens envelopes disagree on head_sha: " + ", ".join(named)
         log.warning("%s; nothing to merge", detail)
         emit_envelope(emit_path, repo, number, kind="skip-clean", detail=detail)
         return 0

@@ -179,6 +179,19 @@ def post_round_review(
             commit_id=commit_id,
         )
     except EXPECTED_FAILURES as exc:
+        if commit_id:
+            # a push can be why the pinned review was refused; an unpinned
+            # comment would land the old findings on the new head
+            head = client.get_pull_request(repo, number).get("head")
+            current = str(head.get("sha", "")) if isinstance(head, dict) else ""
+            if current != commit_id:
+                log.warning(
+                    "pinned review failed (%s) and the head moved (%s -> %s); nothing posted",
+                    exc,
+                    commit_id[:8],
+                    current[:8] or "unknown",
+                )
+                return ""
         log.warning("inline review failed (%s); falling back to a comment", exc)
         client.comment(repo, number, fallback_body.replace(marker, f"{marker}\n{stamp}", 1))
     return round_label
