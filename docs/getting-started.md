@@ -4,6 +4,8 @@ This page walks you through one Outerloop run end to end: install the package, d
 
 The tutorial uses the simplest supported setup: everything runs on your machine. [Install](install.md) covers Slurm clusters, upgrades and the other deployment shapes.
 
+To watch a run before you write a contract, the [quickstart repository](https://github.com/outerloop-science/quickstart) has two CPU benchmarks and runs without GitHub or a cluster; its README has the three commands.
+
 ## Before you start
 
 - Python 3.12 or later on a Linux machine, or any machine you can leave a terminal open on.

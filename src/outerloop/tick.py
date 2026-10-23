@@ -3732,8 +3732,8 @@ def _service_spec_from_env(
     panel = os.environ.get("OUTERLOOP_PANEL", "verify,review")
     uncontained = uncontained_opt_in()
     if uncontained or (not image_ok and local_mode()):
-        # No container: sessions run under the harness's own sandbox and
-        # evaluations run bare, with the operator's own account and keys. The
+        # No container: sessions run as the operator's account with a scrubbed
+        # environment and a per-run home, and evaluations run bare. The
         # local loop falls back to this when it has no image; any other
         # deployment needs OUTERLOOP_UNCONTAINED=1, so a missing image on a
         # cluster never silently drops containment. The panel is off unless
@@ -3744,8 +3744,8 @@ def _service_spec_from_env(
         if not _UNCONTAINED_WARNED:
             _UNCONTAINED_WARNED = True
             log.warning(
-                "%s; sessions run under the harness sandbox and evaluations run bare "
-                "as this account; the panel is %s; a codex or hermes author needs the "
+                "%s; sessions and evaluations run as this account and can read its "
+                "files; the panel is %s; a codex or hermes author needs the "
                 "image (docs/install.md, running without a container)",
                 "OUTERLOOP_UNCONTAINED=1: no container"
                 if uncontained

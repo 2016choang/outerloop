@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- The README and the getting-started guide link to the quickstart repository. It runs two CPU benchmarks with the local forge and local compute, and needs no GitHub account or cluster (#563). The docs and the startup warning no longer say an uncontained session runs in a sandbox: it gets a scrubbed environment and its own home, but can read any file the account can.
 - The advisory review covers exactly the head its triggering event named (`REVIEW_HEAD_SHA`, #462). If the PR has moved off that head, nothing is reviewed or posted. Otherwise the diff is read between fixed commits, every envelope records the reviewed `head_sha`, and the review is attached to that commit. When GitHub refuses its inline comments, the fallback is a body-only review on the same commit, never an unpinned comment (#569). The summarizer skips clean when its lenses read different heads. For a fork PR (`REVIEW_CHECKOUT_BASE=1`) the brief says the tree is the base branch and the change is only in the diff. Upgrading: envelopes without `head_sha` (from an older reviewer ref) still post; callers that do not pass REVIEW_HEAD_SHA behave as before.
 - When check runs cannot be read on a token deployment, the warning now says the token cannot read them (fine-grained tokens have no checks permission) instead of asking for an App permission.
 
