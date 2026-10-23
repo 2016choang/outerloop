@@ -4311,7 +4311,7 @@ def test_sweep_merges_only_quiet_blessed_pr(tmp_path, blocked, caplog):
         [] if blocked not in ("", "checks403") else [("org/repo", 9, "squash", "head")]
     )
     if blocked == "checks403":
-        assert "checks: read" in caplog.text
+        assert "cannot read check runs" in caplog.text
         from outerloop.inbox import pending
 
         assert not pending(run_dir(tmp_path, record.run_id), 0)
