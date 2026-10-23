@@ -6,7 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
-- The README and the getting-started guide point to the quickstart repository, two CPU benchmarks that run with the local forge and local compute: no GitHub account and no cluster (#563).
+- The README and the getting-started guide link to the quickstart repository. It runs two CPU benchmarks with the local forge and local compute, and needs no GitHub account or cluster (#563).
 - When check runs cannot be read on a token deployment, the warning now says the token cannot read them (fine-grained tokens have no checks permission) instead of asking for an App permission.
 
 ## [0.5.0] - 2026-10-23
