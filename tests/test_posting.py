@@ -31,7 +31,9 @@ class _FakeClient:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.posted.append({"body": body, "kind": "comment"})
 
-    def create_pr_review(self, repo: str, number: int, body: str, comments: Any = None) -> None:
+    def create_pr_review(
+        self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+    ) -> None:
         self.posted.append({"body": body, "kind": "review", "inline": comments or []})
 
 
@@ -165,7 +167,9 @@ def test_post_round_review_posts_inline_on_success() -> None:
 
 def test_post_round_review_falls_back_to_a_comment_carrying_full_findings() -> None:
     class _NoInline(_FakeClient):
-        def create_pr_review(self, repo: str, number: int, body: str, comments: Any = None) -> None:
+        def create_pr_review(
+            self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+        ) -> None:
             raise GitHubError(422, "/repos/org/repo", "unprocessable")
 
     client = _NoInline()

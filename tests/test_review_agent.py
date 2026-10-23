@@ -92,6 +92,8 @@ class _Client:
         self._author = author
         self._labels = [] if labels is _Client._UNSET else labels
         self.reviews: list[tuple[str, list[dict]]] = []
+        self.review_commits: list[str] = []
+        self.compared: list[tuple[str, str]] = []
         self.comments: list[str] = []
 
     def get_pull_request(self, repo: str, number: int) -> dict:
@@ -101,9 +103,14 @@ class _Client:
             "user": {"login": self._author},
             "labels": self._labels,
             "head": {"sha": "deadbeef1234"},
+            "base": {"sha": "0badc0de0000"},
         }
 
     def get_pull_request_diff(self, repo: str, number: int) -> str:
+        return _DIFF
+
+    def get_compare_diff(self, repo: str, base: str, head: str) -> str:
+        self.compared.append((base, head))
         return _DIFF
 
     def list_comments(self, repo: str, number: int) -> list[dict]:
@@ -112,8 +119,11 @@ class _Client:
     def list_pr_reviews(self, repo: str, number: int) -> list[dict]:
         return []
 
-    def create_pr_review(self, repo: str, number: int, body: str, inline: list[dict]) -> None:
+    def create_pr_review(
+        self, repo: str, number: int, body: str, inline: list[dict], commit_id: str = ""
+    ) -> None:
         self.reviews.append((body, inline))
+        self.review_commits.append(commit_id)
 
     def comment(self, repo: str, number: int, body: str) -> None:
         self.comments.append(body)
@@ -289,7 +299,47 @@ def test_emit_mode_writes_findings_and_posts_nothing(tmp_path: Path) -> None:
     envelope = json.loads(out.read_text())
     assert envelope["repo"] == "org/repo" and envelope["number"] == 7
     assert envelope["kind"] == "findings"
+    assert envelope["head_sha"] == "deadbeef1234"  # the head it reviewed
     assert envelope["data"]["findings"][0]["file"] == "models/encoder.py"
+
+
+def test_moved_head_skips_before_the_session(tmp_path: Path, monkeypatch: Any) -> None:
+    # the fork pushed between the label and this run: review exactly the head
+    # the maintainer saw, or nothing
+    monkeypatch.setenv("REVIEW_HEAD_SHA", "cafebabe9999")
+    client, harness = _Client(), _Harness(_FINDINGS)
+    out = tmp_path / "findings.json"
+    label = run_agent_review(
+        client,  # type: ignore[arg-type]
+        "org/repo",
+        7,
+        harness,
+        _WORKSPACE,
+        bot_login="autoresearch-bot",
+        emit_path=out,
+    )
+    assert label is None
+    assert harness.briefs == []  # no model session ran
+    envelope = json.loads(out.read_text())
+    assert envelope["kind"] == "skip-clean"
+    assert "cafebabe" in envelope["detail"] and "deadbeef" in envelope["detail"]
+
+
+def test_unset_head_sha_reviews_as_before(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("REVIEW_HEAD_SHA", raising=False)
+    client, harness = _Client(), _Harness(_FINDINGS)
+    out = tmp_path / "findings.json"
+    label = run_agent_review(
+        client,  # type: ignore[arg-type]
+        "org/repo",
+        7,
+        harness,
+        _WORKSPACE,
+        bot_login="autoresearch-bot",
+        emit_path=out,
+    )
+    assert label == "emitted"
+    assert json.loads(out.read_text())["kind"] == "findings"
 
 
 def test_emit_mode_outage_writes_skip_stub_marker(tmp_path: Path) -> None:
@@ -402,6 +452,58 @@ def test_post_from_file_posts_with_opinion_label(tmp_path: Path) -> None:
     assert "*second opinion — terra via hermes*" in body
     assert body.index(MARKER) < body.index("*second opinion — terra via hermes*")
     assert any(c.get("path") == "models/encoder.py" for c in inline)
+
+
+def test_post_refuses_a_stale_envelope_head(tmp_path: Path) -> None:
+    # the PR moved after the session read it: the write side must not stamp
+    # findings onto a head nobody reviewed
+    from outerloop.review_post_cli import post_from_file
+
+    client = _Client()
+    path = _findings_envelope(tmp_path, head_sha="0123456789abcdef")
+    assert post_from_file(client, "org/repo", 7, "autoresearch-bot", path) is None  # type: ignore[arg-type]
+    assert client.reviews == [] and client.comments == []
+
+
+def test_post_pins_the_review_to_the_reviewed_head(tmp_path: Path) -> None:
+    # a push between this check and the API call must not move the review
+    from outerloop.review_post_cli import post_from_file
+
+    client = _Client()
+    path = _findings_envelope(tmp_path, head_sha="deadbeef1234")
+    post_from_file(client, "org/repo", 7, "autoresearch-bot", path)  # type: ignore[arg-type]
+    assert client.review_commits == ["deadbeef1234"]
+
+
+def test_pinned_review_reads_the_diff_between_fixed_commits(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # the PR diff endpoint follows the live head; a push after the metadata
+    # read must not swap in another head's diff
+    monkeypatch.setenv("REVIEW_HEAD_SHA", "deadbeef1234")
+    client, harness = _Client(), _Harness(_FINDINGS)
+    run_agent_review(
+        client,  # type: ignore[arg-type]
+        "org/repo",
+        7,
+        harness,
+        _WORKSPACE,
+        bot_login="autoresearch-bot",
+        emit_path=tmp_path / "findings.json",
+    )
+    assert client.compared == [("0badc0de0000", "deadbeef1234")]
+
+
+def test_post_refuses_when_the_event_head_moved(tmp_path: Path, monkeypatch: Any) -> None:
+    # an envelope from an older ref carries no head_sha; the event's head is
+    # still checked against the PR's current head
+    from outerloop.review_post_cli import post_from_file
+
+    monkeypatch.setenv("REVIEW_HEAD_SHA", "cafebabe9999")
+    client = _Client()
+    path = _findings_envelope(tmp_path)
+    assert post_from_file(client, "org/repo", 7, "autoresearch-bot", path) is None  # type: ignore[arg-type]
+    assert client.reviews == [] and client.comments == []
 
 
 def test_post_from_file_refuses_wrong_pr_envelope(tmp_path: Path) -> None:

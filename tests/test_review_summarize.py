@@ -66,11 +66,32 @@ def test_single_real_opinion_passes_through_without_a_session(tmp_path, monkeypa
     # no model call: the one real opinion is the round — and the FAILED
     # sibling lenses still reach the posted notes (never hidden by a lone
     # success)
-    _envelope(tmp_path, "a", kind="findings", data={"findings": []}, lens="credentials")
+    _envelope(
+        tmp_path,
+        "a",
+        kind="findings",
+        data={"findings": []},
+        lens="credentials",
+        head_sha="deadbeef1234",
+    )
     _envelope(tmp_path, "b", kind="skip-stub", detail="key missing", lens="coverage")
     merged = _run_summarize(tmp_path, monkeypatch)
     assert merged["kind"] == "findings" and merged["lens"] == "credentials"
+    assert merged["head_sha"] == "deadbeef1234"  # the common head rides through
     assert "did NOT run" in merged["data"]["notes"] and "coverage" in merged["data"]["notes"]
+
+
+def test_disagreeing_lens_heads_emit_a_clean_skip(tmp_path, monkeypatch) -> None:
+    # lenses read different heads: there is no one head to stamp the round on
+    _envelope(
+        tmp_path, "a", kind="findings", data={"findings": []}, lens="credentials", head_sha="a" * 40
+    )
+    _envelope(
+        tmp_path, "b", kind="findings", data={"findings": []}, lens="deployment", head_sha="b" * 40
+    )
+    merged = _run_summarize(tmp_path, monkeypatch)
+    assert merged["kind"] == "skip-clean"
+    assert "disagree on head_sha" in merged["detail"]
 
 
 def test_vanished_lens_is_reported_not_silently_omitted(tmp_path, monkeypatch) -> None:

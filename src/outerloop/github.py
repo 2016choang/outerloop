@@ -741,6 +741,23 @@ class GitHubClient:
         )
         return self.raw_transport(request)
 
+    def get_compare_diff(self, repo: str, base: str, head: str) -> str:
+        """The unified diff `base...head` (from their merge base, as a PR diff
+        is) between two fixed commits, so a later push cannot change it."""
+        path = (
+            f"/repos/{urllib.parse.quote(repo)}/compare/"
+            f"{urllib.parse.quote(base, safe='')}...{urllib.parse.quote(head, safe='')}"
+        )
+        request = urllib.request.Request(
+            f"{API}{path}",
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {self.auth.token()}",
+                "Accept": "application/vnd.github.v3.diff",
+            },
+        )
+        return self.raw_transport(request)
+
     def list_directory(self, repo: str, path: str, ref: str) -> list[dict[str, Any]]:
         """Entries of a directory at a ref ([] when absent or not a dir).
 
@@ -841,8 +858,10 @@ class GitHubClient:
         number: int,
         body: str,
         comments: list[dict[str, Any]] | None = None,
+        commit_id: str = "",
     ) -> None:
-        """Post a PR review with optional inline comments.
+        """Post a PR review with optional inline comments, attached to
+        `commit_id` when given (else GitHub picks the PR's current head).
 
         The event is hard-coded to COMMENT: this client must never be able
         to approve or request changes — a Write-role bot review that blocks
@@ -861,6 +880,8 @@ class GitHubClient:
         payload: dict[str, Any] = {"body": body, "event": "COMMENT"}
         if comments:
             payload["comments"] = comments
+        if commit_id:
+            payload["commit_id"] = commit_id
         self._request(
             "POST",
             f"/repos/{urllib.parse.quote(repo)}/pulls/{number}/reviews",
