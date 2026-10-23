@@ -327,6 +327,8 @@ def render_markdown(
             provenance = f"[{e.main_commit[:9]}]({commit_link})"
         elif e.main_commit:
             provenance = f"`{e.main_commit[:9]}`"
+        elif e.best_run == "baseline" and e.best == e.baseline:
+            provenance = "—"  # no run has set a best, so no commit to name
         else:
             provenance = "provenance unknown"
         if e.main_commit and not e.measured_sha:
