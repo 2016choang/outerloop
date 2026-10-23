@@ -6,6 +6,20 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Upgrading
+
+No operator action is needed before upgrading; details in each entry.
+
+What changes for runs in flight: kernel comments, issues and pull requests
+start carrying `<!-- outerloop:kernel -->`; the first tick republishes
+`climb/status.json` in the new shape; a resumed Claude session captured
+before the upgrade still overstates its cost.
+
+Before rolling back: remove `slots` keys from `limits.toml`, and let local
+jobs on GPU UUID ids (`GPU-...`) finish.
+
+### Changes
+
 - Docs for personal-token mode: the install guide's personal-mode section (setup, how kernel posts are told apart, what GitHub no longer enforces, token reach, switching modes), the safety defaults in `operate.md`, `OUTERLOOP_IDENTITY` in the environment reference, `init --personal` in the CLI reference, and `personal: true` in the reviewer setup.
 - Personal-token mode is selectable: `outerloop init --personal` takes the token `gh auth token` prints and writes it 0600 to the default PAT file (or uses a token file given with `--pat-file`), records its login as `OUTERLOOP_BOT_LOGIN`, and writes `OUTERLOOP_IDENTITY=personal`; `start` and the deploy step carry the setting into every tick. The kernel then posts as the person, so its own posts are told apart by the `outerloop:` marker rather than by login. The setup prints the trade-offs: no notifications for the kernel's activity, the `gh` token's repository-wide reach, and the reviewer workflow's `personal: true`. Upgrading: switching a personal deployment back to the App means releasing or closing claimed issues first — their claim comments were posted as the person, and the App's login check no longer counts them.
 - The identity seam for personal-token mode. One rule, `forge.is_kernel_post`, decides whether a comment, issue or pull request is the kernel's, wherever the kernel asks. In personal mode (`OUTERLOOP_IDENTITY=personal`, not yet enabled by anything) the login is the person's, so a post is the kernel's only when its body also carries an `outerloop:` marker. Alias logins keep the login check alone. Kernel comments, issues and pull requests now carry `<!-- outerloop:kernel -->` unless they already carry a marker. When the kernel arms auto-merge it records the PR in the run's stage (`auto_merge_armed`) and clears the record once it disarms or sees auto-merge off; under the auto dial it withdraws only an arm that record claims, so a human's later arm is left alone. Upgrading: kernel posts now carry a marker, which an older kernel ignores. A stage without an `auto_merge_armed` record (every run armed before the upgrade) keeps the old `enabled_by.login` rule outside personal mode, so a PR the kernel armed before the upgrade is still withdrawn under the auto dial; rolling back ignores the field.
