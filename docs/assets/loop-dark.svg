@@ -48,7 +48,7 @@
 
   <rect class="node n3" x="364" y="36" width="152" height="64" rx="10"/>
   <text class="title" x="440" y="63" text-anchor="middle">Measure</text>
-  <text class="sub" x="440" y="83" text-anchor="middle">kernel re-scores it</text>
+  <text class="sub" x="440" y="83" text-anchor="middle">Outerloop re-measures</text>
 
   <rect class="node n4" x="536" y="36" width="152" height="64" rx="10"/>
   <text class="title" x="612" y="63" text-anchor="middle">Review</text>
@@ -71,7 +71,7 @@
   <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
     values="0; 0; 1; 1; 0" keyTimes="0; 0.39; 0.42; 0.94; 1"/>
   <text class="score" x="440" y="124" text-anchor="middle">base 9,472 steps → candidate 7,808</text>
-  <text class="score ok" x="440" y="142" text-anchor="middle">beats the noise floor</text>
+  <text class="score ok" x="440" y="142" text-anchor="middle">more than run-to-run noise</text>
 </g>
 <g class="badge" opacity="0">
   <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
