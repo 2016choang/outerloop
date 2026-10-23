@@ -847,10 +847,12 @@ def gather_github_messages(
                 from outerloop.init import app_permission_gaps
 
                 auth = github.credential()
-                guidance = (
-                    "the token cannot read check runs (fine-grained tokens have no checks "
-                    "permission); CI results stay out of the inbox"
-                )
+                guidance = "CI results stay out of the inbox"
+                if exc.status == 403:
+                    guidance = (
+                        "the token cannot read check runs (fine-grained tokens have no "
+                        "checks permission); CI results stay out of the inbox"
+                    )
                 if isinstance(auth, AppInstallationTokenProvider):
                     guidance = "App needs checks: read permission"
                     gaps = app_permission_gaps(auth, record.target)
