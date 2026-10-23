@@ -17,6 +17,11 @@ change, runs the experiment on your cluster, and opens a pull request only
 when your benchmark actually improves. Every attempt ends in a short
 written report, including the attempts that failed.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/outerloop-science/outerloop/main/docs/assets/loop-dark.svg">
+  <img alt="One attempt: an agent proposes a change, runs the experiment on your GPUs, the kernel re-measures it against the base, judges review the claim, and a pull request opens with a written report. Without a real gain the attempt ends in a report and the next hypothesis starts." src="https://raw.githubusercontent.com/outerloop-science/outerloop/main/docs/assets/loop.svg" width="880">
+</picture>
+
 You run it yourself, with your own keys, your own compute and your own
 repositories, and nothing reports back to us. It is built and used every
 day by the [Agentic Learning AI Lab](https://agenticlearning.ai) at NYU,
@@ -36,8 +41,10 @@ outerloop init     # where the loop runs, which repo, which model and its key, y
 The wizard asks for a GitHub identity for the agents to open pull requests
 as. Pick `app` and it walks you through creating a GitHub App under your
 account and installing it on the repo. Pick `pat` if you already have a
-token, and it writes the config and the key files either way. Then add one
-file, `.outerloop.yaml`, to the repo you want improved:
+token, and it writes the config and the key files either way. To try it
+without GitHub, `outerloop init --forge local` keeps the repository and its
+pull requests in a git repository on the same machine. Then add one file,
+`.outerloop.yaml`, to the repo you want improved:
 
 ```yaml
 benchmarks:

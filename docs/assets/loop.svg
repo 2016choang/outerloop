@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 210" width="880" height="210" role="img" aria-label="One Outerloop attempt: an agent proposes a change, runs the experiment on your GPUs, the kernel re-measures it against the base, judges review the claim, and a pull request opens with a written report. Without a real gain the attempt ends in a report and the next hypothesis.">
+<style>
+  svg { --fg: #1f2933; --muted: #616e7c; --line: #c4cdd5; --card: #ffffff; --accent: #3c81f7; --good: #1f8a4c; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+  .title { font-size: 15px; font-weight: 600; }
+  .sub { font-size: 12px; fill: var(--muted); }
+  .node { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  .edge { stroke: var(--line); stroke-width: 1.5; fill: none; }
+  .back { stroke: var(--line); stroke-width: 1.5; fill: none; stroke-dasharray: 5 5; }
+  .head { fill: var(--line); }
+  .dot { fill: var(--accent); }
+  .score { font-size: 12px; font-variant-numeric: tabular-nums; fill: var(--fg); }
+  .ok { fill: var(--good); font-weight: 600; }
+  .pr { fill: var(--accent); font-weight: 600; font-size: 12px; }
+
+  .n1 { animation: lit1 12s infinite; } .n2 { animation: lit2 12s infinite; }
+  .n3 { animation: lit3 12s infinite; } .n4 { animation: lit4 12s infinite; }
+  .n5 { animation: lit5 12s infinite; }
+
+  @keyframes lit1 { 0%, 11% { stroke: var(--accent); stroke-width: 2.5; } 13%, 100% { stroke: var(--line); stroke-width: 1.5; } }
+  @keyframes lit2 { 0%, 15% { stroke: var(--line); stroke-width: 1.5; } 16%, 31% { stroke: var(--accent); stroke-width: 2.5; } 33%, 100% { stroke: var(--line); stroke-width: 1.5; } }
+  @keyframes lit3 { 0%, 35% { stroke: var(--line); stroke-width: 1.5; } 36%, 53% { stroke: var(--accent); stroke-width: 2.5; } 55%, 100% { stroke: var(--line); stroke-width: 1.5; } }
+  @keyframes lit4 { 0%, 57% { stroke: var(--line); stroke-width: 1.5; } 58%, 71% { stroke: var(--accent); stroke-width: 2.5; } 73%, 100% { stroke: var(--line); stroke-width: 1.5; } }
+  @keyframes lit5 { 0%, 75% { stroke: var(--line); stroke-width: 1.5; } 76%, 96% { stroke: var(--accent); stroke-width: 2.5; } 98%, 100% { stroke: var(--line); stroke-width: 1.5; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .n1, .n2, .n3, .n4, .n5 { animation: none; }
+  }
+</style>
+
+<!-- edges between the five steps -->
+<g>
+  <line class="edge" x1="172" y1="68" x2="186" y2="68"/><polygon class="head" points="192,68 184,64 184,72"/>
+  <line class="edge" x1="344" y1="68" x2="358" y2="68"/><polygon class="head" points="364,68 356,64 356,72"/>
+  <line class="edge" x1="516" y1="68" x2="530" y2="68"/><polygon class="head" points="536,68 528,64 528,72"/>
+  <line class="edge" x1="688" y1="68" x2="702" y2="68"/><polygon class="head" points="708,68 700,64 700,72"/>
+</g>
+
+<!-- the steps -->
+<g>
+  <rect class="node n1" x="20" y="36" width="152" height="64" rx="10"/>
+  <text class="title" x="96" y="63" text-anchor="middle">Propose</text>
+  <text class="sub" x="96" y="83" text-anchor="middle">agent edits the solver</text>
+
+  <rect class="node n2" x="192" y="36" width="152" height="64" rx="10"/>
+  <text class="title" x="268" y="63" text-anchor="middle">Experiment</text>
+  <text class="sub" x="268" y="83" text-anchor="middle">jobs on your GPUs</text>
+
+  <rect class="node n3" x="364" y="36" width="152" height="64" rx="10"/>
+  <text class="title" x="440" y="63" text-anchor="middle">Measure</text>
+  <text class="sub" x="440" y="83" text-anchor="middle">Outerloop re-measures</text>
+
+  <rect class="node n4" x="536" y="36" width="152" height="64" rx="10"/>
+  <text class="title" x="612" y="63" text-anchor="middle">Review</text>
+  <text class="sub" x="612" y="83" text-anchor="middle">judges read the claim</text>
+
+  <rect class="node n5" x="708" y="36" width="152" height="64" rx="10"/>
+  <text class="title" x="784" y="63" text-anchor="middle">Pull request</text>
+  <text class="sub" x="784" y="83" text-anchor="middle">with a written report</text>
+</g>
+
+<!-- the attempt moving through -->
+<circle class="dot" cx="96" cy="22" r="6">
+  <animateTransform attributeName="transform" type="translate" dur="12s" repeatCount="indefinite"
+    values="0 0; 0 0; 172 0; 172 0; 344 0; 344 0; 516 0; 516 0; 688 0; 688 0"
+    keyTimes="0; 0.10; 0.16; 0.30; 0.36; 0.52; 0.58; 0.70; 0.76; 1"/>
+</circle>
+
+<!-- what the measure step reports -->
+<g class="readout" opacity="0">
+  <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+    values="0; 0; 1; 1; 0" keyTimes="0; 0.39; 0.42; 0.94; 1"/>
+  <text class="score" x="440" y="124" text-anchor="middle">base 9,472 steps → candidate 7,808</text>
+  <text class="score ok" x="440" y="142" text-anchor="middle">more than run-to-run noise</text>
+</g>
+<g class="badge" opacity="0">
+  <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+    values="0; 0; 1; 1; 0" keyTimes="0; 0.78; 0.81; 0.94; 1"/>
+  <text class="pr" x="784" y="124" text-anchor="middle">opened for a human to merge</text>
+</g>
+
+<!-- no gain: report and try again -->
+<path class="back" d="M 440 154 L 440 176 L 96 176 L 96 108"/>
+<polygon class="head" points="96,102 92,110 100,110"/>
+<text class="sub" x="268" y="196" text-anchor="middle">no real gain: the report says why, and the next hypothesis starts</text>
+</svg>

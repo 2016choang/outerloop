@@ -6,6 +6,9 @@ request when the kernel's own measurement shows the benchmark improved. Every
 attempt ends in a written report, including the ones that failed. You run
 Outerloop yourself, with your own keys, compute and repositories.
 
+![One attempt: an agent proposes a change, runs the experiment on your GPUs, the kernel re-measures it against the base, judges review the claim, and a pull request opens with a written report.](assets/loop.svg#only-light)
+![One attempt: an agent proposes a change, runs the experiment on your GPUs, the kernel re-measures it against the base, judges review the claim, and a pull request opens with a written report.](assets/loop-dark.svg#only-dark)
+
 - [Getting started](getting-started.md) takes one repository through a first
   run on a single machine.
 - [Guides](install.md) cover installing Outerloop, operating runs, writing a
