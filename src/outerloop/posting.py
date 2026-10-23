@@ -160,17 +160,38 @@ def post_round_review(
     pr_data: dict,
     fallback_body: str,
     reviewed_by: str = "",
+    commit_id: str = "",
 ) -> str:
     """The Reviews-API sibling of post_round: body summary plus anchored
     inline comments, event COMMENT always (the client hard-codes it). A
     posting failure falls back to a plain issue comment carrying
     fallback_body — the FULL single-comment rendering, because the review
     body alone may say no more than "findings are attached" while the
-    findings live in the rejected inline payload."""
+    findings live in the rejected inline payload. `commit_id` pins the
+    review to the head that was reviewed, so a push meanwhile cannot move it."""
     stamp, round_label = _round_stamp(client, repo, number, marker, pr_data, reviewed_by)
     try:
-        client.create_pr_review(repo, number, body.replace(marker, f"{marker}\n{stamp}", 1), inline)
+        client.create_pr_review(
+            repo,
+            number,
+            body.replace(marker, f"{marker}\n{stamp}", 1),
+            inline,
+            commit_id=commit_id,
+        )
     except EXPECTED_FAILURES as exc:
+        if commit_id:
+            # a push can be why the pinned review was refused; an unpinned
+            # comment would land the old findings on the new head
+            head = client.get_pull_request(repo, number).get("head")
+            current = str(head.get("sha", "")) if isinstance(head, dict) else ""
+            if current != commit_id:
+                log.warning(
+                    "pinned review failed (%s) and the head moved (%s -> %s); nothing posted",
+                    exc,
+                    commit_id[:8],
+                    current[:8] or "unknown",
+                )
+                return ""
         log.warning("inline review failed (%s); falling back to a comment", exc)
         client.comment(repo, number, fallback_body.replace(marker, f"{marker}\n{stamp}", 1))
     return round_label

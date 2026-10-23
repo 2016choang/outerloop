@@ -82,13 +82,32 @@ def main() -> int:
     number = int(number_raw)
     emit_path = Path(emit_env).resolve()
 
+    envelopes = _load_envelopes(Path(src).resolve(), repo, number)
+    # Lens sessions must all have read the same head; a panel split across
+    # two heads cannot be merged into one round. Findings without a head (an
+    # older ref) cannot be shown to share it; workflow backstop stubs carry none.
+    heads = {str(e.get("head_sha") or "") for e in envelopes} - {""}
+    unheaded = any(e.get("kind") == "findings" and not e.get("head_sha") for e in envelopes)
+    if len(heads) > 1 or (heads and unheaded):
+        named = sorted(h[:8] for h in heads) + (["unrecorded"] if unheaded else [])
+        detail = "lens envelopes disagree on head_sha: " + ", ".join(named)
+        log.warning("%s; nothing to merge", detail)
+        emit_envelope(emit_path, repo, number, kind="skip-clean", detail=detail)
+        return 0
+    head_sha = next(iter(heads), "")
+
     def stub(detail: str) -> int:
         emit_envelope(
-            emit_path, repo, number, kind="skip-stub", detail=detail, reviewed_by="summarizer"
+            emit_path,
+            repo,
+            number,
+            kind="skip-stub",
+            detail=detail,
+            reviewed_by="summarizer",
+            head_sha=head_sha,
         )
         return 0
 
-    envelopes = _load_envelopes(Path(src).resolve(), repo, number)
     # A lens that CRASHED before uploading any envelope is invisible in the
     # artifact set — the caller declares the expected panel so the delta is
     # reported rather than silently omitted from the merged round.
@@ -111,7 +130,9 @@ def main() -> int:
         # all skipped/failed: ONE stub summarizing why (clean skips stay
         # clean — the poster's own skip re-check silences bot/opt-out PRs)
         if all(e.get("kind") == "skip-clean" for e in envelopes):
-            emit_envelope(emit_path, repo, number, kind="skip-clean", detail=details)
+            emit_envelope(
+                emit_path, repo, number, kind="skip-clean", detail=details, head_sha=head_sha
+            )
             return 0
         return stub(f"no lens produced findings ({details})")
     failed = [e for e in envelopes if e.get("kind") == "skip-stub"] + vanished
@@ -129,6 +150,7 @@ def main() -> int:
             data=data,
             reviewed_by=str(only.get("reviewed_by", "")),
             lens=str(only.get("lens", "")),
+            head_sha=head_sha,
         )
         log.info("single real opinion (%s); passed through", only.get("lens") or "general")
         return 0
@@ -156,6 +178,7 @@ def main() -> int:
         kind="findings",
         data=_with_lost_lenses(dict(role_result.data), failed),
         reviewed_by=f"summarizer:{backend_id(harness)} over {lenses}",
+        head_sha=head_sha,
     )
     log.info("merged %d opinions (%s)", len(reals), lenses)
     return 0

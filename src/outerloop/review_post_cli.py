@@ -66,6 +66,31 @@ def post_from_file(
         if skip is not None:
             log.info("skipping post on %s#%s: %s", repo, number, skip)
             return None
+        # The head moved after the session read it: post nothing rather than
+        # stamp findings onto a head nobody reviewed. An envelope without
+        # head_sha (an older reviewer ref) is checked by the event head alone.
+        head = pr_data.get("head")
+        current = str(head.get("sha", "")) if isinstance(head, dict) else ""
+        envelope_head = str(envelope.get("head_sha") or "")
+        if envelope_head and envelope_head != current:
+            log.info(
+                "skipping post on %s#%s: envelope reviewed head %s, current head %s",
+                repo,
+                number,
+                envelope_head[:8],
+                current[:8] or "unknown",
+            )
+            return None
+        requested = os.environ.get("REVIEW_HEAD_SHA", "").strip()
+        if requested and requested != current:
+            log.info(
+                "skipping post on %s#%s: requested head %s, current head %s",
+                repo,
+                number,
+                requested[:8],
+                current[:8] or "unknown",
+            )
+            return None
         if kind == "skip-stub":
             # sanitize: the detail crossed the job boundary and lands in a
             # comment — collapse newlines, neutralize markdown, cap length
@@ -104,6 +129,7 @@ def post_from_file(
             pr_data,
             fallback_body=full,
             reviewed_by=str(envelope.get("reviewed_by", "")),
+            commit_id=envelope_head,
         )
         log.info(
             "posted review (%s) on %s#%s (reviewer=%s)",

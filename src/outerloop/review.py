@@ -361,6 +361,7 @@ def build_agent_brief(
     lens: str = "",
     guidance: str = "",
     panel: bool = False,
+    base_tree: bool = False,
 ) -> str:
     """The reviewer brief for an agent session: the shared rubric, the
     investigation instruction, and the PR itself, built on the shared
@@ -376,12 +377,20 @@ def build_agent_brief(
         raise ValueError(f"unknown review lens {lens!r} (have: {sorted(REVIEW_LENSES)})")
     focus = f"\n\n{REVIEW_LENSES[lens]}" if lens and lens != "general" else ""
     rules = f"\n\n{PANEL_BLOCKING}" if panel else ""
+    # a fork PR's head is never checked out: its code stays off the runner
+    tree = f"\n\n{BASE_TREE_NOTE}" if base_tree else ""
     # the guidance rides the trusted prompt BEFORE the untrusted PR text, so a
     # report cannot forge or swallow it
     return (
         f"{SYSTEM_PROMPT}{focus}{rules}{guidance_section(guidance)}\n\n"
-        f"{_agent_investigation(syscall_cmd)}\n\n{build_prompt(pr, today)}"
+        f"{_agent_investigation(syscall_cmd)}{tree}\n\n{build_prompt(pr, today)}"
     )
+
+
+BASE_TREE_NOTE = (
+    "The working tree is the pull request's base branch, not its head: the change exists "
+    "only in the diff below. Read the surrounding code in the tree and the change in the diff."
+)
 
 
 MEASUREMENT_PROVENANCE_CAUTION = (
