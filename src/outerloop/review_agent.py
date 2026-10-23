@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -89,9 +90,21 @@ def sanitize_checkout(tree: Path) -> tuple[int, int]:
     return renamed, failed
 
 
-def pull_request(client: GitHubClient, repo: str, number: int) -> tuple[PullRequest, dict]:
+def pull_request(
+    client: GitHubClient, repo: str, number: int, *, pin: str = ""
+) -> tuple[PullRequest, dict]:
+    """The PR and its diff. With `pin` (a head SHA) and the PR still at it, the
+    diff is taken between fixed commits, so a push after the metadata read
+    cannot swap in another head's diff."""
     pr_data = client.get_pull_request(repo, number)
-    diff = client.get_pull_request_diff(repo, number)
+    head = pr_data.get("head")
+    base = pr_data.get("base")
+    head_sha = str(head.get("sha", "")) if isinstance(head, dict) else ""
+    base_sha = str(base.get("sha", "")) if isinstance(base, dict) else ""
+    if pin and head_sha == pin and base_sha:
+        diff = client.get_compare_diff(repo, base_sha, pin)
+    else:
+        diff = client.get_pull_request_diff(repo, number)
     pr = PullRequest(
         repo=repo,
         number=number,
@@ -119,10 +132,12 @@ def emit_envelope(
     detail: str = "",
     reviewed_by: str = "",
     lens: str = "",
+    head_sha: str = "",
 ) -> None:
     """Write the posting step's input. repo/number ride along so the poster
     can refuse an envelope that does not match its own PR reference;
-    reviewed_by (backend/model) rides along for the round stamp."""
+    reviewed_by (backend/model) rides along for the round stamp; head_sha
+    lets the poster refuse a review of a head the PR has since left."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -134,6 +149,7 @@ def emit_envelope(
                 "detail": detail,
                 "reviewed_by": reviewed_by,
                 "lens": lens,
+                "head_sha": head_sha,
             }
         )
     )
@@ -169,8 +185,14 @@ def run_agent_review(
     """
     spec = spec or reviewer_spec()
     today = today or datetime.now(UTC).date().isoformat()
+    head_sha = ""
+    # The workflow names the head the maintainer saw. A fork can push between
+    # the label and this run, so review exactly that head or none.
+    requested = os.environ.get("REVIEW_HEAD_SHA", "").strip()
     try:
-        pr, pr_data = pull_request(client, repo, number)
+        pr, pr_data = pull_request(client, repo, number, pin=requested)
+        head = pr_data.get("head")
+        head_sha = str(head.get("sha", "")) if isinstance(head, dict) else ""
         skip = skip_reason(pr, bot_login)
         if skip is not None:
             log.info("skipping agent review of %s#%s: %s", repo, number, skip)
@@ -178,12 +200,41 @@ def run_agent_review(
                 # even a clean skip leaves an envelope: the posting job can
                 # then REQUIRE an artifact, so "no artifact" always means a
                 # broken session, never an ambiguous quiet day
-                emit_envelope(emit_path, repo, number, kind="skip-clean", detail=skip)
+                emit_envelope(
+                    emit_path,
+                    repo,
+                    number,
+                    kind="skip-clean",
+                    detail=skip,
+                    head_sha=head_sha,
+                )
+            return None
+        if requested and head_sha != requested:
+            detail = (
+                "head moved since the review was requested "
+                f"({requested[:8]} -> {head_sha[:8] or 'unknown'}); no review run"
+            )
+            log.info("skipping agent review of %s#%s: %s", repo, number, detail)
+            if emit_path is not None:
+                emit_envelope(
+                    emit_path,
+                    repo,
+                    number,
+                    kind="skip-clean",
+                    detail=detail,
+                    head_sha=head_sha,
+                )
             return None
 
         from outerloop.syscall import tool_command
 
-        brief = build_agent_brief(pr, today, syscall_cmd=tool_command(workspace), lens=lens)
+        brief = build_agent_brief(
+            pr,
+            today,
+            syscall_cmd=tool_command(workspace),
+            lens=lens,
+            base_tree=os.environ.get("REVIEW_CHECKOUT_BASE", "").strip() == "1",
+        )
         role_result = redact_role_result(run_role(spec, harness, brief, workspace), harness)
         review = review_result_from_role(role_result)
         if review is None:
@@ -208,6 +259,7 @@ def run_agent_review(
                     kind="skip-stub",
                     detail=detail,
                     reviewed_by=backend_id(harness),
+                    head_sha=head_sha,
                 )
             elif outage(role_result.session) or budget_exhausted(role_result.session):
                 post_skip_stub(client, repo, number, "advisory review", RuntimeError(detail))
@@ -225,6 +277,7 @@ def run_agent_review(
                 data=role_result.data,
                 reviewed_by=backend_id(harness),
                 lens=lens,
+                head_sha=head_sha,
             )
             cost = role_result.session.cost_usd
             log.info(
@@ -252,6 +305,7 @@ def run_agent_review(
             pr_data,
             fallback_body=full,
             reviewed_by=backend_id(harness),
+            commit_id=head_sha,
         )
         cost = role_result.session.cost_usd
         log.info(
@@ -278,5 +332,6 @@ def run_agent_review(
                     kind="skip-stub",
                     detail=detail,
                     reviewed_by=backend_id(harness),
+                    head_sha=head_sha,
                 )
         return None

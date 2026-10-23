@@ -4,8 +4,9 @@
 # another caller job with a different backend/model/opinion label.
 #
 # Topology (every backend, claude included):
-#   session job — READ-ONLY permissions. Checks out the PR head (never
-#     executed), runs the review session, emits raw findings (or a skip-stub
+#   session job — READ-ONLY permissions. Checks out the PR head (the base
+#     commit for a fork; no workflow step runs PR code, though the session
+#     holds a shell), runs the review session, emits raw findings (or a skip-stub
 #     marker) as an artifact. The only secrets present are the session's own
 #     model key and read-scoped tokens (job token + the reviewer repo's
 #     read-only deploy key while private) — nothing worth stealing, so even
@@ -18,7 +19,9 @@
 #     the round stamp.
 #
 # Constraints: never reviews bot-authored PRs, never approves, never fails
-# the caller's CI, same-repo PRs only. By design: the "Round N" counter is
+# the caller's CI, same-repo PRs only (plus fork PRs a maintainer labels, with
+# allow_labeled_forks on; the review then covers the labeled head or nothing).
+# By design: the "Round N" counter is
 # shared across all opinions on a PR (the number is cosmetic; the stamp names
 # the reviewer), and a missing/expired backend key posts a could-not-run stub
 # naming its opinion label on each triggering PR until fixed — the noise IS the
@@ -28,6 +31,17 @@ name: advisory-review-agent
 on:
   workflow_call:
     inputs:
+      allow_labeled_forks:
+        description: >-
+          Review a fork PR when the triggering event is a label being applied.
+          Applying a label needs triage access, so the label is the maintainer's
+          approval; filter the label name in the caller's `if:`. The fork's head
+          is never checked out (the session reads the base tree plus the diff),
+          but its diff reaches the model, and its key, through the prompt. Needs
+          a reviewer_ref that pins the labeled head (0.5.1 or later).
+        type: boolean
+        required: false
+        default: false
       bot_login:
         description: Login of your bot account — its PRs are never reviewed. Required.
         type: string
@@ -153,9 +167,13 @@ jobs:
     continue-on-error: true
     # Backstop a hung session so it can't burn the 360-min default runner budget.
     timeout-minutes: 70
-    # Fork PRs must not reach any secret. `pull_request_target` runs in the
-    # base repo's context, so this gate is what closes the pwn-request hole.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Fork PRs must not reach any secret unasked. `pull_request_target` runs in
+    # the base repo's context, so this gate is what closes the pwn-request hole;
+    # a maintainer's label opens it per PR when the caller opts in. A fork's
+    # code is never checked out (the session gets the base tree and the diff).
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository ||
+      (inputs.allow_labeled_forks && github.event.action == 'labeled')
     # READ-ONLY: the session runs here, so the job token must not be worth
     # stealing. pull-requests:read lets the CLI fetch the PR metadata/diff.
     permissions:
@@ -163,6 +181,9 @@ jobs:
       pull-requests: read
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      # the head the triggering event saw; the review covers it or nothing
+      REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      REVIEW_CHECKOUT_BASE: ${{ github.event.pull_request.head.repo.full_name != github.repository && '1' || '' }}
       BACKEND: ${{ inputs.backend }}
     steps:
       # Checks out the reviewer, never the pull request's code for execution.
@@ -176,10 +197,10 @@ jobs:
           ssh-key: ${{ secrets.checkout_ssh_key }}
           path: .autoresearch
           persist-credentials: false
-      - name: Check out the PR head (read-only; never executed)
+      - name: Check out the PR head, or the base for a fork (read-only)
         uses: actions/checkout@v7
         with:
-          ref: refs/pull/${{ env.PR_NUMBER }}/head
+          ref: ${{ env.REVIEW_CHECKOUT_BASE == '1' && github.event.pull_request.base.sha || env.REVIEW_HEAD_SHA }}
           path: pr-head
           persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.0
@@ -291,7 +312,9 @@ jobs:
     needs: session
     # inputs.post=false -> emit-only: a lens opinion whose artifact the
     # summarizer merges; nothing is posted from this call.
-    if: ${{ inputs.post && !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      ${{ inputs.post && !cancelled() && (github.event.pull_request.head.repo.full_name == github.repository ||
+      (inputs.allow_labeled_forks && github.event.action == 'labeled')) }}
     continue-on-error: true
     timeout-minutes: 15
     # The write half: no model session runs in this job.
@@ -300,6 +323,7 @@ jobs:
       pull-requests: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Check out the reviewer
         uses: actions/checkout@v7

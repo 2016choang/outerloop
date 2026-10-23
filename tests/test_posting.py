@@ -31,7 +31,9 @@ class _FakeClient:
     def comment(self, repo: str, number: int, body: str) -> None:
         self.posted.append({"body": body, "kind": "comment"})
 
-    def create_pr_review(self, repo: str, number: int, body: str, comments: Any = None) -> None:
+    def create_pr_review(
+        self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+    ) -> None:
         self.posted.append({"body": body, "kind": "review", "inline": comments or []})
 
 
@@ -165,7 +167,9 @@ def test_post_round_review_posts_inline_on_success() -> None:
 
 def test_post_round_review_falls_back_to_a_comment_carrying_full_findings() -> None:
     class _NoInline(_FakeClient):
-        def create_pr_review(self, repo: str, number: int, body: str, comments: Any = None) -> None:
+        def create_pr_review(
+            self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+        ) -> None:
             raise GitHubError(422, "/repos/org/repo", "unprocessable")
 
     client = _NoInline()
@@ -182,6 +186,33 @@ def test_post_round_review_falls_back_to_a_comment_carrying_full_findings() -> N
     assert label == "**Round 1**"
     (posted,) = client.posted  # the failed inline review fell back to an issue comment
     assert posted["kind"] == "comment" and "FULL findings in the fallback" in posted["body"]
+
+
+def test_pinned_review_has_no_fallback_once_the_head_moved() -> None:
+    # a push can be why GitHub refused the pinned review; a plain comment
+    # would put the old findings on the new head
+    class _Moved(_FakeClient):
+        def create_pr_review(
+            self, repo: str, number: int, body: str, comments: Any = None, commit_id: str = ""
+        ) -> None:
+            raise GitHubError(422, "/repos/org/repo", "commit_id is not part of the pull request")
+
+        def get_pull_request(self, repo: str, number: int) -> dict:
+            return {"head": {"sha": "newhead"}}
+
+    client = _Moved()
+    posting.post_round_review(
+        client,  # type: ignore[arg-type]
+        "org/repo",
+        1,
+        _MARKER,
+        f"{_MARKER}\nsummary only",
+        [],
+        {"head": {"sha": "oldhead"}},
+        fallback_body=f"{_MARKER}\nfindings",
+        commit_id="oldhead",
+    )
+    assert client.posted == []
 
 
 def test_skip_stub_redacts_the_provided_key_any_provider() -> None:
