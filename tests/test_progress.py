@@ -114,6 +114,8 @@ def test_confirm_precision_provenance_and_seed_roundtrip(tmp_path):
     assert "main commit" in md and "[1](https://github.com/org/repo/commit/1)" in md
     imported = replace(e, main_commit="", measured_sha="")
     assert "provenance unknown" in render_markdown({"bench": imported}, "org/repo")
+    unimproved_import = replace(imported, best=imported.baseline)
+    assert "provenance unknown" in render_markdown({"bench": unimproved_import}, "org/repo")
     # a fresh repo's baseline row has no improvement to trace
     fresh = replace(imported, best=imported.baseline, best_run="baseline")
     row = render_markdown({"bench": fresh}, "org/repo").splitlines()[-4]
