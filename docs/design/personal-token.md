@@ -243,6 +243,15 @@ Each step is one PR with its tests.
    the person opens an issue, comments on the kernel's PR and sees the
    author answer. The branch-protection bypass is checked there too.
 
+The live check ran on a private scratch repository with a local
+deployment in personal mode. The kernel's PR carried the kernel marker
+under the person's login. The person's unmarked comment on it woke the
+author, whose marked reply answered that comment and woke nothing. The
+person's issue was claimed, and after three runs that ended without a
+submit, intake stopped at its attempt cap, so claim comments posted as the
+person were counted as the kernel's. The bypass could not be checked:
+branch protection on a private repository needs a paid plan.
+
 ## Open questions
 
 - Should the local forge adopt the same rule? `outerloop pr comment`

@@ -266,8 +266,10 @@ try-out.
       `outerloop init --forge local`, `outerloop pr`)
 - [ ] Local forge follow-ups: human work orders (issue intake, the steward
       lane) on the local backend; a live local deployment run
-- [ ] Personal-token mode: the adopter's own GitHub login instead of a
-      GitHub App, with kernel posts told apart by their marker (#488)
+- [x] Personal-token mode (design/personal-token.md, #558, #559): the
+      adopter's own GitHub login instead of a GitHub App, with kernel posts
+      told apart by their marker (`outerloop init --personal`); checked
+      live on a scratch repository
 
 ## Meta: benchmarking autoresearch itself (maintainer direction 2026-08-08)
 
