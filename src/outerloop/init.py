@@ -994,7 +994,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--author-key-file",
         dest="author_key_file",
-        help="path to an existing file holding the author's model API key",
+        help="path to an existing file holding the author's model API key (for claude, "
+        "a token from `claude setup-token` also works)",
     )
     parser.add_argument(
         "--yes", "-y", action="store_true", help="non-interactive: use flags, do not prompt"
@@ -1109,10 +1110,13 @@ def main(argv: list[str] | None = None) -> int:
         # absolute: climb jobs read the key from their own flight directory
         answers.author_key_file = str(key_file.absolute())
     if not answers.author_key_file and interactive and not args.github_app:
-        pasted = getpass.getpass(
-            f"API key for the {answers.author_backend or AUTHOR_BACKENDS[0]} author "
-            "(hidden; blank to set later): "
-        ).strip()
+        backend = answers.author_backend or AUTHOR_BACKENDS[0]
+        what = (
+            "API key or `claude setup-token` token for the claude author"
+            if backend == "claude"
+            else f"API key for the {backend} author"
+        )
+        pasted = getpass.getpass(f"{what} (hidden; blank to set later): ").strip()
         if pasted:
             key_path = write_author_key(
                 answers.author_backend,

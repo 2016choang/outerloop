@@ -84,6 +84,47 @@ def test_session_env_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
     assert "CUDA_VISIBLE_DEVICES=" in seen  # the session sees no GPU
 
 
+@pytest.mark.parametrize(
+    ("key", "present", "absent"),
+    [
+        ("sk-ant-oat01-secret", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        ("sk-ant-api03-secret", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+    ],
+)
+def test_auth_variable_follows_the_key_prefix(
+    tmp_path: Path, key: str, present: str, absent: str
+) -> None:
+    """A `claude setup-token` token is a subscription OAuth credential, so the
+    CLI reads it from CLAUDE_CODE_OAUTH_TOKEN, never ANTHROPIC_API_KEY."""
+    binary = fake_claude(tmp_path, json.dumps(CANNED))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ClaudeCodeHarness(api_key=key, binary=binary).run("task", ws)
+    seen = (tmp_path / "seen_env").read_text().splitlines()
+    assert f"{present}={key}" in seen
+    assert not any(line.startswith(f"{absent}=") for line in seen)
+
+
+@pytest.mark.parametrize(
+    ("key", "flag", "other"),
+    [
+        ("sk-ant-oat01-secret", "--safe-mode", "--bare"),
+        ("sk-ant-api03-secret", "--bare", "--safe-mode"),
+    ],
+)
+def test_judge_isolation_flag_follows_the_key(
+    tmp_path: Path, key: str, flag: str, other: str
+) -> None:
+    """--bare never reads an OAuth token, so a judge on a subscription token
+    runs --safe-mode, which also skips CLAUDE.md, hooks, plugins and MCP."""
+    binary = fake_claude(tmp_path, json.dumps(CANNED))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ClaudeCodeHarness(api_key=key, binary=binary, bare=True).run("task", ws)
+    argv = (tmp_path / "seen_argv").read_text().split()
+    assert flag in argv and other not in argv
+
+
 def test_home_is_redirected_per_session(tmp_path: Path) -> None:
     """A session's HOME must not be the real home — `~`-relative key files
     (harness key, bot PAT, ssh) must resolve nowhere."""

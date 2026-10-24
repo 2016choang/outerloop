@@ -1,6 +1,6 @@
 # Getting started
 
-This page walks you through one Outerloop run end to end: install the package, declare a contract in your repository, run guided setup, and watch the loop make its first climb. You need one machine, a GitHub repository you administer, and Anthropic API keys for the author and the review judges.
+This page walks you through one Outerloop run end to end: install the package, declare a contract in your repository, run guided setup, and watch the loop make its first climb. You need one machine, a GitHub repository you administer, and separate Anthropic credentials for the author and the review judges: API keys, or subscription tokens from `claude setup-token`.
 
 The tutorial uses the simplest supported setup: everything runs on your machine. [Install](install.md) covers Slurm clusters, upgrades and the other deployment shapes.
 
@@ -12,7 +12,7 @@ To watch a run before you write a contract, the [quickstart repository](https://
 - `uv` on PATH. Install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` and check `uv --version`. Every evaluation runs through `uv run`, and `outerloop start` refuses to launch without it.
 - A GitHub repository you administer, so you can install a GitHub App on it and merge pull requests.
 - A benchmark command in that repository that prints a JSON metric, such as `{"success_rate": 0.42}`.
-- An Anthropic API key for the author model, and a second key for the review judges. Spend-capped keys are recommended.
+- An Anthropic credential for the author model and a separate one for the review judges: an API key, or a subscription token from `claude setup-token`. Spend-capped keys are recommended.
 
 The loop opens pull requests, comments and pushes branches as a GitHub identity that is not yours. On the way you create that identity with `outerloop init`.
 
@@ -91,7 +91,7 @@ The wizard asks for the deployment settings and writes `~/.config/outerloop/.env
 - Enter for the author backend, keeping `claude`.
 - Enter for the author model to take the backend's default, or name one.
 - The model ID your key serves for the Claude model.
-- Your Anthropic key when it asks for the author's key. The prompt hides it.
+- Your Anthropic API key or `claude setup-token` token when it asks for the author's key. The prompt hides it.
 - Enter for `app` at the auth prompt.
 
 On Linux with [Apptainer](https://apptainer.org) installed, init also offers to download the agent image, about 200 MB, so sessions run contained. Accept unless you have a reason not to. Without an image, on macOS for example, runs stay uncontained and the verification panel is off, and a pull request opened without a panel says so.

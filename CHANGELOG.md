@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- A Claude author can authenticate with a subscription token from `claude setup-token` (`sk-ant-oat...`): the harness passes it as `CLAUDE_CODE_OAUTH_TOKEN` instead of `ANTHROPIC_API_KEY`. `init` accepts one. A panel judge on such a token runs `claude --safe-mode` instead of `--bare`, which never reads OAuth tokens; both skip the checkout's CLAUDE.md, hooks, plugins and MCP servers. `--safe-mode` needs a Claude Code release that has it.
 - On macOS without an image, sessions, evaluations and panel lenses run under a packaged Seatbelt profile (`sandbox-exec`, #292): they write only the workspace and a scratch directory, read only system and toolchain paths, and connect out only to TCP port 443, DNS and local ports. Linux and Apptainer runs are unchanged.
 - Kernel events now append to a per-run `trajectory.jsonl` with sequence numbers and a SHA-256 chain. `outerloop trajectory <run-id> [--verify] [--json]` reads it without changing run state. Operational files and their formats are unchanged; older kernels ignore the new file. Upgrading: runs started before this kernel have no trajectory and read as "no trajectory" until their next recorded event. No backfill is attempted.
 - Add a printable agent-text inventory and protocol wording lint, with clearer refusal recovery guidance (#487, parts 1–2).
