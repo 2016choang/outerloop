@@ -9,7 +9,8 @@ description: Set up Outerloop when the user asks to use it on a repository, with
    stop and explain what to install. Follow the
    [install guide](https://github.com/outerloop-science/outerloop/blob/main/docs/install.md).
 2. Install the PyPI package in the user's Python environment with
-   `pip install outerloop-science`, then check `outerloop --version` and
+   `pip install "outerloop-science>=0.5"` (the local forge needs 0.5 or later),
+   then check `outerloop --version` and
    `outerloop init --help`. Use an existing virtual environment; if none is
    suitable, ask which environment to use. Do not change project dependencies
    or use sudo to work around an installation error.
