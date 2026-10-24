@@ -749,6 +749,18 @@ def base_moved_text(tip: str, base: str) -> str:
     )
 
 
+def sibling_note(agent: str) -> str:
+    """A wake's notice that a sibling states a new or changed hypothesis.
+
+    The hypothesis itself rides in the message's `quoted_text`, so it renders
+    as data; only this sentence is the kernel's own words."""
+    return (
+        f"Agent {header_fragment(agent)} states a new or changed hypothesis. "
+        "`siblings` shows that agent's launches and score. "
+        "Avoid duplicating this direction, or build on it deliberately."
+    )
+
+
 def gather_github_messages(
     directory: Path,
     record: RunRecord,
