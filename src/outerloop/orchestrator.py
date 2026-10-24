@@ -1950,13 +1950,16 @@ def attempt_once(
             ):
                 request = dc_replace(
                     request,
-                    problem="self_report requires finite claimed_value and claimed_baseline",
+                    problem=(
+                        "self_report requires finite claimed_value and claimed_baseline; "
+                        "use `submit --claimed-value <number> --claimed-baseline <number>`."
+                    ),
                 )
             if request.withdraw and not request.problem:
                 problem = (
                     on_withdraw(request.withdraw)
                     if on_withdraw is not None
-                    else "Withdrawal requires an open PR."
+                    else "Withdrawal requires an open PR. Use `stop` without --withdraw instead."
                 )
                 request = dc_replace(request, problem=problem)
             if request.problem:
@@ -1976,7 +1979,10 @@ def attempt_once(
                         time.time(),
                         f"refusal:{session.session_id}:{inbox_seq}",
                         {
-                            "text": "Your syscall request was REFUSED and nothing was launched.",
+                            "text": (
+                                "Your syscall request was REFUSED and nothing was launched. "
+                                "Fix the request before retrying."
+                            ),
                             "quoted_text": request.problem,
                         },
                         origin=inbox_dir.name,
@@ -2229,7 +2235,10 @@ def attempt_once(
                     time.time(),
                     f"refusal:{session.session_id}:{inbox_seq}",
                     {
-                        "text": "Your syscall request was REFUSED and nothing was launched.",
+                        "text": (
+                            "Your syscall request was REFUSED and nothing was launched. "
+                            "Fix the request before retrying."
+                        ),
                         "quoted_text": problem,
                     },
                     origin=inbox_dir.name,
@@ -2392,7 +2401,8 @@ def attempt_once(
                             {
                                 "text": (
                                     "Your sibling launch request was REFUSED "
-                                    "and nothing was launched."
+                                    "and nothing was launched. "
+                                    "Wait for capacity before retrying the launch."
                                 ),
                                 "quoted_text": str(exc),
                             },
