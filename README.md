@@ -41,8 +41,10 @@ outerloop init --forge local --compute local --no-image --target me/quickstart \
 outerloop start
 ```
 
-Without a container the author's session runs as your user and can read any file
-your account can, so give it a spend-capped key.
+On macOS, sessions and evaluations run under a Seatbelt profile: they write their
+workspace and a scratch directory, read system and toolchain paths, and cannot read
+the rest of your home. On Linux without a container they can read any file your
+account can. Either way, use a spend-capped API key.
 
 For your own repository: three commands and one file. You need a repo with a benchmark command, an
 API key for the model that will write the code, and a Slurm cluster or one
@@ -126,8 +128,8 @@ build. See [the reviewer guide](https://docs.outerloop.science/reviewer/).
   output are rendered to the agent as fenced data, not instructions, which
   lowers the risk of injected text being followed without guaranteeing it.
   A contained session gets no GitHub credential in its environment and
-  cannot read the operator's key files; an uncontained local session runs
-  as your user and can read any file you can, key files included.
+  cannot read the operator's key files. Without a container, a macOS session
+  runs under Seatbelt; a Linux session can read any file you can, key files included.
 - **Budgets in code.** Launches, GPU-hours, and runs per week are enforced
   by the kernel, not left to the agent.
 - **No model lock-in.** Claude Code, Codex, and hermes-agent are wired

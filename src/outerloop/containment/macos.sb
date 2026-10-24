@@ -1,0 +1,18 @@
+(version 1)
+(deny default)
+(import "system.sb")
+(allow process-fork process-exec signal)
+(allow sysctl-read mach-lookup ipc-posix-shm ipc-posix-sem system-socket iokit-open)
+(allow file-read-metadata)
+(allow file-read*
+  (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System")
+  (subpath "/Library") (subpath "/opt/homebrew") (subpath "/private/etc")
+  (subpath "/private/var/db") (subpath "/dev")
+  ; READ_ONLY_ROOTS
+)
+(allow file-read* file-write*
+  (subpath (param "WORKSPACE")) (subpath (param "SCRATCH"))
+  (literal "/dev/null") (literal "/dev/tty") (subpath (param "USER_CACHE")))
+; ports, not protocols: TCP 443 anywhere, DNS, and local endpoints
+(allow network-outbound (remote tcp "*:443") (remote udp "*:53")
+  (remote tcp "localhost:*") (literal "/private/var/run/mDNSResponder"))

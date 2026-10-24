@@ -10,7 +10,7 @@ Outerloop is self-hosted. You run it, with your keys, on your compute, against y
 - `uv` on PATH, or in the directory its installer uses. Evaluations and launches run through `uv run`, and `outerloop start` stops with a message when it cannot find it.
 - A GitHub repository you administer.
 - An API key for the author's model, and separate keys for the judges.
-- For contained runs, Linux with [Apptainer](https://apptainer.org). macOS has no Apptainer, so runs there stay uncontained.
+- For contained runs, Linux with [Apptainer](https://apptainer.org). macOS uses Seatbelt through `/usr/bin/sandbox-exec` without a VM.
 
 The orchestrator is CPU-only and makes outbound connections only. Anywhere that can reach GitHub and your model provider works.
 
@@ -46,7 +46,7 @@ With `OUTERLOOP_COMPUTE=local`, or with no `sbatch` on PATH, `outerloop start` r
 
 Local compute has no lanes, so GPU benchmarks need no GPU partition: evaluations and the author's launches run on the machine's own GPUs, shared first come first served. Launch arrays run their tasks in parallel as GPUs become available, and `OUTERLOOP_LOCAL_GPUS` overrides automatic detection through `nvidia-smi` (`0` disables GPU allocation). The pool also follows the loop's own `CUDA_VISIBLE_DEVICES`: start each deployment with its own list (for example `0,1` and `2,3`) to give it its own GPUs. The author's session itself starts with `CUDA_VISIBLE_DEVICES` empty, so an experiment that needs a GPU goes through the author's `launch` syscall, where it is recorded and metered against `gpu_hours_per_run`. Uncontained, that is a default the session could reset; containment is what keeps the GPU out of the session, which is one more reason to run with the image.
 
-Without a container image, sessions and evaluations run as your account on your machine, and the loop says so once at start. A session gets a scrubbed environment and its own home directory, but it can read any file your account can, keys included, so use a spend-capped key. The verification panel is off in this mode unless you set `OUTERLOOP_PANEL_UNCONTAINED=1`, because an uncontained judge holds a shell next to its own key file. A pull request opened without a panel says so. A Codex or Hermes author needs the image in every mode. For priorities, walltime accounting, or several machines, use Slurm.
+Without a container image, sessions and evaluations run as your account on your machine, and the loop says so once at start. On macOS a Seatbelt profile (`/usr/bin/sandbox-exec`) confines them: they write only the workspace and a scratch directory, read only system and toolchain paths, and connect out only to TCP port 443, DNS and local ports (a local model endpoint). If `sandbox-exec` is missing, the loop warns and runs them uncontained. The profile does not open the keychain, so use an API key rather than a subscription login. On Linux they get a scrubbed environment and their own home but can read any file your account can, keys included. Use a spend-capped key. The verification panel is off in this mode unless you set `OUTERLOOP_PANEL_UNCONTAINED=1`, because an uncontained judge holds a shell next to its own key file. A pull request opened without a panel says so. A Codex or Hermes author needs the image in every mode. For priorities, walltime accounting, or several machines, use Slurm.
 
 ### One machine as its own Slurm cluster
 
@@ -208,7 +208,7 @@ GPU jobs request at least 8 cores and 64 GB of host memory per GPU. On nodes wit
 
 ## The agent image
 
-On a cluster, evals and launches run inside the Apptainer image at `OUTERLOOP_IMAGE` (default `~/outerloop-images/agent-py312.sif`), in a jail that binds only the checked-out tree. An eval that needs data must fetch it into the tree. The published image lives at [huggingface.co/outerloop-science/agent-image](https://huggingface.co/outerloop-science/agent-image), built from `containers/agent-py312.def`. On Linux with Apptainer installed, `outerloop init` downloads it (about 200 MB), verifies its published checksum and records it. `--image` points at your own, and `--no-image` keeps runs uncontained even when an image is on disk by writing `OUTERLOOP_IMAGE=`.
+On a cluster, evals and launches run inside the Apptainer image at `OUTERLOOP_IMAGE` (default `~/outerloop-images/agent-py312.sif`), in a jail that binds only the checked-out tree. An eval that needs data must fetch it into the tree. The published image lives at [huggingface.co/outerloop-science/agent-image](https://huggingface.co/outerloop-science/agent-image), built from `containers/agent-py312.def`. On Linux with Apptainer installed, `outerloop init` downloads it (about 200 MB), verifies its published checksum and records it. `--image` points at your own, and `--no-image` skips Apptainer even when an image is on disk (macOS still uses Seatbelt when available) by writing `OUTERLOOP_IMAGE=`.
 
 Only the local loop falls back to running uncontained on its own. On Slurm the tick does not service a target without an image, and its log names the setting below, so a lost image never silently drops containment. Codex and Hermes authors need the image in every mode.
 

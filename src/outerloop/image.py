@@ -80,8 +80,8 @@ def install_hint() -> str:
     is why init never runs it."""
     if sys.platform == "darwin":
         return (
-            "macOS has no Apptainer; runs stay uncontained here (a macOS containment is on the\n"
-            "  roadmap). A Linux machine, or Slurm, runs contained."
+            "macOS has no Apptainer; runs without an image use the kernel's Seatbelt profile\n"
+            "  (sandbox-exec) instead. A Linux machine, or Slurm, runs in the image."
         )
     dist, _version = _linux_flavor()
     apparmor_note = (

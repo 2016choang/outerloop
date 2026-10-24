@@ -42,6 +42,7 @@ from outerloop.compute import (
     local_mode,
     quote_command,
 )
+from outerloop.containment import seatbelt_available
 from outerloop.disk import DEFAULT_MIN_FREE_BYTES, check_disk
 from outerloop.endpoint_wait import EndpointWaitReason
 from outerloop.forge import (
@@ -3747,12 +3748,15 @@ def _service_spec_from_env(
         if not _UNCONTAINED_WARNED:
             _UNCONTAINED_WARNED = True
             log.warning(
-                "%s; sessions and evaluations run as this account and can read its "
-                "files; the panel is %s; a codex or hermes author needs the "
-                "image (docs/install.md, running without a container)",
+                "%s; sessions and evaluations %s; the panel is %s; "
+                "a codex or hermes author needs the image "
+                "(docs/install.md, running without a container)",
                 "OUTERLOOP_UNCONTAINED=1: no container"
                 if uncontained
                 else f"local mode: no container image at {image}",
+                "use macOS Seatbelt (workspace, scratch and runtime reads; HTTPS/DNS egress)"
+                if seatbelt_available()
+                else "run as this account and can read its files",
                 "on by OUTERLOOP_PANEL_UNCONTAINED=1"
                 if os.environ.get("OUTERLOOP_PANEL_UNCONTAINED") == "1"
                 else "off (OUTERLOOP_PANEL_UNCONTAINED=1 turns it on)",

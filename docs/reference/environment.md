@@ -206,8 +206,9 @@ PAT rather than a GitHub App. One identity or the other, never both.
 ### `OUTERLOOP_IMAGE`
 
 The Apptainer image sessions and evals run in. An empty value is the
-off-switch for local Claude runs: they stay uncontained even when an image
-is on disk. On Slurm the tick does not service a target without an image,
+off-switch for local Claude runs: they skip Apptainer even when an image
+is on disk. Without an image, macOS runs sessions and evaluations under the packaged
+Seatbelt profile; Linux runs them uncontained. On Slurm the tick does not service a target without an image,
 and Codex and Hermes authors need one in every mode.
 
 - Default: `~/outerloop-images/agent-py312.sif`

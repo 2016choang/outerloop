@@ -110,3 +110,12 @@ def codex_host(tmp_path, monkeypatch):
     host.chmod(0o755)
     monkeypatch.setattr(CodexHarness, "_code_mode_host", lambda self: host)
     return host
+
+
+@pytest.fixture(autouse=True)
+def _mock_seatbelt_for_unit_tests(request, monkeypatch):
+    """Fake-process tests inspect bare argv; policy tests exercise the OS wrapper."""
+    if request.node.get_closest_marker("seatbelt"):
+        return
+    monkeypatch.setattr("outerloop.orchestrator.seatbelt_wrap", lambda argv, **kwargs: argv)
+    monkeypatch.setattr("outerloop.harness.session_wrap", lambda argv, *args, **kwargs: argv)
