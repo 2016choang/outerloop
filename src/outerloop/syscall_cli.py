@@ -156,7 +156,9 @@ def cmd_stop(root: Path, args: argparse.Namespace) -> str:
         except (OSError, ValueError):
             open_pr = False
         if not open_pr:
-            raise ToolError("Withdrawal requires an open PR.")
+            raise ToolError(
+                "Withdrawal requires an open PR. Use `stop` without --withdraw instead."
+            )
         if not args.withdraw.strip() or len(args.withdraw) > MAX_REPLY_CHARS:
             raise ToolError(f"withdrawal reason must contain 1 to {MAX_REPLY_CHARS} chars")
     staged = _load_staged(root)
@@ -283,7 +285,9 @@ def cmd_message(root: Path, args: argparse.Namespace) -> str:
     if args.to not in ("thread", "self") and not _policy(root).get("channels", {}).get(
         "messages", True
     ):
-        raise ToolError("inter-agent messages disabled by channels.messages")
+        raise ToolError(
+            "inter-agent messages disabled by channels.messages; use --to self or --to thread."
+        )
     if args.reply_to is not None and not any(m["seq"] == args.reply_to for m in _messages(root)):
         raise ToolError(f"unknown inbox message #{args.reply_to}")
     if (args.text is None) == (args.file is None):

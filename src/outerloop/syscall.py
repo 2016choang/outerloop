@@ -894,12 +894,13 @@ def budget_error(
     if sleeps_used + 1 > sleep_budget:
         return (
             f"sleep budget exhausted ({sleeps_used}/{sleep_budget} used): "
-            "conclude with what you have"
+            "use `stop` with what you have"
         )
     if launches_used + len(request.launches) > launch_budget:
         return (
             f"launch budget would be exceeded: {launches_used} used + "
-            f"{len(request.launches)} requested > {launch_budget} allowed"
+            f"{len(request.launches)} requested > {launch_budget} allowed; "
+            "use fewer launches or `stop`."
         )
     if gpu_hour_budget is not None and (gpus > 0 or any(g > 0 for g in suite_gpus)):
         cost = gpu_hours_cost(
@@ -1016,7 +1017,12 @@ def _deliver_artifacts(
     channel = workspace / chan
     results_root = channel / RESULTS_SUBDIR
     if channel.is_symlink() or results_root.is_symlink():
-        return (), (f"artifacts not delivered: {chan} channel is a symlink (refused)",)
+        return (), (
+            (
+                f"artifacts not delivered: {chan} channel is a symlink (refused); "
+                "use real directories for the channel and its results path"
+            ),
+        )
 
     # an earlier delivery under this name goes first, even when this job wrote
     # nothing, so a re-used name never shows stale results beside fresh ones

@@ -1172,7 +1172,10 @@ def deliver_messages(
                     time.time(),
                     f"message-refused:{record.run_id}:{entry['counter']}",
                     {
-                        "text": f"Message #{index} was not delivered: {reason}.",
+                        "text": (
+                            f"Message #{index} was not delivered: {reason}. "
+                            "Use this reason to revise your message or recipient."
+                        ),
                         "quoted_text": f"Recipient: {item.get('to')!r}",
                         "context_only": True,
                     },
@@ -1192,7 +1195,13 @@ def deliver_messages(
             if destination not in ("thread", "self", record.agent_id) and not record.channels.get(
                 "messages", True
             ):
-                refuse(index, "inter-agent messages disabled by channels.messages")
+                refuse(
+                    index,
+                    (
+                        "inter-agent messages disabled by channels.messages; "
+                        "use --to self or --to thread."
+                    ),
+                )
                 continue
             reference = ""
             n = item.get("reply_to")
@@ -1232,7 +1241,13 @@ def deliver_messages(
                 refuse(index, "no live run on this target (absent or ended)")
                 continue
             if recipient.run_id != record.run_id and not recipient.channels.get("messages", True):
-                refuse(index, "recipient has inter-agent messages disabled by channels.messages")
+                refuse(
+                    index,
+                    (
+                        "recipient has inter-agent messages disabled by channels.messages; "
+                        "use another recipient."
+                    ),
+                )
                 continue
             key = f"agent-msg:{record.run_id}:{entry['counter']}"
             entry["recipient"] = recipient.run_id
@@ -1291,7 +1306,13 @@ def deliver_messages(
                         )
                     ):
                         item = entry["item"]
-                        refuse(index, "inter-agent messages disabled by channels.messages")
+                        refuse(
+                            index,
+                            (
+                                "inter-agent messages disabled by channels.messages; "
+                                "use --to self or --to thread."
+                            ),
+                        )
                         append(run_dir, Message(**entry["message"]))
                     elif (
                         recipient.run_id != record.run_id
@@ -1306,7 +1327,13 @@ def deliver_messages(
                         >= 4
                     ):
                         item = entry["item"]
-                        refuse(index, "recipient already has 4 undelivered messages from you")
+                        refuse(
+                            index,
+                            (
+                                "recipient already has 4 undelivered messages from you; "
+                                "wait for delivery before retrying."
+                            ),
+                        )
                         message = Message(**entry["message"])
                         append(run_dir, message)
                     else:
@@ -2439,7 +2466,10 @@ def _admit_working_tree(ws: Workspace, contract: Contract, base_branch: str, lin
     common = _scope_revision(ws, f"refs/remotes/origin/{base_branch}", "HEAD")
     violations = _out_of_scope_working_tree(ws, contract, common, line_ref)
     if violations:
-        raise ValueError(f"snapshot skipped: scope admission refused: {', '.join(violations)}")
+        raise ValueError(
+            f"snapshot skipped: scope admission refused: {', '.join(violations)}; "
+            "fix the out-of-scope changes before retrying"
+        )
 
 
 def _push_line_snapshot(
@@ -4255,7 +4285,9 @@ def publish(
             github.comment(record.target, number, f"{REPLY_MARKER}\n{note}")
 
     if not result.measured_paths:
-        return refuse("Publish refused: no code change; metric noise.")
+        return refuse(
+            "Publish refused: no code change; metric noise. Submit a code change or use `stop`."
+        )
 
     try:
         ws.fetch_origin()
