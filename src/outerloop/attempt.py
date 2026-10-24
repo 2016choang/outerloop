@@ -1324,11 +1324,12 @@ def deliver_messages(
                         append(run_dir, message)
                     else:
                         append(recipient_dir, message)
-                        record_event(
-                            run_dir,
-                            "syscall.decision",
-                            {"verb": "message", "outcome": "accepted", "reason": ""},
-                        )
+                        if message.kind == "agent-message":
+                            record_event(
+                                run_dir,
+                                "syscall.decision",
+                                {"verb": "message", "outcome": "accepted", "reason": ""},
+                            )
                         if recipient.run_id != record.run_id:
                             append(
                                 run_dir,

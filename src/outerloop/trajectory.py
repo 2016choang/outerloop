@@ -45,8 +45,8 @@ def record(
     The directory name is the run id. The lock covers reading and appending;
     malformed lines remain visible to verify, including after recovery.
     """
-    path = run_dir / LEDGER
     try:
+        path = run_dir / LEDGER
         run_dir.mkdir(parents=True, exist_ok=True)
         with (run_dir / "trajectory.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -79,8 +79,8 @@ def record(
                     _warn_cap(path)
                     return
                 stream.write(encoded)
-    except OSError as exc:
-        log.warning("could not write trajectory %s: %s", path, exc)
+    except Exception as exc:
+        log.warning("could not write trajectory in %s: %s", run_dir, exc)
 
 
 def _warn_cap(path: Path) -> None:
@@ -157,10 +157,10 @@ def session_event(
     outcome: str = "",
 ) -> None:
     """Harness invocations outside a kernel run have no run trajectory."""
-    directory = next((p for p in workspace.parents if p.parent.name == "runs"), None)
-    if directory is None:
-        return
     try:
+        directory = next((p for p in workspace.parents if p.parent.name == "runs"), None)
+        if directory is None:
+            return
         state = json.loads((directory / "state.json").read_text())
         data = {
             "backend": backend,
@@ -180,5 +180,5 @@ def session_event(
         elif outcome:
             data.update(outcome=outcome, is_error=True)
         record(directory, type, data, refs=refs)
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
+    except Exception as exc:
         log.warning("could not record session trajectory: %s", exc)

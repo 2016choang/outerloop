@@ -41,7 +41,24 @@ def _append(run_dir: Path, rows: list[dict[str, Any]]) -> None:
             record_event(
                 run_dir,
                 "launch.submit" if row["event"] == "submitted" else "launch.result",
-                row,
+                {
+                    key: row[key]
+                    for key in (
+                        "event",
+                        "sleep",
+                        "name",
+                        "job_ids",
+                        "commit",
+                        "author",
+                        "minutes",
+                        "array",
+                        "concurrency",
+                        "state",
+                        "exit_code",
+                        "why",
+                    )
+                    if key in row
+                },
                 at=row["at"],
             )
 

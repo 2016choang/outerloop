@@ -72,3 +72,14 @@ def test_concurrent_appends_and_best_effort_limits(tmp_path: Path, monkeypatch, 
     blocked.write_text("")
     trajectory.record(blocked, "wake", {})
     assert "could not write trajectory" in caplog.text
+
+
+def test_non_serializable_data_is_best_effort(tmp_path: Path, caplog) -> None:
+    circular: dict = {}
+    circular["self"] = circular
+    for value in (tmp_path, object(), circular):
+        trajectory.record(tmp_path, "measure", {"value": value})
+    assert caplog.text.count("could not write trajectory") == 3
+    assert trajectory.read(tmp_path) == []
+    trajectory.record(tmp_path, "wake", {})
+    assert trajectory.verify(tmp_path, tmp_path.name) == []

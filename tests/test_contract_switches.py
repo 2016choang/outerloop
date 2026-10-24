@@ -97,6 +97,21 @@ def test_self_report_skips_measurement_panel_and_compute(
     assert result.provenance == "self_reported"
     assert result.candidate == candidate and result.baseline == baseline
     assert result.candidate_sha and result.measured_paths
+    from outerloop.trajectory import read
+    from test_orchestrator import run_dir
+
+    measures = [event["data"] for event in read(run_dir(tmp_path)) if event["type"] == "measure"]
+    assert measures == [
+        {
+            "self_reported": True,
+            "baseline": baseline,
+            "candidate": candidate,
+            "metric": "mean_tour_length",
+            "credited": True,
+            "outcome": "improved",
+            "head_sha": result.candidate_sha,
+        }
+    ]
     assert evaluator.calls == [] and result.panel_rounds == 0
     assert meters[-1] == (0, 1, 0.0)
     assert "self-reported" in result.report(CONFIG)

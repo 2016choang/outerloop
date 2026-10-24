@@ -1534,10 +1534,19 @@ def attempt_once(
         )
 
     def _decision(request: SyscallRequest, reason: str = "") -> None:
-        verbs = ["submit"] if request.submit else ["stop"] if request.end else []
-        if request.launches:
-            verbs.append("launch")
-        for verb in verbs or ["launch"]:
+        if request.problem:
+            verbs = ["request"]
+        else:
+            verbs = []
+            if request.submit:
+                verbs.append("submit")
+            elif request.end:
+                verbs.append("withdraw" if request.withdraw else "stop")
+            if request.launches:
+                verbs.append("launch")
+            elif request.sleep and not verbs:
+                verbs.append("sleep")
+        for verb in verbs or ["request"]:
             record_event(
                 inbox_dir,
                 "syscall.decision",
@@ -2344,6 +2353,19 @@ def attempt_once(
                     claimed_base, claimed, bench.direction, bench.min_delta, bench.min_delta_rel
                 )
             )
+            record_event(
+                inbox_dir,
+                "measure",
+                {
+                    "self_reported": True,
+                    "baseline": claimed_base,
+                    "candidate": claimed,
+                    "metric": bench.metric,
+                    "credited": passed,
+                    "outcome": "improved" if passed else "no-improvement",
+                    "head_sha": candidate_sha,
+                },
+            )
             return AttemptResult(
                 outcome="improved" if passed else "no-improvement",
                 baseline=claimed_base,
@@ -2397,6 +2419,21 @@ def attempt_once(
                     measured_paths=measured,
                     measurer=measurer,
                     min_relative_improvement=config.min_relative_improvement,
+                )
+                verdict_outcome = (
+                    outcome.outcome if isinstance(outcome, AttemptResult) else "improved"
+                )
+                record_event(
+                    inbox_dir,
+                    "measure",
+                    {
+                        "baseline": outcome.baseline,
+                        "candidate": outcome.candidate,
+                        "metric": bench.metric,
+                        "credited": verdict_outcome == "improved",
+                        "outcome": verdict_outcome,
+                        "head_sha": candidate_sha,
+                    },
                 )
         except MeasurementPending as pending:
             # PARK 2 (dispatched candidate/suite, after the session): the wake
@@ -2457,18 +2494,6 @@ def attempt_once(
                 eval_minutes=submitted.eval_minutes if submitted is not None else None,
             ) from None
         if isinstance(outcome, AttemptResult):
-            record_event(
-                inbox_dir,
-                "measure",
-                {
-                    "baseline": outcome.baseline,
-                    "candidate": outcome.candidate,
-                    "metric": bench.metric,
-                    "credited": outcome.outcome == "improved",
-                    "outcome": outcome.outcome,
-                    "head_sha": candidate_sha,
-                },
-            )
             if submitted is not None and panel_runner is not None:
                 if outcome.baseline is not None and outcome.candidate is not None:
                     verdict = panel_runner(
@@ -2569,18 +2594,6 @@ def attempt_once(
                 panel_rounds=panel_reads,
             )
         # credited: candidate cleared the threshold and no sibling regressed.
-        record_event(
-            inbox_dir,
-            "measure",
-            {
-                "baseline": outcome.baseline,
-                "candidate": outcome.candidate,
-                "metric": bench.metric,
-                "credited": True,
-                "outcome": "improved",
-                "head_sha": candidate_sha,
-            },
-        )
         baseline = outcome.baseline
         candidate = outcome.candidate
         suite = outcome.suite
