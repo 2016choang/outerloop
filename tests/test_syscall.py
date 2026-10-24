@@ -1097,9 +1097,10 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     # The notice names this workspace's channel and the current verbs.
     note = tool_update_note(".outerloop")
     assert ".outerloop/syscall" in note and "--report" in note
-    assert "end" in note and "stop" in note
+    assert "`end` verb is now `stop`" in note
     self_report = tool_update_note(".outerloop", verification="self_report")
     assert "Self-reported submissions require" in self_report
+    assert "`end` verb is now `stop`" in self_report
 
 
 @pytest.mark.parametrize(
