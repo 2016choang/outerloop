@@ -20,6 +20,7 @@ LEGITIMATE_TERMS = {
     "stage them": "Git staging during a merge is an agent action.",
     "a sweep": "An experiment array is a parameter sweep, not a kernel cycle.",
     "whole sweep": "This is the experiment array's concurrency limit.",
+    "these sweeps": "The author's experiment arrays, not a kernel cycle.",
     "record one finding": "Record is a verb here, not an internal run record.",
     "the records live on the research-log branch": "These are public benchmark results.",
 }
@@ -116,6 +117,13 @@ def test_inventory_protocol() -> None:
     assert {"refusal:" + key for key in REFUSAL_EXCEPTIONS} <= {e.source for e in entries}
     failures = [f"{entry.source}: {error}" for entry in entries for error in violations(entry)]
     assert not failures, "\n".join(failures)
+    texts = "\n".join(entry.text for entry in entries)
+    # kernel notes outside refusals are collected too, from every module that sends them
+    assert "Your session ended without a syscall" in texts
+    assert "The PR head moved to" in texts
+    # delivery reasons are composed into "…not delivered: {reason}." and carry no stop
+    reasons = [e for e in entries if e.source.startswith("reason:")]
+    assert reasons and not [e.source for e in reasons if e.text.endswith(".")]
 
 
 @pytest.mark.parametrize(

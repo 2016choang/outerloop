@@ -41,7 +41,7 @@ REFUSAL_CONSTRUCTS = (
     ("syscall", "budget_error", "return", "refusal"),
     ("syscall", "_deliver_artifacts", "return", "refusal"),
     ("attempt", "deliver_messages", "refuse", "reason"),
-    ("attempt", "deliver_messages", "message", "refusal"),
+    ("attempt", "", "message", "refusal"),
     ("attempt", "_admit_working_tree", "ValueError", "refusal"),
     ("attempt", "ScopeHistoryError", "super().__init__", "refusal"),
     ("attempt", "publish", "refuse", "refusal"),
