@@ -3392,6 +3392,9 @@ def _resume_run(
     image_sha256 = measured_image(str(getattr(measurer, "image", "") or ""), result.eval_files)
     if image_sha256:
         measure_data["image_sha256"] = image_sha256
+    if result.outcome == "improved" and result.note:
+        # resume_attempt carries the cached-baseline note here on a credit
+        measure_data["baseline_note"] = result.note
     record_event(
         run_dir,
         "measure",

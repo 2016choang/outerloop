@@ -554,6 +554,11 @@ class DispatchedMeasurer:
                 raise MeasurementPending(
                     (), capacity_wait=True, note="retry state could not be saved; parked uncharged"
                 ) from None
+        # recorded before submission: the image file may be replaced while the
+        # run parks, and a crash after submit must not lose the digest
+        digest = image_digest(self.image)
+        if digest:
+            (self._ev(m) / "image-sha256").write_text(digest)
         try:
             job_id = submit_batch(
                 state_root(self.run_dir),
@@ -566,10 +571,6 @@ class DispatchedMeasurer:
                 write_atomic(self._infra_retry_path(m), json.dumps(prior))
             raise
         (self._ev(m) / "submitted").write_text(job_id)
-        # recorded at dispatch: the image file may be replaced while the run parks
-        digest = image_digest(self.image)
-        if digest:
-            (self._ev(m) / "image-sha256").write_text(digest)
         log.info("dispatched measure %s (sha %s) as job %s", m.name, m.tree_sha[:12], job_id)
         return job_id
 
