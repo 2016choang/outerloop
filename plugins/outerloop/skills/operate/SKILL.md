@@ -42,7 +42,8 @@ description: Start, inspect, message or stop Outerloop runs and read their repor
    before cancelling. There is no top-level `outerloop stop`. To pause, run
    `touch /path/to/state/PAUSE` at the selected root. Already-running jobs
    continue; the resident cancels its successor and exits. Resume with
-   `rm /path/to/state/PAUSE` and `outerloop start`. To end one run, use
+   `rm /path/to/state/PAUSE`; on Slurm, also run `outerloop start` again (a local
+   loop resumes on its own). To end one run, use
    `outerloop end RUN_ID --note "Operator requested stop"`, then check status.
    Ending is processed at a tick when no session holds the run; it is not an
    immediate kill, and a paused loop must resume to process it. Stopping the loop
