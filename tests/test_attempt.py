@@ -139,6 +139,9 @@ def test_park_run_appends_the_launch_ledger(tmp_path) -> None:
             "candidate", "afterany:101:501", "afterany:501", False, ["501"], id="submit-gate"
         ),
         pytest.param("candidate", "", "", True, [], id="capacity-no-launch"),
+        pytest.param(
+            "candidate", "afterany:501", "afterany:501", True, ["501"], id="capacity-with-launch"
+        ),
         pytest.param("candidate", "afterany:101", "", False, [], id="gate-only"),
     ],
 )
@@ -4412,7 +4415,7 @@ def test_line_commits_carry_the_bot_identity(tmp_path: Path, target_repo) -> Non
     # the hygiene reset is the tip; the merge of main is its parent
     subject, ident = ws.git("log", "-1", "--format=%s%n%an <%ae>").strip().splitlines()
     assert subject.startswith("line hygiene") and ident == bot
-    assert ws.git("log", "-2", "-1", "--format=%an <%ae>").strip() == bot
+    assert ws.git("log", "-1", "HEAD^", "--format=%an <%ae>").strip() == bot
 
 
 def test_checkout_line_leaves_a_conflict_for_the_session(tmp_path: Path, target_repo) -> None:
@@ -6235,6 +6238,7 @@ def test_auto_publish_saves_blessing_without_github_merge_calls(tmp_path, monkey
     [
         (True, "deadline", False),
         (False, "deadline", False),
+        (True, "deadline", True),
         (True, "stuck", False),
         (False, "stuck", False),
         (False, "stuck", True),
