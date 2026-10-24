@@ -2826,6 +2826,7 @@ def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
         entries = [
             {
                 "agent": str(r.get("agent", ""))[:64],
+                "run_id": str(r.get("run_id", ""))[:128],
                 "state": str(r.get("state", ""))[:32],
                 "phase": str(r.get("phase", ""))[:32],
                 "direction": str(r.get("direction", ""))[:160],
@@ -2861,15 +2862,17 @@ def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
 
 def _note_new_siblings(directory: Path, record: RunRecord, entries: list[dict]) -> None:
     """Append one kernel note per LIVE sibling whose stated hypothesis is new
-    or has changed. The key carries the agent and a hash of the hypothesis, so
-    `append`'s dedup keeps an unchanged hypothesis silent and makes a retry
-    idempotent. Ended siblings and empty hypotheses say nothing."""
+    or has changed. The key carries the agent and a hash of the sibling's run
+    and hypothesis, so `append`'s dedup keeps an unchanged hypothesis silent,
+    makes a retry idempotent, and still announces a new run that reuses an
+    agent slot. Ended siblings and empty hypotheses say nothing."""
     for entry in entries:
         agent = str(entry.get("agent", ""))
         hypothesis = str(entry.get("hypothesis", ""))
         if entry.get("state") == "ended" or not agent or not hypothesis:
             continue
-        digest = hashlib.sha256(hypothesis.encode("utf-8")).hexdigest()[:12]
+        identity = f"{entry.get('run_id', '')}\0{hypothesis}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
         append(
             directory,
             Message(

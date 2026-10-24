@@ -3782,6 +3782,10 @@ def test_wake_announces_a_siblings_new_hypothesis_once(tmp_path, monkeypatch) ->
     assert len(notes()) == 2
     assert notes()[-1].payload["quoted_text"] == "Try a narrower beam."
 
+    # a new run reusing the agent slot with the same hypothesis is announced
+    _note_new_siblings(directory, record, [{**changed[0], "run_id": "later-run"}])
+    assert len(notes()) == 3
+
     # ended siblings and empty hypotheses are never announced
     _note_new_siblings(
         directory,
@@ -3791,7 +3795,7 @@ def test_wake_announces_a_siblings_new_hypothesis_once(tmp_path, monkeypatch) ->
             {"agent": "agent-04", "state": "running", "hypothesis": ""},
         ],
     )
-    assert len(notes()) == 2
+    assert len(notes()) == 3
 
 
 def test_sibling_notice_is_off_with_the_channel(tmp_path, monkeypatch) -> None:
