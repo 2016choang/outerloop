@@ -2515,7 +2515,7 @@ def attempt_once(
                     if digest:
                         data["image_sha256"] = digest
                     # a cached baseline was not measured here: the digest is the candidate's
-                    if getattr(outcome, "baseline_note", ""):
+                    if isinstance(outcome, MeasureOK) and outcome.baseline_note:
                         data["baseline_note"] = outcome.baseline_note
                     record_event(
                         inbox_dir,
