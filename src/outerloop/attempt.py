@@ -1199,7 +1199,7 @@ def deliver_messages(
                     index,
                     (
                         "inter-agent messages disabled by channels.messages; "
-                        "use --to self or --to thread."
+                        "use --to self or --to thread"
                     ),
                 )
                 continue
@@ -1245,7 +1245,7 @@ def deliver_messages(
                     index,
                     (
                         "recipient has inter-agent messages disabled by channels.messages; "
-                        "use another recipient."
+                        "use another recipient"
                     ),
                 )
                 continue
@@ -1310,7 +1310,7 @@ def deliver_messages(
                             index,
                             (
                                 "inter-agent messages disabled by channels.messages; "
-                                "use --to self or --to thread."
+                                "use --to self or --to thread"
                             ),
                         )
                         append(run_dir, Message(**entry["message"]))
@@ -1331,7 +1331,7 @@ def deliver_messages(
                             index,
                             (
                                 "recipient already has 4 undelivered messages from you; "
-                                "wait for delivery before retrying."
+                                "wait for delivery before retrying"
                             ),
                         )
                         message = Message(**entry["message"])

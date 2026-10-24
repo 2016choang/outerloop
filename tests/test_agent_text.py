@@ -14,6 +14,7 @@ LEGITIMATE_TERMS = {
     "stage a job": "Preparing a request is part of the public syscall protocol.",
     "stage a submit": "Preparing a request is part of the public syscall protocol.",
     "stage `submit": "Preparing a request is part of the public syscall protocol.",
+    "stage `stop": "Preparing a request is part of the public syscall protocol.",
     "stage them again": "Preparing a request is part of the public syscall protocol.",
     "stage the files": "Git staging is an agent action, not kernel state.",
     "stage them": "Git staging during a merge is an agent action.",

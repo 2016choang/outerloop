@@ -49,7 +49,10 @@ REFUSAL_CONSTRUCTS = (
     ("orchestrator", "attempt_once", "assign:no_backend", "refusal"),
     ("orchestrator", "attempt_once", "keyword:problem", "refusal"),
     ("orchestrator", "attempt_once", "message", "refusal"),
+    ("tick", "", "message", "refusal"),
 )
+# Message keys that mark a refusal; any other kernel message with a literal text is a note.
+REFUSAL_KEYS = {"message-refused", "refusal", "capacity-refusal"}
 
 # ToolError mixes input constraints with state/policy refusals. Within these
 # functions, these call ordinals (in source order) are the state/policy checks.
@@ -106,6 +109,7 @@ def refusal_inventory() -> list[Entry]:
             ast.walk(root), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))
         ):
             value: ast.AST | None = None
+            message_key: str | None = None
             if isinstance(node, ast.Call) and ast.unparse(node.func) == construct:
                 index = 1 if scope == "deliver_messages" else 0
                 if len(node.args) > index:
@@ -128,10 +132,9 @@ def refusal_inventory() -> list[Entry]:
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "Message"
                 and len(node.args) > 6
-                and _literal_text(node.args[5]).split(":")[0]
-                in {"message-refused", "refusal", "capacity-refusal"}
                 and isinstance(node.args[6], ast.Dict)
             ):
+                message_key = _literal_text(node.args[5])
                 value = next(
                     (
                         v
@@ -147,6 +150,8 @@ def refusal_inventory() -> list[Entry]:
                 counts[function] = counts.get(function, 0) + 1
                 ordinal = counts[function]
                 kind = category
+                if message_key is not None and message_key.split(":")[0] not in REFUSAL_KEYS:
+                    kind = "note"
                 if module == "syscall_cli" and ordinal in CLI_REFUSALS.get(function, set()):
                     kind = "refusal"
                 entries.append(Entry(f"{kind}:{module}:{function}:{construct}:{ordinal}", text))
