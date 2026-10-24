@@ -518,6 +518,10 @@ def live_steward(
                     "resume_session_id": session.session_id or "",
                 }
             )
+            # written before finish_run, which keeps an existing report and
+            # records its hash in the trajectory's ending event
+            report_path = run_dir / "report.md"
+            _best_effort("run report", lambda: report_path.write_text(report), secrets)
             _best_effort(
                 "final record",
                 lambda: finish_run(
@@ -533,8 +537,6 @@ def live_steward(
                 ),
                 secrets,
             )
-            report_path = run_dir / "report.md"
-            _best_effort("run report", lambda: report_path.write_text(report), secrets)
             if issue_number:
                 _best_effort(
                     "issue report",
@@ -696,6 +698,15 @@ def live_steward(
             }
         )
         report_path = run_dir / "report.md"
+        # before finish_run, so the ending event hashes the report that stays
+        wrote = _best_effort(
+            "error report",
+            lambda: report_path.write_text(
+                f"# Steward report — {config.target} / {config.benchmark}\n"
+                f"Outcome: **{outcome_label}**\nNote: {note}\n"
+            ),
+            secrets,
+        )
         _best_effort(
             "ending record",
             lambda: finish_run(
@@ -708,14 +719,6 @@ def live_steward(
                 forge=github,
                 secrets=secrets,
                 bot_login=config.bot_login,
-            ),
-            secrets,
-        )
-        wrote = _best_effort(
-            "error report",
-            lambda: report_path.write_text(
-                f"# Steward report — {config.target} / {config.benchmark}\n"
-                f"Outcome: **{outcome_label}**\nNote: {note}\n"
             ),
             secrets,
         )

@@ -12,6 +12,7 @@ from typing import Any
 
 from outerloop.provenance import producing_author
 from outerloop.syscall import Launch, LaunchResult, launch_jobs
+from outerloop.trajectory import record as record_event
 
 LEDGER = "launches.jsonl"
 # generous: a run is depth_k launches x sleep_k sleeps x the array width, far below this
@@ -37,6 +38,29 @@ def _append(run_dir: Path, rows: list[dict[str, Any]]) -> None:
             fh.write("\n")
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
+            record_event(
+                run_dir,
+                "launch.submit" if row["event"] == "submitted" else "launch.result",
+                {
+                    key: row[key]
+                    for key in (
+                        "event",
+                        "sleep",
+                        "name",
+                        "job_ids",
+                        "commit",
+                        "author",
+                        "minutes",
+                        "array",
+                        "concurrency",
+                        "state",
+                        "exit_code",
+                        "why",
+                    )
+                    if key in row
+                },
+                at=row["at"],
+            )
 
 
 def append_submitted(
