@@ -361,10 +361,10 @@ def test_transient_json_read_failure_never_orphans_an_indexed_benchmark(tmp_path
     assert "## old-bench" in gh.files["CLIMB.md"]
 
 
-def test_unreadable_board_json_is_never_overwritten(tmp_path: Path) -> None:
-    """An outage reading one benchmark's JSON must not let a fresh merge
-    replace its published history: that benchmark sits the pass out and its
-    index entry survives."""
+def test_opaque_board_json_is_never_overwritten(tmp_path: Path) -> None:
+    """Published history survives both an outage and a payload that decodes
+    to something other than a row list: the benchmark sits the pass out and
+    its index entry survives. A later good read recovers."""
     gh = _BoardGitHub()
     gh.files["climb/index.json"] = json.dumps({"speedrun": "min"})
     gh.files["climb/data/speedrun.json"] = json.dumps(
@@ -379,15 +379,8 @@ def test_unreadable_board_json_is_never_overwritten(tmp_path: Path) -> None:
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     ids = [r["run_id"] for r in json.loads(gh.files["climb/data/speedrun.json"])]
     assert ids == ["old-1", "speedrun-1"]  # history + the fresh row, after the outage
-
-
-def test_non_list_board_json_is_never_overwritten(tmp_path: Path) -> None:
-    """A data file that decodes to something other than a row list is as
-    opaque as an outage: the benchmark sits the pass out untouched."""
-    gh = _BoardGitHub()
-    gh.files["climb/index.json"] = json.dumps({"speedrun": "min"})
+    # a non-list payload is as opaque as an outage
     gh.files["climb/data/speedrun.json"] = json.dumps({"rows": "elsewhere"})
-    _terminal_run(tmp_path, "speedrun-1")
     service_climb_board(tmp_path, gh, "org/repo", {"speedrun": "min"})
     assert json.loads(gh.files["climb/data/speedrun.json"]) == {"rows": "elsewhere"}
 
@@ -620,94 +613,8 @@ def test_curves_come_from_eval_stdout_downsampled(tmp_path: Path) -> None:
     # a run with no eval dirs at all simply has no curve
     _terminal_run(tmp_path, "speedrun-2", ending="merged")
     assert _curve_from_eval(run_dir(tmp_path, "speedrun-2")) == []
-
-
-def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
-    """A run that launched experiments but never submitted (no candidate
-    eval) shows its best launch's curve, so its agent stays on the panel."""
-    from outerloop.climbboard import _curve_from_eval
-
-    _terminal_run(tmp_path, "speedrun-3")
-    rd = run_dir(tmp_path, "speedrun-3")
-    _eval_dir(rd, "eval-launch-wide", "step 128 val loss 5.0\nstep 256 val loss 4.8\n")
-    _eval_dir(rd, "eval-launch-deep", "step 128 val loss 4.9\nstep 256 val loss 3.9\n")
-    # no candidate eval -> the best (lowest final) launch is used
-    assert _curve_from_eval(rd) == [[128, 4.9], [256, 3.9]]
-
-
-def test_merge_curves_caps_five_per_agent(tmp_path: Path) -> None:
-    from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
-
-    rows = [{"run_id": f"a{i}", "agent": "agent-01"} for i in range(8)] + [
-        {"run_id": f"b{i}", "agent": "agent-02"} for i in range(3)
-    ]
-    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(
-        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, [])
-    )
-    assert merged is not None
-    kept = merged["data"]
-    a_kept = [k for k in kept if k.startswith("a")]
-    b_kept = [k for k in kept if k.startswith("b")]
-    assert len(a_kept) == MAX_CURVE_RUNS_PER_AGENT  # newest 5 of agent-01's 8
-    assert set(a_kept) == {"a3", "a4", "a5", "a6", "a7"}  # the newest
-    assert len(b_kept) == 3  # agent-02 had only 3
-
-
-def test_curveless_rows_do_not_consume_the_per_agent_quota(tmp_path: Path) -> None:
-    """An attempt with no curve must not spend one of an agent's five slots —
-    the fifth CURVE should still be kept even behind curveless newer rows."""
-    from outerloop.climbboard import _merge_curves
-
-    # newest four rows have no curve; the five older rows do
-    rows = [{"run_id": f"c{i}", "agent": "agent-01"} for i in range(5)] + [
-        {"run_id": f"n{i}", "agent": "agent-01"} for i in range(4)
-    ]
-    have = {f"c{i}": [[1, 1.0]] for i in range(5)}  # only the c-rows have curves
-    merged = _merge_curves(
-        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: have.get(rid, [])
-    )
-    assert merged is not None
-    assert set(merged["data"]) == {"c0", "c1", "c2", "c3", "c4"}  # all five curves kept
-
-
-def test_quiet_agent_curve_survives_a_busy_agent(tmp_path: Path) -> None:
-    """A quiet agent whose only row sits far down the list still keeps its
-    curve — the per-agent cap is applied across ALL rows, not a global slice."""
-    from outerloop.climbboard import _merge_curves
-
-    rows = [{"run_id": "quiet", "agent": "agent-09"}] + [
-        {"run_id": f"busy{i}", "agent": "agent-01"} for i in range(300)
-    ]
-    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
-    assert merged is not None
-    assert "quiet" in merged["data"]  # not buried by 300 busy rows
-
-
-def test_every_agent_is_kept_beyond_any_total_ceiling(tmp_path: Path) -> None:
-    """No global total ceiling drops an agent: 40 agents * 5 curves = 200 are
-    all kept (the per-agent cap is the only bound)."""
-    from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
-
-    rows = [
-        {"run_id": f"a{a}-r{i}", "agent": f"agent-{a:02d}"}
-        for a in range(40)
-        for i in range(6)  # six each; the cap keeps five
-    ]
-    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
-    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
-    assert merged is not None
-    agents_kept = {k.split("-r")[0] for k in merged["data"]}
-    assert len(agents_kept) == 40  # every agent represented
-    assert len(merged["data"]) == 40 * MAX_CURVE_RUNS_PER_AGENT
-
-
-def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
-    """A 400-nines 'loss' parses as float inf and a 400-digit step exceeds
-    JS-safe integers; both skip the point, not the curve."""
-    from outerloop.climbboard import _curve_from_eval
-
+    # a 400-nines 'loss' parses as float inf and a 400-digit step exceeds
+    # JS-safe integers; both skip the point, not the curve
     rd = tmp_path / "r"
     _eval_dir(
         rd,
@@ -724,10 +631,80 @@ def test_fresh_curve_skips_garbage_points(tmp_path: Path) -> None:
     assert _curve_from_eval(rd) == [[1, 4.5], [3, 4.3], [4, 3.2], [5, 3.1]]
 
 
-def test_curve_stdout_scan_stops_at_the_byte_cap(tmp_path: Path, monkeypatch) -> None:
+def test_curve_falls_back_to_the_best_launch(tmp_path: Path) -> None:
+    """A run that launched experiments but never submitted (no candidate
+    eval) shows its best launch's curve, so its agent stays on the panel."""
+    from outerloop.climbboard import _curve_from_eval
+
+    _terminal_run(tmp_path, "speedrun-3")
+    rd = run_dir(tmp_path, "speedrun-3")
+    _eval_dir(rd, "eval-launch-wide", "step 128 val loss 5.0\nstep 256 val loss 4.8\n")
+    _eval_dir(rd, "eval-launch-deep", "step 128 val loss 4.9\nstep 256 val loss 3.9\n")
+    # no candidate eval -> the best (lowest final) launch is used
+    assert _curve_from_eval(rd) == [[128, 4.9], [256, 3.9]]
+
+
+def test_curve_quota_is_five_per_agent_and_skips_curveless_rows(tmp_path: Path) -> None:
+    from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
+
+    rows = [{"run_id": f"a{i}", "agent": "agent-01"} for i in range(8)] + [
+        {"run_id": f"b{i}", "agent": "agent-02"} for i in range(3)
+    ]
+    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves.get(rid, [])
+    )
+    assert merged is not None
+    kept = merged["data"]
+    a_kept = [k for k in kept if k.startswith("a")]
+    b_kept = [k for k in kept if k.startswith("b")]
+    assert len(a_kept) == MAX_CURVE_RUNS_PER_AGENT  # newest 5 of agent-01's 8
+    assert set(a_kept) == {"a3", "a4", "a5", "a6", "a7"}  # the newest
+    assert len(b_kept) == 3  # agent-02 had only 3
+    # an attempt with no curve must not spend one of an agent's five slots,
+    # even when curveless rows are newer
+    rows = [{"run_id": f"c{i}", "agent": "agent-01"} for i in range(5)] + [
+        {"run_id": f"n{i}", "agent": "agent-01"} for i in range(4)
+    ]
+    have = {f"c{i}": [[1, 1.0]] for i in range(5)}  # only the c-rows have curves
+    merged = _merge_curves(
+        _NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: have.get(rid, [])
+    )
+    assert merged is not None
+    assert set(merged["data"]) == {"c0", "c1", "c2", "c3", "c4"}  # all five curves kept
+
+
+def test_curve_selection_never_slices_globally(tmp_path: Path) -> None:
+    """A quiet agent far down the list keeps its curve, and no global total
+    ceiling drops an agent: the per-agent cap is the only bound."""
+    from outerloop.climbboard import MAX_CURVE_RUNS_PER_AGENT, _merge_curves
+
+    rows = [{"run_id": "quiet", "agent": "agent-09"}] + [
+        {"run_id": f"busy{i}", "agent": "agent-01"} for i in range(300)
+    ]
+    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    assert merged is not None
+    assert "quiet" in merged["data"]  # not buried by 300 busy rows
+    # 40 agents * 5 curves = 200 are all kept
+    rows = [
+        {"run_id": f"a{a}-r{i}", "agent": f"agent-{a:02d}"}
+        for a in range(40)
+        for i in range(6)  # six each; the cap keeps five
+    ]
+    curves = {r["run_id"]: [[1, 1.0]] for r in rows}
+    merged = _merge_curves(_NoPublishedCurves(), "o/r", "speedrun", rows, lambda rid: curves[rid])
+    assert merged is not None
+    agents_kept = {k.split("-r")[0] for k in merged["data"]}
+    assert len(agents_kept) == 40  # every agent represented
+    assert len(merged["data"]) == 40 * MAX_CURVE_RUNS_PER_AGENT
+
+
+def test_curve_scan_is_bounded_and_survives_a_vanishing_dir(tmp_path: Path, monkeypatch) -> None:
     """A verbose eval must not exhaust the tick: the scan stops at the byte
     cap, keeping the points before it and never publishing a number the cap
-    cut in half; the cap is bytes, not characters."""
+    cut in half; the cap is bytes, not characters. An eval dir vanishing
+    between glob and stat must not abort the pass either."""
     import outerloop.climbboard as cb
 
     rd = tmp_path / "r"
@@ -745,6 +722,19 @@ def test_curve_stdout_scan_stops_at_the_byte_cap(tmp_path: Path, monkeypatch) ->
     # 4-byte emoji count 4x
     (rd / "eval-candidate-x" / "stdout").write_bytes(b"step 1 val loss 4.5\n" + "🚀".encode() * 100)
     assert cb._curve_from_eval(rd) == [[1, 4.5]]
+    # the mtime sort must not abort when an eval dir disappears
+    rd = tmp_path / "vanishing"
+    for name in ("eval-candidate-a", "eval-candidate-b"):
+        _eval_dir(rd, name, "step 1 val loss 3.0\n")
+    orig = Path.stat
+
+    def vanishing(self, **kw):
+        if self.name == "eval-candidate-a":
+            raise FileNotFoundError(self)
+        return orig(self, **kw)
+
+    monkeypatch.setattr(Path, "stat", vanishing)
+    assert cb._curve_from_eval(rd) == [[1, 3.0]]
 
 
 def test_published_curves_cost_no_stdout_scan(tmp_path: Path) -> None:
@@ -845,25 +835,6 @@ def test_board_publish_is_one_atomic_batch(tmp_path: Path) -> None:
     assert gh.files["CLIMB.md"].count("negative-result") == 2
 
 
-def test_curve_survives_a_vanishing_eval_dir(tmp_path: Path, monkeypatch) -> None:
-    """The mtime sort must not abort the pass when an eval dir disappears
-    between glob and stat."""
-    from outerloop.climbboard import _curve_from_eval
-
-    rd = tmp_path / "r"
-    for name in ("eval-candidate-a", "eval-candidate-b"):
-        _eval_dir(rd, name, "step 1 val loss 3.0\n")
-    orig = Path.stat
-
-    def vanishing(self, **kw):
-        if self.name == "eval-candidate-a":
-            raise FileNotFoundError(self)
-        return orig(self, **kw)
-
-    monkeypatch.setattr(Path, "stat", vanishing)
-    assert _curve_from_eval(rd) == [[1, 3.0]]
-
-
 def test_summarize_first_sentence_and_cap() -> None:
     from outerloop.climbboard import summarize
 
@@ -956,7 +927,7 @@ def test_html_carries_curves_and_direction_and_log_toggle() -> None:
     assert "logarithmic" in html and "r.direction" in html
 
 
-def test_status_carries_the_working_direction(tmp_path: Path) -> None:
+def test_status_carries_the_hypothesis_and_its_direction(tmp_path: Path) -> None:
     from outerloop.climbboard import collect_status
 
     record = RunRecord(
@@ -977,11 +948,7 @@ def test_status_carries_the_working_direction(tmp_path: Path) -> None:
     runs = collect_status(tmp_path, "org/repo", 3.0)["runs"]
     assert runs[0]["direction"].startswith("very long warmdowns preserve late LR")
     assert "Sweeping 6 lengths" not in runs[0]["direction"]
-
-
-def test_review_status_keeps_published_hypothesis(tmp_path: Path) -> None:
-    from outerloop.climbboard import collect_status
-
+    # a review-parked run keeps the published hypothesis whole, and its PR
     hyp = "Longer warmdowns help. " + "Preserve late updates. " * 60
     record = RunRecord(
         run_id="review",
