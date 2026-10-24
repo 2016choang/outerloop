@@ -1191,9 +1191,7 @@ def sweep(
         if dry_run or _wake(root, record, reason, dispatcher, now, holder):
             woken.append((record.run_id, tag))
             if not dry_run:
-                record_event(
-                    run_dir(root, record.run_id), "wake", {"reason": reason, "tag": tag}, at=now
-                )
+                record_event(run_dir(root, record.run_id), "wake", {"reason": reason, "tag": tag})
 
     ledger_blocked: set[str] = set()
     if github is not None and not dry_run:

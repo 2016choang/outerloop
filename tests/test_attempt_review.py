@@ -1547,6 +1547,7 @@ def test_terminal_releases_snapshot_when_notebook_fails(review_run, monkeypatch,
     events = read(directory)
     assert [event["type"] for event in events] == ["ending"]
     assert events[0]["data"] == {"state": "merged", "reason": "PR merged"}
+    assert events[0]["ts"] > NOW  # wall-clock time, not the caller's tick time
     assert events[0]["refs"][0]["path"] == "report.md"
     assert verify(directory, record.run_id) == []
 

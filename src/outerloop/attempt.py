@@ -3312,7 +3312,6 @@ def _resume_run(
             "outcome": result.outcome,
             "head_sha": candidate_sha,
         },
-        at=now,
     )
     submitted_park = bool(stage.get("submitted"))
     if stage.get("panel_skip"):
@@ -4227,7 +4226,6 @@ def publish(
             run_dir,
             "syscall.decision",
             {"verb": "submit", "outcome": "refused", "reason": redact(text, secrets)},
-            at=now,
         )
         append(
             run_dir,
@@ -4643,7 +4641,7 @@ def publish(
                 # read: visible, plainly not merge-ready
                 draft=draft,
             )
-        record_event(run_dir, "pr.open", {"url": pr_url, "head_sha": result.candidate_sha}, at=now)
+        record_event(run_dir, "pr.open", {"url": pr_url, "head_sha": result.candidate_sha})
         # Arm auto-merge, best-effort, and ONLY when branch protection
         # requires a human review — the guard keeps bot-never-merges
         # enforced in code, not in per-repo config. Never arm a draft,
@@ -6278,7 +6276,6 @@ def finish_run(
         "ending",
         {"state": ending, "reason": note},
         refs=file_refs(directory, report),
-        at=now,
     )
     ref = str(record.stage.get("candidate_ref") or "")
     if snapshot_attempted and not ref:
