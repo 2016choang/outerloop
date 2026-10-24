@@ -36,7 +36,7 @@ def _spec(command: str = "", script: str = "", minutes: int = 1) -> JobSpec:
     )
 
 
-def test_submit_runs_synchronously_and_status_is_terminal(tmp_path: Path) -> None:
+def test_submit_runs_synchronously_and_reports_terminal_state(tmp_path: Path) -> None:
     lc = LocalCompute()
     marker = tmp_path / "ran"
     job = lc.submit(_spec(command=f"touch {marker}"))
@@ -44,10 +44,6 @@ def test_submit_runs_synchronously_and_status_is_terminal(tmp_path: Path) -> Non
     assert job.isdigit()  # callers validate ids with isdigit
     assert lc.status(job) == "COMPLETED"
     lc.cancel(job)  # idempotent no-op on a finished job
-
-
-def test_failed_command_reports_failed(tmp_path: Path) -> None:
-    lc = LocalCompute()
     assert lc.status(lc.submit(_spec(command="exit 3"))) == "FAILED"
     assert lc.status("999") == GONE  # unknown id: no record
     assert lc.job_id_for_name("anything") == ""  # nothing is ever live
@@ -74,23 +70,31 @@ def _seed_repo(tmp_path: Path) -> tuple[Workspace, str, str]:
     return ws, base, snap.commit
 
 
-def test_measurer_on_local_compute_never_parks(tmp_path: Path) -> None:
-    # the ONE measurer, local backend: the identical eval-job script runs as a
-    # subprocess (fresh checkout of each sealed sha, bare mode), every job is
-    # done when checked, and results flow straight through — no park.
-    ws, base, cand = _seed_repo(tmp_path)
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    m = DispatchedMeasurer(
-        compute=LocalCompute(),
+def _measurer(run_dir: Path, repo_root: Path, compute=None) -> DispatchedMeasurer:
+    return DispatchedMeasurer(
+        compute=compute or LocalCompute(),
         run_dir=run_dir,
-        repo_root=ws.root,
-        image="",  # bare mode: no apptainer in tests
+        repo_root=repo_root,
+        image="",
         account="",
         partition="",
         eval_minutes=1,
         run_tag="t",
     )
+
+
+def _seeded_measurer(tmp_path: Path, compute=None) -> tuple[DispatchedMeasurer, str, str]:
+    ws, base, cand = _seed_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    return _measurer(run_dir, ws.root, compute), base, cand
+
+
+def test_measurer_on_local_compute_never_parks(tmp_path: Path) -> None:
+    # the ONE measurer, local backend: the identical eval-job script runs as a
+    # subprocess (fresh checkout of each sealed sha, bare mode), every job is
+    # done when checked, and results flow straight through — no park.
+    m, base, cand = _seeded_measurer(tmp_path)  # bare mode: no apptainer in tests
     # the command reads the TREE it runs in: each measure must see a fresh
     # checkout of ITS OWN sha (base prints 'base', candidate prints 'cand'),
     # never the live workspace — the isolation the old inline path needed a
@@ -104,33 +108,12 @@ def test_measurer_on_local_compute_never_parks(tmp_path: Path) -> None:
     results = m.results(plan)  # would raise MeasurementPending on a cluster
     assert results == {"baseline": 1.0, "candidate": 2.0}
     # slot-cached: a fresh measurer over the same run dir reads, never re-runs
-    again = DispatchedMeasurer(
-        compute=LocalCompute(),
-        run_dir=run_dir,
-        repo_root=ws.root,
-        image="",
-        account="",
-        partition="",
-        eval_minutes=1,
-        run_tag="t",
-    )
+    again = _measurer(m.run_dir, m.repo_root)
     assert again.results(plan) == results  # read from the eval dirs, not re-run
 
 
 def test_local_eval_failure_is_an_eval_error_not_a_park(tmp_path: Path) -> None:
-    ws, base, cand = _seed_repo(tmp_path)
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    m = DispatchedMeasurer(
-        compute=LocalCompute(),
-        run_dir=run_dir,
-        repo_root=ws.root,
-        image="",
-        account="",
-        partition="",
-        eval_minutes=1,
-        run_tag="t",
-    )
+    m, base, cand = _seeded_measurer(tmp_path)
     plan = plan_measures(command="exit 7", metric="score", base_sha=base, candidate_sha=cand)
     with pytest.raises(EvalError, match="failed"):
         m.results(plan)
@@ -139,19 +122,7 @@ def test_local_eval_failure_is_an_eval_error_not_a_park(tmp_path: Path) -> None:
 def test_seed_env_reaches_the_bare_eval(tmp_path: Path) -> None:
     # the paired seed is injected into the scrubbed bare-mode env — and the
     # submitting process's own env must NOT leak through env -i
-    ws, base, cand = _seed_repo(tmp_path)
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    m = DispatchedMeasurer(
-        compute=LocalCompute(),
-        run_dir=run_dir,
-        repo_root=ws.root,
-        image="",
-        account="",
-        partition="",
-        eval_minutes=1,
-        run_tag="t",
-    )
+    m, base, cand = _seeded_measurer(tmp_path)
     plan = plan_measures(
         command='echo {\\"s\\": ${PILOT_SEED}${LEAKED_SECRET:+9}}',
         metric="s",
@@ -187,10 +158,6 @@ def test_job_terminal_without_a_result_fails_instead_of_parking(tmp_path: Path) 
     # a local timeout kills the script before it writes exit-code: the job is
     # terminal with no result, and parking would wait on a job that will never
     # deliver — the measurer must fail it like a vanished job
-    ws, base, cand = _seed_repo(tmp_path)
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-
     class _DeadCompute:
         has_lanes: ClassVar[bool] = True
 
@@ -224,16 +191,7 @@ def test_job_terminal_without_a_result_fails_instead_of_parking(tmp_path: Path) 
         def cancel(self, job_id: str) -> bool:
             return True
 
-    m = DispatchedMeasurer(
-        compute=_DeadCompute(),
-        run_dir=run_dir,
-        repo_root=ws.root,
-        image="",
-        account="",
-        partition="",
-        eval_minutes=1,
-        run_tag="t",
-    )
+    m, base, cand = _seeded_measurer(tmp_path, _DeadCompute())
     plan = plan_measures(command="true", metric="s", base_sha=base, candidate_sha=cand)
     with pytest.raises(EvalError, match=r"hit its walltime|without a result"):
         m.results(plan)
@@ -260,18 +218,34 @@ def test_walltime_kill_takes_the_whole_process_group(tmp_path: Path) -> None:
     assert wait_until(gone), f"child {child} survived the group kill"
 
 
-def test_job_env_is_an_allowlist_not_the_submitter_env(tmp_path: Path) -> None:
+def test_job_env_is_an_allowlist_not_the_submitter_env(tmp_path: Path, monkeypatch) -> None:
     # the submitter holds live keys, and an inherited APPTAINERENV_* would
-    # cross --cleanenv into the container — the job starts from a minimal env
-    import os
-
+    # cross --cleanenv into the container — the job starts from a minimal env.
+    # Endpoint settings the loop resolved ARE forwarded; key material is not.
     out = tmp_path / "env.txt"
-    os.environ["APPTAINERENV_SECRET"] = "leak"
-    try:
-        LocalCompute().submit(_spec(command=f'echo "x${{APPTAINERENV_SECRET}}x" > {out}'))
-    finally:
-        del os.environ["APPTAINERENV_SECRET"]
+    monkeypatch.setenv("APPTAINERENV_SECRET", "leak")
+    LocalCompute().submit(_spec(command=f'echo "x${{APPTAINERENV_SECRET}}x" > {out}'))
     assert out.read_text().strip() == "xx"
+    monkeypatch.delenv("APPTAINERENV_SECRET")
+
+    settings_out = tmp_path / "env.json"
+    settings = {
+        "OUTERLOOP_ENDPOINT_LOCAL_URL": "https://llm.example.internal/v1",
+        "OUTERLOOP_ENDPOINT_LOCAL_KEY_FILE": "/keys/local",
+        "OUTERLOOP_ENDPOINT_LOCAL_MODEL": "open-model",
+        "OUTERLOOP_AUTHOR_ENDPOINT": "local",
+        "REVIEW_ENDPOINT": "judge",
+        "REVIEW_MODEL": "open-model",
+        "REVIEW_BACKEND": "hermes",
+    }
+    for name, value in settings.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OUTERLOOP_ENDPOINT_LOCAL_KEY", "do-not-forward")
+    monkeypatch.setenv("APPTAINERENV_OUTERLOOP_SESSION_KEY", "do-not-forward")
+    LocalCompute().submit(_spec(command=f"/usr/bin/env > {settings_out}"))
+    env = dict(line.split("=", 1) for line in settings_out.read_text().splitlines() if "=" in line)
+    assert all(env.get(k) == v for k, v in settings.items())
+    assert "do-not-forward" not in json.dumps(env)
 
 
 def test_terminal_states_survive_across_instances(tmp_path, monkeypatch) -> None:
@@ -293,12 +267,16 @@ def test_terminal_states_survive_across_instances(tmp_path, monkeypatch) -> None
     assert poller.status(job_id) == GONE  # no root -> memory-only, as before
 
 
-def test_gpu_contracts_pass_the_lane_check_on_a_backend_without_lanes() -> None:
+def test_backend_without_lanes_places_gpu_jobs_on_the_default() -> None:
     """A backend without lanes (local compute) runs GPU jobs on the default
     placement, so a contract with GPU benchmarks needs no OUTERLOOP_GPU_PARTITION
-    there; a backend with lanes still refuses loudly (terra #223)."""
+    there; a backend with lanes still refuses loudly (terra #223 r7; the measure
+    placement once lacked the rule and a GPU benchmark on a local box aborted at
+    its first baseline)."""
     from types import SimpleNamespace
 
+    from outerloop.compute import CommandResult, SlurmCompute
+    from outerloop.measure import DispatchSettings, Measure
     from outerloop.tick import ServiceSpec, _gpu_lane_error
 
     contract = SimpleNamespace(benchmarks=[SimpleNamespace(name="speedrun", gpus=1)])
@@ -315,17 +293,6 @@ def test_gpu_contracts_pass_the_lane_check_on_a_backend_without_lanes() -> None:
 
     assert "no GPU lane" in _gpu_lane_error(contract, "speedrun", spec(True))
     assert _gpu_lane_error(contract, "speedrun", spec(False)) == ""
-
-
-def test_a_backend_without_lanes_places_gpu_launches_and_measures() -> None:
-    """Both placements ask the backend: LocalCompute has no lanes, so a GPU job
-    places on the default; SlurmCompute without a GPU lane refuses loudly
-    (terra #223 r7; the measure placement once lacked the rule and a GPU
-    benchmark on a local box aborted at its first baseline)."""
-    import pytest
-
-    from outerloop.compute import CommandResult, LocalCompute, SlurmCompute
-    from outerloop.measure import DispatchSettings, Measure
 
     gpu = Measure(name="baseline", tree_sha="a" * 40, command="x", metric="loss", gpus=1)
     local = DispatchSettings(compute=LocalCompute(), image="", account="", partition="")
@@ -486,20 +453,6 @@ def test_gpu_ids_follow_cuda_visible_devices(gpu_root, monkeypatch):
     assert output.read_text().strip() == "[-1]"
 
 
-def test_gpu_ids_unset_match_detection(monkeypatch):
-    monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-
-    def detect(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 0, "0\n1\n", "")
-
-    monkeypatch.setattr(subprocess, "run", detect)
-    assert LocalCompute._gpu_ids() == ["0", "1"]
-    assert LocalCompute._gpu_count() == 2
-    monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "2")
-    assert LocalCompute._gpu_ids() == ["0", "1"]
-
-
 @pytest.mark.parametrize("gpus", [0, 1])
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("array, size, concurrency", [("0-3", 4, 2), ("0-1%1", 2, 1)])
@@ -560,33 +513,28 @@ def test_stale_holder_is_reclaimed(gpu_root):
     assert output.read_text().strip() == "0,1"
 
 
-@pytest.mark.parametrize("requested", [0, 5])
-def test_zero_gpus_preserves_environment(gpu_root, monkeypatch, requested):
+def test_zero_gpu_pool_keeps_parent_env_and_warns_once(gpu_root, monkeypatch, caplog):
     monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "0")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "parent")
-    output = gpu_root / "visible"
-    LocalCompute().submit(
-        replace(
-            _spec(command=f'echo "${{CUDA_VISIBLE_DEVICES-unset}}" > {output}'),
-            gpus=requested,
+    monkeypatch.setattr(LocalCompute, "_zero_gpu_warning_pid", None)
+    lc = LocalCompute()
+    # warnings seen after each submit: a CPU job never warns; the first GPU job does, once
+    for index, (requested, warned) in enumerate(((0, 0), (5, 1), (5, 1))):
+        output = gpu_root / f"visible_{index}"
+        lc.submit(
+            replace(
+                _spec(command=f'echo "${{CUDA_VISIBLE_DEVICES-unset}}" > {output}'),
+                gpus=requested,
+            )
         )
-    )
-    # no allocation: the job keeps the loop's own view of the GPUs
-    assert output.read_text().strip() == "parent"
-    assert not (gpu_root / "local_jobs/gpus.json").exists()
-    assert LocalCompute().queue_snapshot() == []
-
-
-def test_inherited_gpu_mask_marker_is_dropped(gpu_root, monkeypatch):
-    """Only local compute sets the eval's mask marker; a stale one in the loop's
-    environment never reaches a job."""
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    monkeypatch.setenv("OUTERLOOP_CUDA_VISIBLE_DEVICES", "2,3")
-    output = gpu_root / "marker"
-    LocalCompute().submit(
-        _spec(command=f'echo "${{OUTERLOOP_CUDA_VISIBLE_DEVICES-unset}}" > {output}')
-    )
-    assert output.read_text().strip() == "unset"
+        # no allocation: the job keeps the loop's own view of the GPUs
+        assert output.read_text().strip() == "parent"
+        assert not (gpu_root / "local_jobs/gpus.json").exists()
+        assert lc.queue_snapshot() == []
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == warned
+    assert "OUTERLOOP_LOCAL_GPUS" in warnings[0].message
+    assert "CUDA_VISIBLE_DEVICES" in warnings[0].message
 
 
 @pytest.mark.parametrize("array", ["", "0-1%1"])
@@ -652,7 +600,7 @@ def test_gpu_release_on_start_failure(gpu_root, monkeypatch):
     assert _read_pool(gpu_root) == {"holders": {}, "queue": []}
 
 
-def test_gpu_detection(monkeypatch):
+def test_gpu_ids_and_count_resolve_from_env_or_detection(monkeypatch):
     monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
@@ -661,7 +609,11 @@ def test_gpu_detection(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "0\n1\n", "")
 
     monkeypatch.setattr(subprocess, "run", detect)
+    assert LocalCompute._gpu_ids() == ["0", "1"]
     assert LocalCompute._gpu_count() == 2
+    monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "2")
+    assert LocalCompute._gpu_ids() == ["0", "1"]  # an explicit count caps the ids
+    monkeypatch.delenv("OUTERLOOP_LOCAL_GPUS")
 
     def missing(*args, **kwargs):
         raise FileNotFoundError()
@@ -860,7 +812,9 @@ def test_gpu_detection_failures(monkeypatch, failure):
     assert LocalCompute._gpu_count() == 0
 
 
-def test_gpu_job_does_not_modify_submitter_or_following_cpu_env(gpu_root, monkeypatch):
+def test_gpu_jobs_do_not_leak_into_the_loop_env(gpu_root, monkeypatch):
+    """Only local compute sets the eval's mask marker; a stale one in the loop's
+    environment never reaches a job, and a GPU job never mutates the submitter."""
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     lc = LocalCompute()
     lc.submit(replace(_spec(command="true"), gpus=1))
@@ -868,6 +822,12 @@ def test_gpu_job_does_not_modify_submitter_or_following_cpu_env(gpu_root, monkey
     output = gpu_root / "cpu_env"
     lc.submit(_spec(command=f'echo "${{CUDA_VISIBLE_DEVICES-unset}}" > {output}'))
     assert output.read_text().strip() == "unset"
+    monkeypatch.setenv("OUTERLOOP_CUDA_VISIBLE_DEVICES", "2,3")
+    marker = gpu_root / "marker"
+    LocalCompute().submit(
+        _spec(command=f'echo "${{OUTERLOOP_CUDA_VISIBLE_DEVICES-unset}}" > {marker}')
+    )
+    assert marker.read_text().strip() == "unset"
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
@@ -893,19 +853,6 @@ def test_array_exception_kills_running_and_cancels_queued(gpu_root, monkeypatch,
     array_states = [p for p in (gpu_root / "local_jobs").iterdir() if p.name.isdigit()]
     assert len(array_states) == 1
     assert array_states[0].read_text() == "CANCELLED"
-
-
-def test_zero_gpu_warning_once_per_process(gpu_root, monkeypatch, caplog):
-    monkeypatch.setenv("OUTERLOOP_LOCAL_GPUS", "0")
-    monkeypatch.setattr(LocalCompute, "_zero_gpu_warning_pid", None)
-    LocalCompute().submit(_spec(command="true"))
-    assert not caplog.records
-    for _ in range(2):
-        LocalCompute().submit(replace(_spec(command="true"), gpus=1))
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert "OUTERLOOP_LOCAL_GPUS" in warnings[0].message
-    assert "CUDA_VISIBLE_DEVICES" in warnings[0].message
 
 
 def test_stale_waiter_dropped_and_heartbeat_refreshed(gpu_root, monkeypatch):
@@ -1123,26 +1070,3 @@ def test_unannounced_reservation_keeps_live_submitter_or_grace_period(
         )
         is live
     )
-
-
-def test_endpoint_settings_cross_local_job_boundary(tmp_path, monkeypatch):
-    import json
-
-    out = tmp_path / "env.json"
-    settings = {
-        "OUTERLOOP_ENDPOINT_LOCAL_URL": "https://llm.example.internal/v1",
-        "OUTERLOOP_ENDPOINT_LOCAL_KEY_FILE": "/keys/local",
-        "OUTERLOOP_ENDPOINT_LOCAL_MODEL": "open-model",
-        "OUTERLOOP_AUTHOR_ENDPOINT": "local",
-        "REVIEW_ENDPOINT": "judge",
-        "REVIEW_MODEL": "open-model",
-        "REVIEW_BACKEND": "hermes",
-    }
-    for name, value in settings.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv("OUTERLOOP_ENDPOINT_LOCAL_KEY", "do-not-forward")
-    monkeypatch.setenv("APPTAINERENV_OUTERLOOP_SESSION_KEY", "do-not-forward")
-    LocalCompute().submit(_spec(command=f"/usr/bin/env > {out}"))
-    env = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
-    assert all(env.get(k) == v for k, v in settings.items())
-    assert "do-not-forward" not in json.dumps(env)
