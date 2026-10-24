@@ -134,6 +134,7 @@ def test_park_run_appends_the_launch_ledger(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("phase", "afterany", "launch_afterany", "capacity_wait", "expected_ids"),
     [
+        pytest.param("author-sleep", "", "", False, [], id="stale-checkpoint"),
         pytest.param("author-sleep", "afterany:501", "", False, ["501"], id="sleep"),
         pytest.param(
             "candidate", "afterany:101:501", "afterany:501", False, ["501"], id="submit-gate"
@@ -7775,9 +7776,11 @@ def test_endpoint_unavailable_parks_and_recovers(
         ("fresh", "end"),
         ("fresh", "explicit-end"),
         ("fresh", "outage"),
+        ("fresh", "timeout"),
         ("fresh", "budget"),
         ("fresh", "error"),
         ("fresh", "repeat"),
+        ("fresh", "crash"),
         ("wake", "end"),
     ],
 )
