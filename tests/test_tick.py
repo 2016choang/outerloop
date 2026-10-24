@@ -381,8 +381,9 @@ def test_deadline_decides_which_experiment_states_wake(tmp_path: Path) -> None:
     waiting_run(tmp_path, "r-run", experiment_job_id="100", deadline=NOW + 10_000)
     waiting_run(tmp_path, "r-pend-wait", experiment_job_id="101", deadline=NOW + 10_000)
     waiting_run(tmp_path, "r-gone-wait", experiment_job_id="102", deadline=NOW + 10_000)
-    report, dispatcher = run_tick(tmp_path, FakeSlurm(states={"100": "RUNNING", "101": "PENDING"}))
-    assert woke(dispatcher) == [] and report.woken == ()
+    early = FakeSlurm(states={"100": "RUNNING", "101": "PENDING"})
+    report, dispatcher = run_tick(tmp_path, early)
+    assert woke(dispatcher) == [] and report.woken == () and early.cancelled == []
 
     # past the deadline: gone wakes as vanished, pending is cancelled and woken
     root = tmp_path / "due"
@@ -4142,8 +4143,16 @@ def test_comments_wait_with_jobs_and_idle_pr_does_not_spend_attempts(tmp_path):
     assert load_record(tmp_path, record.run_id).state == PARKED
 
 
-@pytest.mark.parametrize("duty", ["jobs", "deadline", "stuck"])
-def test_github_failure_does_not_skip_sweep_duties(tmp_path, caplog, duty):
+@pytest.mark.parametrize(
+    "failed_request,duty",
+    [
+        ("list_comments", "jobs"),
+        ("list_comments", "deadline"),
+        ("list_comments", "stuck"),
+        ("get_pull_request", "jobs"),
+    ],
+)
+def test_github_failure_does_not_skip_sweep_duties(tmp_path, caplog, failed_request, duty):
     from outerloop.tick import MAX_WAKE_ATTEMPTS, sweep
 
     record = waiting_run(
@@ -4162,10 +4171,14 @@ def test_github_failure_does_not_skip_sweep_duties(tmp_path, caplog, duty):
             return f"https://github.com/{target}.git"
 
         def get_pull_request(self, *args):
+            if failed_request == "get_pull_request":
+                raise RuntimeError("GitHub down")
             return {"state": "open"}
 
         def list_comments(self, *args):
-            raise RuntimeError("GitHub down")
+            if failed_request == "list_comments":
+                raise RuntimeError("GitHub down")
+            return []
 
     dispatcher = RecordingDispatcher()
     report = sweep(
