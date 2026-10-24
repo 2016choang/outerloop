@@ -10,7 +10,7 @@ from pathlib import Path
 
 from outerloop import syscall_cli
 from outerloop.brief import BriefInputs, BudgetState, Task, build_brief, render
-from outerloop.inbox import Message, base_moved_text, budgets_line, render_inbox
+from outerloop.inbox import Message, base_moved_text, budgets_line, render_inbox, sibling_note
 from outerloop.orchestrator import _render_author_inbox
 from outerloop.syscall import tool_update_note
 
@@ -212,6 +212,32 @@ def inventory() -> list[Entry]:
                 f"note:tool-update:messages={messages}:siblings={siblings}:{verification}",
                 tool_update_note(
                     ".outerloop", messages=messages, siblings=siblings, verification=verification
+                ),
+            )
+        )
+    for index, (agent, hypothesis) in enumerate(
+        (
+            ("agent-02", "Try a wider beam search."),
+            ("agent-03", "Warm-start from the best known tour."),
+        ),
+        1,
+    ):
+        entries.append(
+            Entry(
+                f"note:sibling:{index}",
+                render_inbox(
+                    [
+                        Message(
+                            0,
+                            "note",
+                            "kernel",
+                            "owner/repo#1",
+                            0,
+                            f"sibling:{agent}:000000000000",
+                            {"text": sibling_note(agent), "quoted_text": hypothesis},
+                        )
+                    ],
+                    budgets=budgets_line(launches=4, sleeps=6),
                 ),
             )
         )

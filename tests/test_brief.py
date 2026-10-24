@@ -348,9 +348,10 @@ def test_memory_guidance_at_every_session_boundary() -> None:
     assert "What you write here is all your next session gets" not in text
 
 
-def test_siblings_mechanics_state_only_the_refresh() -> None:
+def test_siblings_mechanics_state_the_refresh_and_notice() -> None:
     text = render(build_brief(make_inputs(launch_budget=3, sleep_budget=2), created="t"))
-    assert "refreshed at every wake; `siblings` shows it" in text
+    assert "refreshed at every wake, and a sibling's new or changed hypothesis" in text
+    assert "`siblings` shows its launches and score" in text
     # when to check it, and the direction preference, are guidance
     assert "before choosing a direction" not in text
     assert "prefer a direction no sibling is on" not in text

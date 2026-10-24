@@ -863,8 +863,9 @@ def write_policy(workspace: Path, verification: str, channels: dict[str, bool]) 
 
 def write_siblings(workspace: Path, entries: list[dict[str, Any]]) -> None:
     """Kernel-written fleet snapshot the tool's `siblings` shows: what the
-    OTHER agents are working on, refreshed at every wake. Informational,
-    author-pulled — never pushed into the brief."""
+    OTHER agents are working on, refreshed at every wake. Informational; a
+    sibling's new or changed hypothesis is also announced in the inbox, while
+    its launches and score stay author-pulled."""
     d = workspace / channel_dir(workspace)
     d.mkdir(exist_ok=True)
     (d / "siblings.json").write_text(json.dumps(entries))

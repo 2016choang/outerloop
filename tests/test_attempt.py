@@ -3726,6 +3726,112 @@ def test_author_sleep_wake_delivers_results_and_flows_to_a_candidate_park(
     assert str(record.stage["candidate_ref"]) in refs[0]
 
 
+def test_wake_announces_a_siblings_new_hypothesis_once(tmp_path, monkeypatch) -> None:
+    from outerloop.inbox import pending
+    from outerloop.measure import MeasurementPending
+    from outerloop.roles import author_spec
+
+    state, run_id, _wsroot, _ = _write_parked_author_sleep(
+        tmp_path, monkeypatch, raise_exc=MeasurementPending(("701", "702"))
+    )
+    siblings = [{"agent": "agent-02", "state": "running", "hypothesis": "Try a wider beam."}]
+    monkeypatch.setattr("outerloop.attempt._sibling_entries", lambda *args: siblings)
+    monkeypatch.setattr("outerloop.attempt.syscall_write_siblings", lambda ws, entries: None)
+
+    prompts: list[str] = []
+
+    class RecordingHarness(ScriptedHarness):
+        def run(self, brief_text, workspace, resume_session_id=None):
+            prompts.append(brief_text)
+            return super().run(brief_text, workspace, resume_session_id)
+
+    harness = RecordingHarness(
+        submit=True, edits={"src/pilot/solvers/tsp.py": "def solve(): return 'polished'\n"}
+    )
+    resume_run(
+        state,
+        run_id,
+        dispatch=_fake_dispatch(),
+        github=CommentingGitHub(),  # type: ignore[arg-type]
+        bot_auth=NoAuth(),
+        now=1_000_100.0,
+        harness=harness,
+        spec=author_spec(),
+    )
+
+    directory = state / "runs" / run_id
+
+    def notes():
+        return [m for m in pending(directory, 0) if m.key.startswith("sibling:")]
+
+    assert len(notes()) == 1
+    assert notes()[0].key.startswith("sibling:agent-02:")
+    assert "agent-02" in notes()[0].payload["text"]
+    assert notes()[0].payload["quoted_text"] == "Try a wider beam."
+    # the note is in THIS wake's inbox, not held for the next one
+    assert "Try a wider beam." in prompts[0]
+
+    from outerloop.attempt import _note_new_siblings
+
+    record = load_record(state, run_id)
+    _note_new_siblings(directory, record, siblings)  # unchanged: the next wake adds nothing
+    assert len(notes()) == 1
+
+    changed = [{**siblings[0], "hypothesis": "Try a narrower beam."}]
+    _note_new_siblings(directory, record, changed)
+    assert len(notes()) == 2
+    assert notes()[-1].payload["quoted_text"] == "Try a narrower beam."
+
+    # ended siblings and empty hypotheses are never announced
+    _note_new_siblings(
+        directory,
+        record,
+        [
+            {"agent": "agent-03", "state": "ended", "hypothesis": "A finished direction."},
+            {"agent": "agent-04", "state": "running", "hypothesis": ""},
+        ],
+    )
+    assert len(notes()) == 2
+
+
+def test_sibling_notice_is_off_with_the_channel(tmp_path, monkeypatch) -> None:
+    from outerloop.inbox import pending
+    from outerloop.measure import MeasurementPending
+    from outerloop.roles import author_spec
+
+    state, run_id, _wsroot, _ = _write_parked_author_sleep(
+        tmp_path,
+        monkeypatch,
+        raise_exc=MeasurementPending(("701", "702")),
+        contract_text=CONTRACT_SYSCALLS + "channels: {siblings: false}\n",
+    )
+    looked: list[int] = []
+
+    def sibling_entries(*args):
+        looked.append(1)
+        return [{"agent": "agent-02", "state": "running", "hypothesis": "Try a wider beam."}]
+
+    monkeypatch.setattr("outerloop.attempt._sibling_entries", sibling_entries)
+    monkeypatch.setattr("outerloop.attempt.syscall_write_siblings", lambda ws, entries: None)
+
+    harness = ScriptedHarness(
+        submit=True, edits={"src/pilot/solvers/tsp.py": "def solve(): return 'polished'\n"}
+    )
+    resume_run(
+        state,
+        run_id,
+        dispatch=_fake_dispatch(),
+        github=CommentingGitHub(),  # type: ignore[arg-type]
+        bot_auth=NoAuth(),
+        now=1_000_100.0,
+        harness=harness,
+        spec=author_spec(),
+    )
+
+    assert looked == []  # the snapshot is not even read with the channel off
+    assert not [m for m in pending(state / "runs" / run_id, 0) if m.key.startswith("sibling:")]
+
+
 @pytest.mark.parametrize("can_resume", [False, True])
 def test_capacity_wait_wake_delivers_refusal_with_fresh_session_when_needed(
     tmp_path, monkeypatch, can_resume

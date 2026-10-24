@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- A wake now tells the author when a live sibling states a new or changed hypothesis: one kernel note per sibling, keyed by the agent and a hash of the hypothesis, so an unchanged direction is never repeated, and `siblings` still shows that sibling's launches and score. Only when `channels.siblings` is on. Upgrading: no action needed — the note uses the existing `note` kind, and an older kernel delivers the new `sibling:<agent>:<hash>` key as ordinary inbox text.
 - On macOS without an image, sessions, evaluations and panel lenses run under a packaged Seatbelt profile (`sandbox-exec`, #292): they write only the workspace and a scratch directory, read only system and toolchain paths, and connect out only to TCP port 443, DNS and local ports. Linux and Apptainer runs are unchanged.
 - Kernel events now append to a per-run `trajectory.jsonl` with sequence numbers and a SHA-256 chain. `outerloop trajectory <run-id> [--verify] [--json]` reads it without changing run state. Operational files and their formats are unchanged; older kernels ignore the new file. Upgrading: runs started before this kernel have no trajectory and read as "no trajectory" until their next recorded event. No backfill is attempted.
 - Add a printable agent-text inventory and protocol wording lint, with clearer refusal recovery guidance (#487, parts 1–2).

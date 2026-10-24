@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import logging
 import math
@@ -78,7 +79,7 @@ from outerloop.harness import (
     redact,
 )
 from outerloop.hypothesis import report_hypothesis
-from outerloop.inbox import Message, append, panel_payload, thread_for
+from outerloop.inbox import Message, append, panel_payload, sibling_note, thread_for
 from outerloop.job_names import run_job_name
 from outerloop.launchlog import append_ended, append_submitted, experiments_rows
 from outerloop.ledger_branch import RESEARCH_LOG_BRANCH as RESEARCH_LOG_BRANCH
@@ -1512,13 +1513,20 @@ def run_author_leg(
     hours = float(str(record.stage.get("gpu_hours_used", 0)))
     review_topup = bool(record.stage.get("review_topup"))
     if owned:
+        entries = _sibling_entries(ws, config.agent_id) if contract.channels.siblings else []
         _best_effort(
             "sibling refresh",
-            lambda: syscall_write_siblings(
-                workspace,
-                _sibling_entries(ws, config.agent_id) if contract.channels.siblings else [],
-            ),
+            lambda: syscall_write_siblings(workspace, entries),
+            secrets,
         )
+        if contract.channels.siblings:
+            # appended BEFORE the session starts, so this wake's inbox carries
+            # it (not the next one); best-effort like the refresh
+            _best_effort(
+                "sibling notice",
+                lambda: _note_new_siblings(directory, record, entries),
+                secrets,
+            )
     if record.agent_id.startswith("steward"):
         kwargs.setdefault("scope_validator", steward_out_of_scope)
     kwargs.setdefault("ruler", RULER)
@@ -2849,6 +2857,32 @@ def _sibling_entries(ws: Workspace, self_agent: str) -> list[dict]:
     except Exception as exc:
         log.info("no sibling snapshot for this session (%s)", exc)
         return []
+
+
+def _note_new_siblings(directory: Path, record: RunRecord, entries: list[dict]) -> None:
+    """Append one kernel note per LIVE sibling whose stated hypothesis is new
+    or has changed. The key carries the agent and a hash of the hypothesis, so
+    `append`'s dedup keeps an unchanged hypothesis silent and makes a retry
+    idempotent. Ended siblings and empty hypotheses say nothing."""
+    for entry in entries:
+        agent = str(entry.get("agent", ""))
+        hypothesis = str(entry.get("hypothesis", ""))
+        if entry.get("state") == "ended" or not agent or not hypothesis:
+            continue
+        digest = hashlib.sha256(hypothesis.encode("utf-8")).hexdigest()[:12]
+        append(
+            directory,
+            Message(
+                0,
+                "note",
+                "kernel",
+                thread_for(record),
+                time.time(),
+                f"sibling:{agent}:{digest}",
+                {"text": sibling_note(agent), "quoted_text": hypothesis},
+                origin=record.run_id,
+            ),
+        )
 
 
 def _install_report_archive(workspace: Path, reports: list[tuple[str, str]]) -> None:
@@ -5140,10 +5174,16 @@ def live_attempt(
             # research-log's status.json (the SAME branch the reports came
             # from, so it works across clusters) and best-effort throughout:
             # a missing or malformed snapshot just means no siblings known
-            syscall_write_siblings(
-                workspace,
-                _sibling_entries(ws, config.agent_id) if contract.channels.siblings else [],
-            )
+            entries = _sibling_entries(ws, config.agent_id) if contract.channels.siblings else []
+            syscall_write_siblings(workspace, entries)
+            if contract.channels.siblings:
+                # the first session reads the inbox too, so this notice reaches
+                # it in the same session; best-effort like the refresh
+                _best_effort(
+                    "sibling notice",
+                    lambda: _note_new_siblings(run_dir, record, entries),
+                    secrets,
+                )
 
         def changed_paths() -> list[str]:
             return submission_paths(
