@@ -70,6 +70,15 @@ CLAUDE_MODEL_UNSET = (
     "steward) needs it; put OUTERLOOP_CLAUDE_MODEL=<model> in the deployment env"
 )
 
+# `claude setup-token` mints a long-lived subscription OAuth token under this
+# prefix; Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN.
+OAUTH_TOKEN_PREFIX = "sk-ant-oat"
+
+
+def is_oauth_token(api_key: str) -> bool:
+    """True for a `claude setup-token` subscription token."""
+    return api_key.startswith(OAUTH_TOKEN_PREFIX)
+
 
 def default_claude_model() -> str:
     """The deployment's model for every Claude role — a required setting, never a
@@ -628,11 +637,13 @@ class ClaudeCodeHarness:
     allowed_tools: tuple[str, ...] = ("Write", "Edit", "Read", "Glob", "Grep", "Bash")
     extra_args: tuple[str, ...] = field(default_factory=tuple)
     # --bare skips hooks, plugin sync, auto-memory, and CLAUDE.md
-    # auto-discovery, and restricts auth to ANTHROPIC_API_KEY. REQUIRED for
-    # judge sessions whose cwd contains an untrusted checkout: a PR-authored
-    # CLAUDE.md or .claude/settings.json (hooks run commands) must never load
-    # as instructions. Off for author sessions, where the target repo's own
-    # CLAUDE.md is useful contributor guidance.
+    # auto-discovery, and restricts auth to ANTHROPIC_API_KEY (OAuth is never
+    # read). REQUIRED for judge sessions whose cwd contains an untrusted
+    # checkout: a PR-authored CLAUDE.md or .claude/settings.json (hooks run
+    # commands) must never load as instructions. Off for author sessions,
+    # where the target repo's own CLAUDE.md is useful contributor guidance.
+    # A judge on a subscription token runs --safe-mode instead, which disables
+    # CLAUDE.md, hooks, plugins, skills and MCP servers but keeps OAuth auth.
     bare: bool = False
     # Apptainer image for session containment. When set,
     # the session runs under `apptainer exec --containall --cleanenv`: no host
@@ -675,6 +686,9 @@ class ClaudeCodeHarness:
         # behind the tool allowlist, so a stray edit tool cannot auto-apply.
         mutating = {"Write", "Edit", "Bash"}.intersection(self.allowed_tools)
         permission_mode = "acceptEdits" if mutating else "default"
+        # --bare never reads an OAuth token; endpoint and Vertex roles do not
+        # use this key.
+        oauth = self.endpoint is None and self.vertex is None and is_oauth_token(self.api_key)
         claude_argv = [
             self.CONTAINER_CLAUDE if self.container_image else self.binary,
             "-p",
@@ -691,7 +705,7 @@ class ClaudeCodeHarness:
             ",".join(self.allowed_tools),
             "--permission-mode",
             permission_mode,
-            *(["--bare"] if self.bare else []),
+            *([("--safe-mode" if oauth else "--bare")] if self.bare else []),
             *self.extra_args,
         ]
         if resume_session_id:
@@ -787,13 +801,20 @@ class ClaudeCodeHarness:
                     for k, v in vertex_env.items():
                         env[f"APPTAINERENV_{k}"] = v
             else:
-                env = session_env(self.api_key, "ANTHROPIC_API_KEY", session_home)
+                # A subscription token authenticates as CLAUDE_CODE_OAUTH_TOKEN;
+                # an API key stays ANTHROPIC_API_KEY.
+                key_variable = (
+                    "CLAUDE_CODE_OAUTH_TOKEN"
+                    if is_oauth_token(self.api_key)
+                    else "ANTHROPIC_API_KEY"
+                )
+                env = session_env(self.api_key, key_variable, session_home)
                 if self.container_image:
                     # --cleanenv drops the host environment inside the container
                     # EXCEPT APPTAINERENV_* variables, which apptainer injects
                     # with the prefix stripped — the key travels via the
                     # environment, never argv (argv is world-readable in /proc).
-                    env["APPTAINERENV_ANTHROPIC_API_KEY"] = self.api_key
+                    env[f"APPTAINERENV_{key_variable}"] = self.api_key
             if self.vertex is not None and self.vertex.adc_file:
                 # Also mounted when an endpoint overrides Vertex authentication.
                 provision_credential_file(Path(self.vertex.adc_file))
