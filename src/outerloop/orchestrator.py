@@ -431,7 +431,13 @@ class SubprocessEvaluator:
             )
         except OSError as exc:
             raise EvalError(f"could not create check home: {exc}") from exc
-        cache_dir = Path(tempfile.mkdtemp(prefix="outerloop-check-cache-"))
+        cache_dir = Path(
+            tempfile.mkdtemp(
+                prefix="outerloop-check-cache-",
+                # under Seatbelt the scratch home is the only writable place
+                dir=eval_home if not self.container_image and seatbelt_available() else None,
+            )
+        )
         try:
             self._run(workspace, command, eval_home, cache_dir)
         finally:
