@@ -134,7 +134,7 @@ def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 refusals += 1
                 verb = data.get("verb") or "unknown"
                 by_verb[verb] = by_verb.get(verb, 0) + 1
-        elif event.get("type") == "session.start":
+        elif event.get("type") == "session.start" and data.get("role") != "judge":
             author = f"{data.get('backend') or 'unknown'}/{data.get('model') or 'unknown'}"
             if author not in authors:
                 authors.append(author)
@@ -196,6 +196,7 @@ def session_event(
             "model": model,
             "session_id": session_id,
             "stage": state.get("stage", {}).get("phase", "author"),
+            "role": "judge" if workspace.relative_to(directory).parts[0] == "panel" else "author",
         }
         refs = []
         if result is not None:
