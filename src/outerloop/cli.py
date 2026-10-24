@@ -1319,7 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
         return pr(args)
     if args.command == "trajectory":
         from outerloop.runstate import run_dir
-        from outerloop.trajectory import read, verify
+        from outerloop.trajectory import read, summarize, verify
 
         values = env_file_values(keys=("OUTERLOOP_ROOT",)) if not args.root else {}
         root = Path(
@@ -1354,6 +1354,16 @@ def main(argv: list[str] | None = None) -> int:
                 print("no trajectory")
             if args.verify:
                 print("; ".join(problems) if problems else "chain intact")
+            if events:
+                summary = summarize(events)
+                verbs = ", ".join(
+                    f"{verb} {count}" for verb, count in summary["refusals_by_verb"].items()
+                )
+                authors = ", ".join(summary["authors"]) or "unknown"
+                print(
+                    f"refusals: {summary['refusals']} of {summary['decisions']} decisions"
+                    f"{f' ({verbs})' if verbs else ''}; author: {authors}"
+                )
         return 1 if problems and problems != ["no trajectory"] else 0
     if args.command == "status":
         from outerloop.status import collect_status, render_text

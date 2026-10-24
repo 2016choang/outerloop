@@ -7,6 +7,59 @@ import pytest
 from outerloop import trajectory
 
 
+def test_summarize() -> None:
+    start = {"type": "session.start", "data": {"backend": "claude", "model": "model-x"}}
+    events = [start, {"type": "wake", "data": {}}, start]
+    events.extend(
+        {"type": "syscall.decision", "data": {"verb": verb, "outcome": outcome}}
+        for verb, outcome in (
+            ("submit", "accepted"),
+            ("submit", "refused"),
+            ("message", "refused"),
+            ("submit", "refused"),
+        )
+    )
+    events.append({"type": "session.start", "data": {"backend": "claude", "model": "model-y"}})
+    events.append(start)
+    assert trajectory.summarize(iter(events)) == {
+        "decisions": 4,
+        "refusals": 3,
+        "refusals_by_verb": {"submit": 2, "message": 1},
+        "authors": ["claude/model-x", "claude/model-y"],
+    }
+    assert trajectory.summarize([]) == {
+        "decisions": 0,
+        "refusals": 0,
+        "refusals_by_verb": {},
+        "authors": [],
+    }
+
+
+def test_cli_summary(tmp_path: Path, capsys) -> None:
+    from outerloop.cli import main
+
+    directory = tmp_path / "runs" / "sample"
+    trajectory.record(directory, "session.start", {"backend": "claude", "model": "model-x"})
+    for verb, outcome in (
+        ("submit", "accepted"),
+        ("submit", "refused"),
+        ("message", "refused"),
+        ("submit", "refused"),
+    ):
+        trajectory.record(directory, "syscall.decision", {"verb": verb, "outcome": outcome})
+    args = ["trajectory", "sample", "--root", str(tmp_path)]
+    for flags in ([], ["--verify"]):
+        assert main(args + flags) == 0
+        assert capsys.readouterr().out.splitlines()[-1] == (
+            "refusals: 3 of 4 decisions (submit 2, message 1); author: claude/model-x"
+        )
+        assert main(args + flags + ["--json"]) == 0
+        expected = trajectory.read(directory)
+        assert json.loads(capsys.readouterr().out) == (
+            {"events": expected, "problems": []} if flags else expected
+        )
+
+
 def test_chain_detects_edits_and_gaps(tmp_path: Path) -> None:
     for n in range(3):
         trajectory.record(tmp_path, "measure", {"value": n}, at=n)
