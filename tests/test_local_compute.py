@@ -518,7 +518,8 @@ def test_zero_gpu_pool_keeps_parent_env_and_warns_once(gpu_root, monkeypatch, ca
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "parent")
     monkeypatch.setattr(LocalCompute, "_zero_gpu_warning_pid", None)
     lc = LocalCompute()
-    for index, requested in enumerate((0, 5, 5)):
+    # warnings seen after each submit: a CPU job never warns; the first GPU job does, once
+    for index, (requested, warned) in enumerate(((0, 0), (5, 1), (5, 1))):
         output = gpu_root / f"visible_{index}"
         lc.submit(
             replace(
@@ -530,8 +531,8 @@ def test_zero_gpu_pool_keeps_parent_env_and_warns_once(gpu_root, monkeypatch, ca
         assert output.read_text().strip() == "parent"
         assert not (gpu_root / "local_jobs/gpus.json").exists()
         assert lc.queue_snapshot() == []
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1  # once per process, and only when a job asks
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == warned
     assert "OUTERLOOP_LOCAL_GPUS" in warnings[0].message
     assert "CUDA_VISIBLE_DEVICES" in warnings[0].message
 
