@@ -8,7 +8,8 @@ description: Write or repair an Outerloop benchmark contract, identify solver sc
    to find a deterministic, repeatable command that prints a numeric metric as
    JSON on one line. Ask the user if the benchmark, metric or direction is
    ambiguous; do not invent an evaluator or run an expensive benchmark without
-   an agreed compute budget.
+   an agreed compute budget. On a cluster, never run benchmarks or evaluations
+   on the login node; submit them as Slurm jobs.
 2. Read [docs/contract.md](https://github.com/outerloop-science/outerloop/blob/main/docs/contract.md)
    for fields and its linked reference for constraints. Inspect an existing
    `.outerloop.yaml` before proposing changes. Show the benchmark command, metric,

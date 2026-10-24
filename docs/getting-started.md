@@ -25,8 +25,11 @@ codex plugin add outerloop@outerloop
 Both use the repository's `.claude-plugin/marketplace.json` and the same skills;
 Codex also supports this marketplace layout. Open a new agent session in your
 target repository and say "use outerloop on this repo". The setup skill installs
-`outerloop-science`, helps validate a contract, and selects local forge and local
-compute, so no GitHub account or cluster is needed. Model access is still needed;
+`outerloop-science`, helps validate a contract, and offers local forge with local
+or Slurm compute. On a laptop, the plugin runs CPU benchmarks locally without
+needing GitHub or a cluster. For GPU benchmarks, SSH to the cluster's login node
+and run your coding agent there; the resident loop submits all work to Slurm.
+Model access is still needed;
 enter secrets only in the CLI's private prompts. Setup does not start the loop.
 Ask separately to start, inspect, message or stop a run. The plugin drives the
 CLI; budgets, measurement and forbidden paths remain enforced by the kernel.

@@ -11,12 +11,19 @@ description: Start, inspect, message or stop Outerloop runs and read their repor
 2. For progress, run `outerloop status --json`. For a selected state root, use
    `outerloop status --root /path/to/state --json` and keep that same `--root`
    on subsequent commands. Report states, phases and spend from the output.
-   There is no top-level `siblings` command in this CLI.
+   On Slurm, also check `squeue -u "$USER"`; status reads saved state, not the
+   scheduler. There is no top-level `siblings` command in this CLI.
 3. Only when the user asks to start, check that setup and contract validation
-   succeeded, then run `outerloop start` (add `--local` to explicitly select the
-   foreground local loop where a scheduler is installed). Keep the foreground
-   terminal available for Ctrl-C. If a lease, credential or containment preflight
-   fails, report it and stop; do not bypass it or launch duplicate loops.
+   succeeded, then run `outerloop start`. With Slurm compute and `sbatch` on
+   PATH, this submits the self-resubmitting resident job and prints its job id,
+   logs directory, and stop and pause commands; report those to the user.
+   Author sessions, evaluations, launches and wakes each run as Slurm jobs.
+   Never run benchmarks or evaluations on the login node. Do not suggest the
+   login-node loop unless the user says the site permits a long-lived login
+   process; then follow the install guide. For configured local compute, keep
+   the foreground terminal available for Ctrl-C. If a lease, credential or
+   containment preflight fails, report it and stop; do not bypass it or launch
+   duplicate loops.
 4. Read local-forge reports with `outerloop pr list` and `outerloop pr show N`,
    replacing `N` with a returned PR number. Both accept `--root /path/to/state`
    and `--target owner/repo`. For the board, read `CLIMB.md` and
@@ -29,11 +36,16 @@ description: Start, inspect, message or stop Outerloop runs and read their repor
    `outerloop message RUN_ID --file /path/to/note.txt`. Keep secrets out of notes.
    Report that delivery happens at the next wake; this command schedules no wake.
 6. For a stop request, distinguish stopping the loop from ending one run. Stop a
-   local foreground loop with Ctrl-C in its owning terminal. There is no top-level
-   `outerloop stop`. To end one run, use
+   local foreground loop with Ctrl-C in its owning terminal. On Slurm, use the
+   stop command printed by start: `scancel --name outerloop-resident`, with the
+   instance's `<12 hex>` suffix when applicable; confirm the selected instance
+   before cancelling. There is no top-level `outerloop stop`. To pause, run
+   `touch /path/to/state/PAUSE` at the selected root. Already-running jobs
+   continue; the resident cancels its successor and exits. Resume with
+   `rm /path/to/state/PAUSE` and `outerloop start`. To end one run, use
    `outerloop end RUN_ID --note "Operator requested stop"`, then check status.
    Ending is processed at a tick when no session holds the run; it is not an
    immediate kill, and a paused loop must resume to process it. Stopping the loop
-   does not end active work. If the user wants all work stopped or runs Slurm,
+   does not end active work. If the user wants all work stopped,
    clarify the scope and follow the operate guide instead of killing unrelated
    processes or guessing job names.
