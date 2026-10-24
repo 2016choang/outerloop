@@ -112,6 +112,10 @@ def test_park_run_appends_the_launch_ledger(tmp_path) -> None:
         {"name": "a", "minutes": 5, "artifacts": [], "why": "probe a"},
         {"name": "sw", "minutes": 5, "artifacts": [], "array": 2},
     ]
+    from outerloop.trajectory import read, verify
+
+    assert [event["type"] for event in read(ledger_dir)] == ["launch.submit", "launch.submit"]
+    assert verify(ledger_dir, record.run_id) == []
     # a re-park of the same sleep (a multi-stage gate) adds no second record
     _park_run(
         tmp_path,

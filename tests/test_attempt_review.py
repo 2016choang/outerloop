@@ -938,6 +938,12 @@ def test_publish_refusal_is_a_message(review_run, monkeypatch, reason):
     )
     assert load_record(root, record.run_id).stage["hypothesis"] == "Preserve the refused direction."
     assert outcome.outcome == "publish-refused"
+    from outerloop.trajectory import read
+
+    decision = read(ws.parent)[-1]
+    assert decision["type"] == "syscall.decision"
+    assert decision["data"]["verb"] == "submit"
+    assert decision["data"]["outcome"] == "refused"
     assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
     message = pending(ws.parent, 0)[-1]
     assert message.kind == ("base-moved" if reason in ("human", "push") else "note")
@@ -1535,6 +1541,15 @@ def test_terminal_releases_snapshot_when_notebook_fails(review_run, monkeypatch,
     assert released == ["refs/test/snapshot"]
     assert load_record(root, "tsp-r1").state == ENDED
     assert "notebook unavailable" in caplog.text
+    from outerloop.trajectory import read, verify
+
+    directory = run_dir(root, record.run_id)
+    events = read(directory)
+    assert [event["type"] for event in events] == ["ending"]
+    assert events[0]["data"] == {"state": "merged", "reason": "PR merged"}
+    assert events[0]["ts"] > NOW  # wall-clock time, not the caller's tick time
+    assert events[0]["refs"][0]["path"] == "report.md"
+    assert verify(directory, record.run_id) == []
 
 
 @pytest.mark.parametrize("edit_ledger", [False, True])

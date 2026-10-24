@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- Kernel events now append to a per-run `trajectory.jsonl` with sequence numbers and a SHA-256 chain. `outerloop trajectory <run-id> [--verify] [--json]` reads it without changing run state. Operational files and their formats are unchanged; older kernels ignore the new file. Upgrading: runs started before this kernel have no trajectory and read as "no trajectory" until their next recorded event. No backfill is attempted.
 - Add a printable agent-text inventory and protocol wording lint, with clearer refusal recovery guidance (#487, parts 1–2).
 - `BENCHMARKS.md` shows `—` instead of "provenance unknown" in the main-commit column of a baseline row that nothing has improved on yet, as on a freshly seeded repository.
 - The README and the getting-started guide link to the quickstart repository. It runs two CPU benchmarks with the local forge and local compute, and needs no GitHub account or cluster (#563). The docs and the startup warning no longer say an uncontained session runs in a sandbox: it gets a scrubbed environment and its own home, but can read any file the account can.

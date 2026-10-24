@@ -147,6 +147,8 @@ from outerloop.syscall import ensure_excluded as syscall_excluded
 from outerloop.syscall import install_tool as syscall_install_tool
 from outerloop.syscall import refresh_tool as syscall_refresh_tool
 from outerloop.syscall import write_siblings as syscall_write_siblings
+from outerloop.trajectory import file_refs
+from outerloop.trajectory import record as record_event
 from outerloop.verifier import MAX_CLAIM_CHARS
 
 REPLY_MARKER = marker("followup")
@@ -1162,6 +1164,11 @@ def deliver_messages(
         persist()
 
         def refuse(index: int, reason: str) -> None:
+            record_event(
+                run_dir,
+                "syscall.decision",
+                {"verb": "message", "outcome": "refused", "reason": reason},
+            )
             entry["recipient"] = record.run_id
             entry["message"] = asdict(
                 Message(
@@ -1275,6 +1282,12 @@ def deliver_messages(
             ids=[f"message-{e['counter']:020d}" for e in public],
             references=[str(e.get("in_reply_to", "")) for e in public],
         )
+        for _entry in public:
+            record_event(
+                run_dir,
+                "syscall.decision",
+                {"verb": "message", "outcome": "accepted", "reason": ""},
+            )
         for index, entry in enumerate(journal, 1):
             if entry.get("delivered"):
                 continue
@@ -1338,6 +1351,12 @@ def deliver_messages(
                         append(run_dir, message)
                     else:
                         append(recipient_dir, message)
+                        if message.kind == "agent-message":
+                            record_event(
+                                run_dir,
+                                "syscall.decision",
+                                {"verb": "message", "outcome": "accepted", "reason": ""},
+                            )
                         if recipient.run_id != record.run_id:
                             append(
                                 run_dir,
@@ -3312,6 +3331,18 @@ def _resume_run(
     # more experiments, or concludes — instead of being decided by policy here.
     # Falls back to the plain-finish behavior (negative terminal / draft PR)
     # when the session cannot be resumed.
+    record_event(
+        run_dir,
+        "measure",
+        {
+            "baseline": result.baseline,
+            "candidate": result.candidate,
+            "metric": bench.metric,
+            "credited": result.outcome == "improved",
+            "outcome": result.outcome,
+            "head_sha": candidate_sha,
+        },
+    )
     submitted_park = bool(stage.get("submitted"))
     if stage.get("panel_skip"):
         panel_lenses = ()
@@ -4221,6 +4252,11 @@ def publish(
     def refuse(
         text: str, head: str = "", *, moved: bool = False, quoted_text: str = ""
     ) -> AttemptOutcome:
+        record_event(
+            run_dir,
+            "syscall.decision",
+            {"verb": "submit", "outcome": "refused", "reason": redact(text, secrets)},
+        )
         append(
             run_dir,
             Message(
@@ -4637,6 +4673,7 @@ def publish(
                 # read: visible, plainly not merge-ready
                 draft=draft,
             )
+        record_event(run_dir, "pr.open", {"url": pr_url, "head_sha": result.candidate_sha})
         # Arm auto-merge, best-effort, and ONLY when branch protection
         # requires a human review — the guard keeps bot-never-merges
         # enforced in code, not in per-repo config. Never arm a draft,
@@ -6266,6 +6303,12 @@ def finish_run(
             final, stage={**final.stage, "launch_afterany": "afterany:" + ":".join(sorted(jobs))}
         )
     save_record(run_root, final, now)
+    record_event(
+        directory,
+        "ending",
+        {"state": ending, "reason": note},
+        refs=file_refs(directory, report),
+    )
     ref = str(record.stage.get("candidate_ref") or "")
     if snapshot_attempted and not ref:
         ws = None

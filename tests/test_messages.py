@@ -173,6 +173,14 @@ def test_missing_live_recipient_refused(tmp_path, state, target):
     note = pending(tmp_path / "runs" / sender.run_id, 0)[0]
     assert note.source == "kernel" and note.kind == "note"
     assert "Message #1" in note.payload["text"] and "no live run" in note.payload["text"]
+    from outerloop.trajectory import read
+
+    decisions = [
+        event["data"]
+        for event in read(tmp_path / "runs" / sender.run_id)
+        if event["type"] == "syscall.decision"
+    ]
+    assert [decision["outcome"] for decision in decisions] == ["refused"]
     assert pending(tmp_path / "runs" / recipient.run_id, 0) == []
     assert not wake_pending(tmp_path / "runs" / sender.run_id, sender)
 
