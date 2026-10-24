@@ -2423,8 +2423,8 @@ def attempt_once(
                 verdict_outcome = (
                     outcome.outcome if isinstance(outcome, AttemptResult) else "improved"
                 )
-                # a refusal before measuring (scope) has no numbers and is no measurement
-                if outcome.baseline is not None or outcome.candidate is not None:
+                # a scope refusal returns before measuring; a failed eval was attempted
+                if verdict_outcome != "scope-violation":
                     record_event(
                         inbox_dir,
                         "measure",
