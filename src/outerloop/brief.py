@@ -472,7 +472,9 @@ def render(brief: SessionBrief) -> str:
             "sleeps (a `sleep` with nothing staged is a checkpoint that "
             "refreshes your session clock and costs one sleep). "
             + (
-                "The sibling view is refreshed at every wake; `siblings` shows it."
+                "The sibling view is refreshed at every wake, and a sibling's "
+                "new or changed hypothesis is delivered to you here; `siblings` "
+                "shows its launches and score."
                 if brief.channels.get("siblings", True)
                 else ""
             ),

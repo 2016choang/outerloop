@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- A session now hears once when a live sibling states a new or changed hypothesis (#360). The note names the sibling, quotes its hypothesis, and points to `siblings` for its launches and score. It is sent only when `channels.siblings` is on. Upgrading: the note uses the existing `note` kind, so an older kernel shows it as ordinary inbox text.
 - A skills-only plugin for Claude Code and Codex sets up Outerloop, writes and validates the contract, and operates runs from the agent (#562). Install it with `/plugin marketplace add outerloop-science/outerloop` or `codex plugin marketplace add outerloop-science/outerloop`.
 - `outerloop trajectory <run-id>` now ends with the run's refusal count and its author models, for release canary comparisons; the agent-text inventory includes operator notes (#487, part 3). Session events record `role` (`author` or `judge`). Upgrading: session events written before this kernel have no `role` and count as author sessions.
 - On macOS without an image, sessions, evaluations and panel lenses run under a packaged Seatbelt profile (`sandbox-exec`, #292): they write only the workspace and a scratch directory, read only system and toolchain paths, and connect out only to TCP port 443, DNS and local ports. Linux and Apptainer runs are unchanged.
