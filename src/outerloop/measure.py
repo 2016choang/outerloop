@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +37,25 @@ from outerloop.job_names import run_job_name
 from outerloop.orchestrator import EvalError
 
 log = logging.getLogger(__name__)
+
+# A container image is large and identical across measures in one process;
+# (path, size, mtime) says when a re-hash is actually needed.
+_image_digests: dict[tuple[str, int, int], str] = {}
+
+
+def image_digest(image: str) -> str:
+    """SHA-256 of the container image file, or "" when none is used/readable."""
+    if not image:
+        return ""
+    try:
+        stat = os.stat(image)
+        key = (image, stat.st_size, stat.st_mtime_ns)
+        if key not in _image_digests:
+            with open(image, "rb") as stream:
+                _image_digests[key] = hashlib.file_digest(stream, "sha256").hexdigest()
+        return _image_digests[key]
+    except OSError:
+        return ""
 
 
 class MeasurementPending(Exception):
@@ -353,6 +373,21 @@ class DispatchedMeasurer:
 
     def _ev(self, m: Measure) -> Path:
         return self.run_dir / f"eval-{self._slot(m)}"
+
+    def result_files(self, measures: list[Measure]) -> tuple[Path, ...]:
+        """The eval result files the kernel reads, when they exist.
+
+        `read_eval_result` reads exit-code and stdout for the metric, and
+        stderr to explain a failure; provenance refs name the same files.
+        """
+        files: list[Path] = []
+        for m in measures:
+            ev = self._ev(m)
+            for name in ("exit-code", "stdout", "stderr"):
+                path = ev / name
+                if path.exists():
+                    files.append(path)
+        return tuple(files)
 
     def _job_name(self, m: Measure) -> str:
         # A LIVENESS HINT, not a durable key: the cluster is asked "is this
