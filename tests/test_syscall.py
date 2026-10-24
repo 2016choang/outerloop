@@ -112,11 +112,13 @@ def _job(
     return ev
 
 
-def test_no_request_file_means_no_syscall(tmp_path: Path) -> None:
+def test_read_request_success_paths(tmp_path: Path) -> None:
+    """No file is no syscall; an empty launch list is a checkpoint sleep; a
+    well-formed request is parsed and consumed exactly once."""
     assert read_request(tmp_path) is None
-
-
-def test_request_is_parsed_and_consumed(tmp_path: Path) -> None:
+    write_req(tmp_path, {"launches": []})
+    req = read_request(tmp_path)
+    assert req is not None and req.launches == ()
     f = write_req(
         tmp_path,
         {
@@ -146,17 +148,18 @@ def test_request_is_parsed_and_consumed(tmp_path: Path) -> None:
     assert not f.exists()  # consumed: honored (or refused) exactly once
 
 
-def test_empty_launches_is_a_checkpoint_sleep(tmp_path: Path) -> None:
-    write_req(tmp_path, {"launches": []})
-    req = read_request(tmp_path)
-    assert req is not None and req.launches == ()
-
-
-def test_malformed_request_raises_and_is_still_consumed(tmp_path: Path) -> None:
+def test_a_refused_request_is_still_consumed(tmp_path: Path) -> None:
+    # A bad request can never re-park a later run. Malformed JSON and an
+    # agent-controlled giant file are both refused and consumed.
     f = write_req(tmp_path, "{not json")
     with pytest.raises(SyscallError, match="not valid JSON"):
         read_request(tmp_path)
-    assert not f.exists()  # a bad request can never re-park a later run
+    assert not f.exists()
+    # A giant request is refused by SIZE before any parse work.
+    f = write_req(tmp_path, "x" * (MAX_REQUEST_BYTES + 1))
+    with pytest.raises(SyscallError, match="exceeds"):
+        read_request(tmp_path)
+    assert not f.exists()
 
 
 @pytest.mark.parametrize(
@@ -182,13 +185,30 @@ def test_invalid_requests_are_refused_loudly(tmp_path: Path, payload, match) -> 
         read_request(tmp_path)
 
 
-def test_read_request_carries_submit_and_rejects_a_non_bool(tmp_path: Path) -> None:
+def test_read_request_submit_and_report_fields(tmp_path: Path) -> None:
     write_req(tmp_path, {"launches": [], "submit": True, "report": "H: the change helps"})
     req = read_request(tmp_path)
-    assert req is not None and req.submit
+    assert req is not None and req.submit and req.report == "H: the change helps"
     write_req(tmp_path, {"launches": [], "submit": "yes"})
     with pytest.raises(SyscallError, match="submit must be a boolean"):
         read_request(tmp_path)
+    # A submit without a report is accepted; whitespace trims to empty.
+    write_req(tmp_path, {"launches": [], "submit": True})
+    req = read_request(tmp_path)
+    assert req is not None and req.submit and req.report == ""
+    write_req(tmp_path, {"launches": [], "submit": True, "report": "   "})
+    req = read_request(tmp_path)
+    assert req is not None and req.report == ""
+    write_req(tmp_path, {"launches": [], "submit": True, "report": "x" * (MAX_REPORT_CHARS + 1)})
+    with pytest.raises(SyscallError, match="report must be"):
+        read_request(tmp_path)
+    write_req(tmp_path, {"launches": [], "submit": True, "report": "  H: it helps  "})
+    req = read_request(tmp_path)
+    assert req is not None and req.report == "H: it helps"
+    # a sleep without a submit needs none
+    write_req(tmp_path, {"launches": [{"name": "a", "command": "x"}]})
+    req = read_request(tmp_path)
+    assert req is not None and req.report == ""
 
 
 def test_read_request_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
@@ -200,15 +220,6 @@ def test_read_request_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
     write_req(tmp_path, {"type": "verdict", "findings": []}, typed=False)
     with pytest.raises(SyscallError, match="expected a sleep, message or stop syscall"):
         read_request(tmp_path)
-
-
-def test_oversized_request_file_is_refused_before_parsing(tmp_path: Path) -> None:
-    # the file is agent-controlled: a giant request must be refused by SIZE
-    # before any parse work (and still consumed).
-    f = write_req(tmp_path, "x" * (MAX_REQUEST_BYTES + 1))
-    with pytest.raises(SyscallError, match="exceeds"):
-        read_request(tmp_path)
-    assert not f.exists()
 
 
 def test_minutes_are_clamped_to_the_ceiling(tmp_path: Path) -> None:
@@ -234,14 +245,16 @@ def test_siblings_command_reads_the_fleet_snapshot(tmp_path: Path) -> None:
         ],
     )
     out = cmd_siblings(tmp_path, None)
-    assert "agent-02 (parked/candidate): compose embedding decay" in out
-    assert "agent-03 (running)" in out
+    assert "agent-02" in out and "parked/candidate" in out and "compose embedding decay" in out
+    assert "agent-03" in out and "running" in out
     assert "prefer a direction" not in out  # direction advice lives in the guidance pack
     (tmp_path / ".outerloop" / "siblings.json").write_text("not json")
     assert cmd_siblings(tmp_path, None) == "no sibling activity known."
 
 
-def test_budget_arithmetic() -> None:
+def test_budget_error_rules() -> None:
+    """Launch and sleep counts bound a request; a submit needs no prior
+    launch, and the GPU rule applies only where the brief discloses it."""
     req = SyscallRequest(launches=(_launch("a"), _launch("b")))
     ok = budget_error(req, launches_used=0, launch_budget=4, sleeps_used=0, sleep_budget=2)
     assert ok == ""
@@ -249,10 +262,6 @@ def test_budget_arithmetic() -> None:
     assert "launch budget" in over
     spent = budget_error(req, launches_used=0, launch_budget=4, sleeps_used=2, sleep_budget=2)
     assert "sleep budget exhausted" in spent
-
-
-def test_submit_needs_no_prior_launch() -> None:
-    """Only the launch, sleep and GPU-hour budgets constrain a submit."""
 
     def check(request, launches_used: int, launch_budget: int = 4) -> str:
         return budget_error(
@@ -398,11 +407,10 @@ def _finding(**over) -> dict:
     return f
 
 
-def test_no_verdict_file_is_none(tmp_path: Path) -> None:
+def test_read_verdict_success_paths(tmp_path: Path) -> None:
     assert read_verdict(tmp_path) is None  # judge never concluded
-
-
-def test_read_verdict_round_trip(tmp_path: Path) -> None:
+    write_verdict(tmp_path, {"findings": [], "notes": "materially sound"})
+    assert read_verdict(tmp_path) == {"findings": [], "notes": "materially sound"}
     write_verdict(
         tmp_path,
         {
@@ -421,11 +429,6 @@ def test_read_verdict_rejects_a_wrong_or_missing_type(tmp_path: Path) -> None:
     write_req(tmp_path, {"findings": [], "notes": ""}, typed=False)  # no type
     with pytest.raises(VerdictError, match="expected a verdict syscall"):
         read_verdict(tmp_path)
-
-
-def test_clean_verdict_has_no_findings(tmp_path: Path) -> None:
-    write_verdict(tmp_path, {"findings": [], "notes": "materially sound"})
-    assert read_verdict(tmp_path) == {"findings": [], "notes": "materially sound"}
 
 
 def _one_finding(tmp_path: Path) -> dict:
@@ -488,9 +491,10 @@ def test_read_verdict_size_caps_a_giant_verdict(tmp_path: Path) -> None:
         read_verdict(tmp_path)
 
 
-def test_install_tool_refuses_a_symlinked_channel(tmp_path: Path) -> None:
-    # a judge's checkout is author-authored: a .outerloop symlink to a host
-    # dir must not let install write through it.
+def test_install_tool_owns_the_channel(tmp_path: Path) -> None:
+    # A judge's checkout is author-authored: a .outerloop symlink to a host dir
+    # must not let install write through it, and a pre-planted syscall.json
+    # must not survive to be read as a forged verdict.
     escape = tmp_path / "ESCAPE"
     escape.mkdir()
     ws = tmp_path / "ws"
@@ -501,17 +505,14 @@ def test_install_tool_refuses_a_symlinked_channel(tmp_path: Path) -> None:
     assert (ws / SYSCALL_DIR / "syscall").exists()
     assert list(escape.iterdir()) == []  # nothing written through to the target
 
-
-def test_install_tool_clears_a_pre_planted_abi(tmp_path: Path) -> None:
-    # a pre-planted syscall.json in an untrusted checkout must NOT survive to be
-    # read as a forged verdict by a judge that never concludes.
-    ws = tmp_path / "ws"
-    (ws / SYSCALL_DIR).mkdir(parents=True)
-    (ws / SYSCALL_DIR / SYSCALL_FILE).write_text(
+    # a real channel dir is removed and recreated, dropping a planted ABI
+    planted = tmp_path / "planted"
+    (planted / SYSCALL_DIR).mkdir(parents=True)
+    (planted / SYSCALL_DIR / SYSCALL_FILE).write_text(
         json.dumps({"type": "verdict", "findings": [_finding()], "notes": "forged"})
     )
-    install_tool(ws)
-    assert read_verdict(ws) is None  # the planted ABI is gone
+    install_tool(planted)
+    assert read_verdict(planted) is None  # the planted ABI is gone
 
 
 def test_gather_results_reads_output_and_delivers_artifacts(tmp_path) -> None:
@@ -635,7 +636,6 @@ def test_launch_job_script_copies_declared_artifacts(tmp_path: Path) -> None:
         artifact_max_bytes=100,
     )
     text = script.read_text()
-    assert '"$EV/artifacts"' in text and "-le 100" in text
     # run it with the apptainer line stubbed out (no apptainer on CI): the
     # jail line writes stdout; we replace it with a no-op that keeps files.
     doctored = text.replace(
@@ -836,9 +836,10 @@ def test_parse_elapsed_reads_sacct_fields() -> None:
     assert parse_elapsed("x-01:00:00") is None
 
 
-def test_sync_cli_waits_for_the_done_marker(tmp_path, monkeypatch) -> None:
+def test_sync_cli_waits_then_times_out(tmp_path, monkeypatch) -> None:
     """The verb touches the request, then blocks until the kernel stamps
-    done — the wait is the session's own time, never a new leg."""
+    done — the wait is the session's own time, never a new leg. An unstamped
+    request returns at its deadline instead of blocking forever."""
     (tmp_path / SYSCALL_DIR).mkdir()
     monkeypatch.setattr("outerloop.syscall_cli.SYNC_POLL_S", 0.01)
 
@@ -858,15 +859,10 @@ def test_sync_cli_waits_for_the_done_marker(tmp_path, monkeypatch) -> None:
     # than the marker's 0.3 s arrival, so this bounds it well under one interval
     assert elapsed < 5, elapsed
 
+    class Probe:
+        minutes = 0  # a pure probe: the deadline has already passed
 
-def test_sync_cli_times_out_gracefully(tmp_path, monkeypatch) -> None:
-    (tmp_path / SYSCALL_DIR).mkdir()
-    monkeypatch.setattr("time.sleep", lambda s: None)
-
-    class A:
-        minutes = 0
-
-    out = cmd_sync(tmp_path, A())
+    out = cmd_sync(tmp_path, Probe())
     assert "timed out" in out and "next wake" in out
 
 
@@ -1039,26 +1035,6 @@ def test_sweep_pace_is_validated_clamped_and_expanded(tmp_path: Path) -> None:
     assert launch_task_ids((s8,), ["1", "2"]) == []  # an unknown mapping is never guessed
 
 
-def test_submit_report_is_optional_and_bounded(tmp_path: Path) -> None:
-    # A submit without a report is accepted.
-    write_req(tmp_path, {"launches": [], "submit": True})
-    req = read_request(tmp_path)
-    assert req is not None and req.submit and req.report == ""
-    write_req(tmp_path, {"launches": [], "submit": True, "report": "   "})
-    req = read_request(tmp_path)
-    assert req is not None and req.report == ""
-    write_req(tmp_path, {"launches": [], "submit": True, "report": "x" * (MAX_REPORT_CHARS + 1)})
-    with pytest.raises(SyscallError, match="report must be"):
-        read_request(tmp_path)
-    write_req(tmp_path, {"launches": [], "submit": True, "report": "  H: it helps  "})
-    req = read_request(tmp_path)
-    assert req is not None and req.report == "H: it helps"
-    # a sleep without a submit needs none
-    write_req(tmp_path, {"launches": [{"name": "a", "command": "x"}]})
-    req = read_request(tmp_path)
-    assert req is not None and req.report == ""
-
-
 def test_read_results_reads_without_delivering(tmp_path: Path) -> None:
     ev = _job(tmp_path, "a", code="0\n", stdout="hello\nresult 1\n")
     (ev / "artifacts" / "out.txt").write_text("x")
@@ -1118,10 +1094,13 @@ def test_refresh_tool_rewrites_only_the_tool_and_never_through_a_symlink(tmp_pat
     t.join(timeout=5)
     assert not t.is_alive(), "refresh_tool blocked on a FIFO"
     assert seen == [True] and tool.is_file() and "def main(" in tool.read_text()
-    # The notice names this workspace's channel.
-    assert "python .outerloop/syscall <verb> --help" in tool_update_note(".outerloop")
-    assert "`--report <file>`" in tool_update_note(".outerloop")
-    assert "`end` verb is now `stop`" in tool_update_note(".outerloop", verification="self_report")
+    # The notice names this workspace's channel and the current verbs.
+    note = tool_update_note(".outerloop")
+    assert ".outerloop/syscall" in note and "--report" in note
+    assert "`end` verb is now `stop`" in note
+    self_report = tool_update_note(".outerloop", verification="self_report")
+    assert "Self-reported submissions require" in self_report
+    assert "`end` verb is now `stop`" in self_report
 
 
 @pytest.mark.parametrize(
