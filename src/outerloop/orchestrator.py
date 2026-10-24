@@ -2423,18 +2423,20 @@ def attempt_once(
                 verdict_outcome = (
                     outcome.outcome if isinstance(outcome, AttemptResult) else "improved"
                 )
-                record_event(
-                    inbox_dir,
-                    "measure",
-                    {
-                        "baseline": outcome.baseline,
-                        "candidate": outcome.candidate,
-                        "metric": bench.metric,
-                        "credited": verdict_outcome == "improved",
-                        "outcome": verdict_outcome,
-                        "head_sha": candidate_sha,
-                    },
-                )
+                # a refusal before measuring (scope) has no numbers and is no measurement
+                if outcome.baseline is not None or outcome.candidate is not None:
+                    record_event(
+                        inbox_dir,
+                        "measure",
+                        {
+                            "baseline": outcome.baseline,
+                            "candidate": outcome.candidate,
+                            "metric": bench.metric,
+                            "credited": verdict_outcome == "improved",
+                            "outcome": verdict_outcome,
+                            "head_sha": candidate_sha,
+                        },
+                    )
         except MeasurementPending as pending:
             # PARK 2 (dispatched candidate/suite, after the session): the wake
             # reads the cached results and decides — or, on a SUBMITTED park,

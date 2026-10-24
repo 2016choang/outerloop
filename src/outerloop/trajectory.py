@@ -104,11 +104,12 @@ def file_refs(run_dir: Path, *paths: Path) -> list[dict[str, str]]:
 
 
 def read(run_dir: Path) -> list[dict]:
-    """Missing legacy histories are empty; damaged lines are skipped."""
+    """Missing legacy histories are empty; damaged lines are skipped. Any other
+    read failure raises, so an unreadable chain is never shown as absent."""
     try:
         with (run_dir / LEDGER).open("rb") as stream:
             raw = stream.read(MAX_LEDGER_BYTES)
-    except OSError:
+    except FileNotFoundError:
         return []
     return [
         row

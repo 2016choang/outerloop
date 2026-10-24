@@ -57,6 +57,10 @@ def test_legacy_run_without_trajectory(tmp_path: Path, capsys) -> None:
     assert main(["trajectory", "legacy", "--root", str(tmp_path), "--verify"]) == 0
     assert "no trajectory" in capsys.readouterr().out
     assert not (directory / trajectory.LEDGER).exists()
+    # an unreadable chain is an error, never "no trajectory"
+    (directory / trajectory.LEDGER).mkdir()
+    assert main(["trajectory", "legacy", "--root", str(tmp_path)]) == 1
+    assert "cannot read trajectory" in capsys.readouterr().err
 
 
 def test_concurrent_appends_and_best_effort_limits(tmp_path: Path, monkeypatch, caplog) -> None:

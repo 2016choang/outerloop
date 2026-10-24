@@ -1331,7 +1331,11 @@ def main(argv: list[str] | None = None) -> int:
         if Path(args.run_id).name != args.run_id or args.run_id in (".", ".."):
             parser.error("invalid run id")
         directory = run_dir(root, args.run_id)
-        events = read(directory)
+        try:
+            events = read(directory)
+        except OSError as exc:
+            print(f"cannot read trajectory: {exc}", file=sys.stderr)
+            return 1
         problems = verify(directory, args.run_id) if args.verify else []
         if args.json:
             print(
