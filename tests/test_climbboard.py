@@ -506,7 +506,7 @@ def test_html_carries_the_live_strip() -> None:
     assert "climb/status.json" in html
     # the strip re-fetches (an open page shows runs that appear or leave) and
     # re-renders elapsed time locally between fetches
-    assert "setInterval(refresh" in html and "setInterval(render" in html
+    assert "setInterval(refresh, 180000)" in html and "setInterval(render, 30000)" in html
     # a 404 page or malformed body never poisons the strip's render loop
     assert "r.ok ? r.json() : null" in html and "Array.isArray(s.runs)" in html
     # the page lists the kernel's Slurm jobs when the strip carries them
