@@ -23,6 +23,8 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from outerloop.trajectory import session_event
+
 if TYPE_CHECKING:
     from outerloop.harness import SessionResult
 
@@ -287,6 +289,7 @@ def capture_session(
             if backend == "claude":
                 # read before the run: an auto-update can move the link mid-session
                 state["cli_version"] = cli_version(str(getattr(self, "binary", "") or ""))
+            session_event(workspace, "session.start", backend, self.model, resume_session_id or "")
             token = active.set(state)
             try:
                 result = run(self, brief_text, workspace, resume_session_id)
@@ -317,7 +320,20 @@ def capture_session(
                     )
                 except Exception:
                     log.warning("could not retain session evidence", exc_info=True)
+                session_event(
+                    workspace, "session.end", backend, self.model, result.session_id, result=result
+                )
                 return result
+            except Exception as exc:
+                session_event(
+                    workspace,
+                    "session.end",
+                    backend,
+                    self.model,
+                    resume_session_id or "",
+                    outcome=type(exc).__name__,
+                )
+                raise
             finally:
                 active.reset(token)
 

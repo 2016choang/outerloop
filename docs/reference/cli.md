@@ -280,3 +280,12 @@ outerloop migrate-ledger --target TARGET --main-sha MAIN_SHA [--force] [--dry-ru
 | `--main-sha` | required | the full current default-branch commit SHA |
 | `--force` | off | replace an existing branch ledger |
 | `--dry-run` | off | print the table without writing |
+
+### `trajectory <run-id> [--verify] [--json] [--root PATH]`
+
+Read the kernel's `runs/<run-id>/trajectory.jsonl` timeline. Text output shows
+sequence, time, type, actor and short event data. `--verify` checks the hash chain
+and sequence gaps; damaged chains exit 1. Missing legacy files show "no trajectory"
+and exit 0. JSON output is an event array, or an object with `events` and `problems`
+when verification is requested. This command is read-only.
+See [Run trajectory](../design/trajectory.md) for the format and limits.

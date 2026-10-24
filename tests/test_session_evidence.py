@@ -143,6 +143,9 @@ def fake_run(
     ],
 )
 def test_evidence_redaction_hash_cap_resume_and_retention(tmp_path, monkeypatch, backend, relative):
+    tmp_path = tmp_path / "runs" / "synthetic"
+    tmp_path.mkdir(parents=True)
+    (tmp_path / "state.json").write_text(json.dumps({"stage": {"phase": "author-sleep"}}))
     ws = tmp_path / "ws"
     ws.mkdir()
     home = tmp_path / "ws-home"
@@ -153,6 +156,19 @@ def test_evidence_redaction_hash_cap_resume_and_retention(tmp_path, monkeypatch,
     first = fake_run(backend, ws, native, "brief synthetic-secret")
     second = fake_run(backend, ws, native, "wake synthetic-secret", "session-1")
     assert first.session_record_path != second.session_record_path
+    from outerloop.trajectory import read, verify
+
+    events = read(tmp_path)
+    assert [e["type"] for e in events] == ["session.start", "session.end"] * 2
+    assert events[0]["data"]["stage"] == "author-sleep"
+    assert events[1]["data"]["session_id"] == "session-1"
+    assert len(events[1]["refs"]) == 1
+    native_ref = events[1]["refs"][0]
+    assert (
+        hashlib.sha256((tmp_path / native_ref["path"]).read_bytes()).hexdigest()
+        == native_ref["sha256"]
+    )
+    assert verify(tmp_path, "synthetic") == []
     record = json.loads(Path(second.session_record_path).read_text())
     assert record["session_id"] == "session-1"
     assert record["resume_session_id"] == "session-1"

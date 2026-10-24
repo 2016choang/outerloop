@@ -1245,6 +1245,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--file", type=Path, help="read the message text from this path")
     p = sub.add_parser("limits", help="show live operator ceilings and fleet GPU usage")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p = sub.add_parser("trajectory", help="show a run's kernel event chain (read-only)")
+    p.add_argument("run_id")
+    p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
+    p.add_argument("--verify", action="store_true")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("status", help="show local runs and endpoint outages (read-only)")
     p.add_argument("--root", help="state root (defaults to OUTERLOOP_ROOT or ~/.outerloop)")
     p.add_argument("--json", action="store_true", help="print structured JSON")
@@ -1312,6 +1317,40 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "pr":
         return pr(args)
+    if args.command == "trajectory":
+        from outerloop.runstate import run_dir
+        from outerloop.trajectory import read, verify
+
+        values = env_file_values(keys=("OUTERLOOP_ROOT",)) if not args.root else {}
+        root = Path(
+            args.root
+            or os.environ.get("OUTERLOOP_ROOT")
+            or values.get("OUTERLOOP_ROOT")
+            or DEFAULT_LOCAL_ROOT
+        ).expanduser()
+        if Path(args.run_id).name != args.run_id or args.run_id in (".", ".."):
+            parser.error("invalid run id")
+        directory = run_dir(root, args.run_id)
+        events = read(directory)
+        problems = verify(directory, args.run_id) if args.verify else []
+        if args.json:
+            print(
+                json.dumps(
+                    {"events": events, "problems": problems} if args.verify else events,
+                    sort_keys=True,
+                )
+            )
+        else:
+            for event in events:
+                print(
+                    f"{event['seq']} {event.get('ts')} {event.get('type')} "
+                    f"{event.get('actor')} {json.dumps(event.get('data'), sort_keys=True)[:160]}"
+                )
+            if not events:
+                print("no trajectory")
+            if args.verify:
+                print("; ".join(problems) if problems else "chain intact")
+        return 1 if problems and problems != ["no trajectory"] else 0
     if args.command == "status":
         from outerloop.status import collect_status, render_text
 

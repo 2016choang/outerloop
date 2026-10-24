@@ -28,6 +28,7 @@ from secrets import randbits
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from outerloop.image import apptainer_from_env
+from outerloop.trajectory import record as record_event
 
 if TYPE_CHECKING:
     from outerloop.measure import Measure
@@ -1532,9 +1533,33 @@ def attempt_once(
             gpu_hours=(hour_ceiling - gpu_hours_used if bench.gpus else None),
         )
 
+    def _decision(request: SyscallRequest, reason: str = "") -> None:
+        verbs = ["submit"] if request.submit else ["stop"] if request.end else []
+        if request.launches:
+            verbs.append("launch")
+        for verb in verbs or ["launch"]:
+            record_event(
+                inbox_dir,
+                "syscall.decision",
+                {
+                    "verb": verb,
+                    "outcome": "refused" if reason else "accepted",
+                    "reason": redact(reason, redact_secrets),
+                },
+            )
+
     def _ack(messages: list[Message]) -> None:
         nonlocal inbox_seq
         if messages:
+            record_event(
+                inbox_dir,
+                "inbox.deliver",
+                {
+                    "seq_range": [min(m.seq for m in messages), max(m.seq for m in messages)],
+                    "kinds": [m.kind for m in messages],
+                    "origins": [m.origin or m.source for m in messages],
+                },
+            )
             inbox_seq = max(m.seq for m in messages)
             if on_inbox_delivered is not None:
                 on_inbox_delivered(inbox_seq)
@@ -1905,6 +1930,7 @@ def attempt_once(
                         "Nothing ran and nothing was charged. "
                         f"Authors may change: {allowed}."
                     )
+                    _decision(request, problem)
                     scope_refused = True
                     tree_rejected = True
                     presealed = ""
@@ -1936,6 +1962,7 @@ def attempt_once(
                         return failed
                     continue
             if read_error:
+                _decision(request, read_error)
                 return AttemptResult(
                     outcome="session-error",
                     baseline=baseline,
@@ -1960,6 +1987,7 @@ def attempt_once(
                 )
                 request = dc_replace(request, problem=problem)
             if request.problem:
+                _decision(request, request.problem)
                 # told once, and the leg goes on with nothing staged honoured;
                 # a second conflicting request in one pass ends the leg as a
                 # stop (the refused_once bound stops a refuse/re-ask loop)
@@ -1986,6 +2014,7 @@ def attempt_once(
                     return failed
                 continue
             if request.end:
+                _decision(request)
                 if request.report:
                     session = dc_replace(session, final_text=request.report)
                 if on_stop is not None:
@@ -2004,6 +2033,7 @@ def attempt_once(
             if not request.sleep:
                 break
             if stale_submit:
+                _decision(request, "base moved; checkpointed without compute")
                 # Budget only the effective checkpoint, never the rejected compute.
                 request = SyscallRequest(launches=())
             # suite siblings' paired evals are charged as if measured (the
@@ -2129,6 +2159,7 @@ def attempt_once(
                     # never inheriting a prior park's.
                     tree_rejected = False
                     submitted = request
+                    _decision(dc_replace(request, launches=()))
                     sleeps_used += 1
                     evals_charge = evals_gpu_hours(
                         request,
@@ -2151,6 +2182,7 @@ def attempt_once(
                     problem = str(exc)
                     capacity_refused = True
                 else:
+                    _decision(request)
                     gpu_hours_used += launches_gpu_hours(request, gpus=bench.total_gpus)
                     raise RunParked(
                         phase="author-sleep",
@@ -2167,6 +2199,7 @@ def attempt_once(
                         sleeps_used=sleeps_used + 1,
                         gpu_hours_used=gpu_hours_used,
                     )
+            _decision(request, problem)
             if refused_once or not _can_resume():
                 if stale_submit:
                     return AttemptResult(
@@ -2380,6 +2413,7 @@ def attempt_once(
                 try:
                     launch_afterany = launcher(candidate_sha, submitted)
                 except CapacityError as exc:
+                    _decision(dc_replace(submitted, submit=False), str(exc))
                     append(
                         inbox_dir,
                         Message(
@@ -2401,6 +2435,7 @@ def attempt_once(
                     )
                     submitted = dc_replace(submitted, launches=())
                 else:
+                    _decision(dc_replace(submitted, submit=False))
                     launches_used += len(submitted.launches)
                     gpu_hours_used += launches_gpu_hours(submitted, gpus=bench.total_gpus)
             raise RunParked(
@@ -2422,6 +2457,18 @@ def attempt_once(
                 eval_minutes=submitted.eval_minutes if submitted is not None else None,
             ) from None
         if isinstance(outcome, AttemptResult):
+            record_event(
+                inbox_dir,
+                "measure",
+                {
+                    "baseline": outcome.baseline,
+                    "candidate": outcome.candidate,
+                    "metric": bench.metric,
+                    "credited": outcome.outcome == "improved",
+                    "outcome": outcome.outcome,
+                    "head_sha": candidate_sha,
+                },
+            )
             if submitted is not None and panel_runner is not None:
                 if outcome.baseline is not None and outcome.candidate is not None:
                     verdict = panel_runner(
@@ -2522,6 +2569,18 @@ def attempt_once(
                 panel_rounds=panel_reads,
             )
         # credited: candidate cleared the threshold and no sibling regressed.
+        record_event(
+            inbox_dir,
+            "measure",
+            {
+                "baseline": outcome.baseline,
+                "candidate": outcome.candidate,
+                "metric": bench.metric,
+                "credited": True,
+                "outcome": "improved",
+                "head_sha": candidate_sha,
+            },
+        )
         baseline = outcome.baseline
         candidate = outcome.candidate
         suite = outcome.suite
