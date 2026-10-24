@@ -798,7 +798,10 @@ class ClaudeCodeHarness:
                 # Also mounted when an endpoint overrides Vertex authentication.
                 provision_credential_file(Path(self.vertex.adc_file))
             if not self.container_image:
-                command = session_wrap(command, workspace, session_home, env)
+                adc = self.vertex.adc_file if self.vertex is not None else ""
+                command = session_wrap(
+                    command, workspace, session_home, env, read_files=[Path(adc)] if adc else []
+                )
             process = subprocess.Popen(
                 command,
                 cwd=workspace,

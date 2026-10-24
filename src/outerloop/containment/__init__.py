@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
+import subprocess
 import sys
-import tempfile
 from collections.abc import Iterable
 from importlib.resources import files
 from pathlib import Path
@@ -47,9 +48,30 @@ def executable_roots(*executables: str) -> list[Path]:
     )
     if uv_python.is_dir():
         roots.add(uv_python.resolve())
-    # a tool installed straight under home (~/bin/python) must not open all of home
+    return _outside_home(roots)
+
+
+def _outside_home(paths: Iterable[Path]) -> list[Path]:
+    """A tool installed straight under home (~/bin/python) must not open all of home."""
     home = Path.home().resolve()
-    return sorted(root for root in roots if root not in (home, *home.parents))
+    resolved = {path.resolve() for path in paths}
+    return sorted(path for path in resolved if path not in (home, *home.parents))
+
+
+@functools.cache
+def _user_cache_dir() -> str:
+    """Per-user cache dir under /private/var/folders (the CLI's keychain access
+    writes there); the rest of /private/var/folders holds other runs' temp files."""
+    try:
+        out = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_CACHE_DIR"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return str(Path(out).resolve()) if out else "/nonexistent"
+    except (OSError, subprocess.CalledProcessError):
+        return "/nonexistent"
 
 
 def seatbelt_wrap(
@@ -58,6 +80,7 @@ def seatbelt_wrap(
     workspace: Path,
     scratch: Path,
     read_only: Iterable[Path],
+    read_files: Iterable[Path] = (),
     contained: bool = False,
 ) -> list[str]:
     """Wrap an uncontained macOS launch; callers own the scratch lifetime."""
@@ -71,19 +94,25 @@ def seatbelt_wrap(
             )
             _warned = True
         return argv
-    roots = sorted({str(root.resolve()) for root in read_only})
-    rules = "\n  ".join(f'(subpath (param "READ_ONLY_{i}"))' for i in range(len(roots)))
+    roots = [str(root) for root in _outside_home(read_only)]
+    singles = sorted({str(path.resolve()) for path in read_files})
+    rules = "\n  ".join(
+        [f'(subpath (param "READ_ONLY_{i}"))' for i in range(len(roots))]
+        + [f'(literal (param "READ_FILE_{i}"))' for i in range(len(singles))]
+    )
     profile = (
         files(__package__).joinpath("macos.sb").read_text().replace("; READ_ONLY_ROOTS", rules)
     )
-    # A fresh file avoids following anything left by a previous session.
-    fd, name = tempfile.mkstemp(prefix="seatbelt-", suffix=".sb", dir=scratch)
-    with os.fdopen(fd, "w") as stream:
-        stream.write(profile)
-    parameters = {"WORKSPACE": str(workspace.resolve()), "SCRATCH": str(scratch.resolve())}
+    parameters = {
+        "WORKSPACE": str(workspace.resolve()),
+        "SCRATCH": str(scratch.resolve()),
+        "USER_CACHE": _user_cache_dir(),
+    }
     parameters.update({f"READ_ONLY_{i}": root for i, root in enumerate(roots)})
+    parameters.update({f"READ_FILE_{i}": path for i, path in enumerate(singles)})
     flags = [flag for key, value in parameters.items() for flag in ("-D", f"{key}={value}")]
-    return [str(SANDBOX_EXEC), *flags, "-f", name, *argv]
+    # the profile travels in argv, so no file the sandboxed process can write
+    return [str(SANDBOX_EXEC), *flags, "-p", profile, *argv]
 
 
 def session_wrap(
@@ -92,6 +121,7 @@ def session_wrap(
     scratch: Path,
     env: dict[str, str],
     read_only: Iterable[Path] = (),
+    read_files: Iterable[Path] = (),
 ) -> list[str]:
     if sys.platform == "darwin":
         env["TMPDIR"] = str(scratch.resolve())
@@ -101,4 +131,5 @@ def session_wrap(
         workspace=workspace,
         scratch=scratch,
         read_only=[*executable_roots(argv[0]), *read_only],
+        read_files=read_files,
     )

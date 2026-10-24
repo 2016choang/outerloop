@@ -41,10 +41,10 @@ outerloop init --forge local --compute local --no-image --target me/quickstart \
 outerloop start
 ```
 
-On macOS, sessions and evaluations run under a Seatbelt profile: they write only
-their workspace and scratch directory and cannot read your home. On Linux without a
-container they can read any file your account can. Either way, use a spend-capped
-API key.
+On macOS, sessions and evaluations run under a Seatbelt profile: they write their
+workspace and a scratch directory, read system and toolchain paths, and cannot read
+the rest of your home. On Linux without a container they can read any file your
+account can. Either way, use a spend-capped API key.
 
 For your own repository: three commands and one file. You need a repo with a benchmark command, an
 API key for the model that will write the code, and a Slurm cluster or one

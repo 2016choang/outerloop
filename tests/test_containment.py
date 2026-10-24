@@ -47,7 +47,7 @@ def test_wrap_parameters(tmp_path, monkeypatch):
     assert argv[0] == str(binary)
     assert argv[-2:] == ["python", "-V"]
     assert f"READ_ONLY_0={real.resolve()}" in argv
-    profile = Path(argv[argv.index("-f") + 1]).read_text()
+    profile = argv[argv.index("-p") + 1]
     assert '(param "READ_ONLY_0")' in profile
     assert str(real) not in profile
 
@@ -125,8 +125,8 @@ def test_session_wrap(tmp_path, monkeypatch, contained):
 
 @pytest.mark.skipif(not containment.seatbelt_available(), reason="requires macOS sandbox-exec")
 def test_real_seatbelt():
-    # /var/folders is allowed by the policy, so the denied fixture must be elsewhere.
-    with tempfile.TemporaryDirectory(dir="/private/tmp", prefix="seatbelt-test-") as directory:
+    # the default temp dir sits under /private/var/folders, beside other runs' scratch
+    with tempfile.TemporaryDirectory(prefix="seatbelt-test-") as directory:
         root = Path(directory)
         workspace, scratch, home = (root / name for name in ("workspace", "scratch", "home"))
         for path in (workspace, scratch, home):
