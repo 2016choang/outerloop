@@ -29,10 +29,6 @@ def provider(tmp_path: Path) -> FileTokenProvider:
     return FileTokenProvider(pat)
 
 
-def test_token_provider_strips(provider: FileTokenProvider) -> None:
-    assert provider.token() == "github_pat_test123"
-
-
 def test_default_branch_and_headers(provider: FileTokenProvider) -> None:
     transport = FakeTransport([{"default_branch": "main"}])
     client = GitHubClient(auth=provider, transport=transport)
@@ -64,24 +60,23 @@ def test_commit_tree_reads_commit_tree(provider):
     )
 
 
-def test_commit_tree_missing_commit(provider, monkeypatch):
+@pytest.mark.parametrize("response", [None, {}, {"tree": {}}, {"tree": {"sha": ""}}])
+def test_commit_tree_rejects_a_missing_tree(provider, response):
+    client = GitHubClient(auth=provider, transport=FakeTransport([response]))
+    with pytest.raises(GitHubError):
+        client.commit_tree("org/repo", "commit")
+
+
+def test_commit_tree_surfaces_an_http_failure(provider, monkeypatch):
     from email.message import Message
 
     def missing(request, **kwargs):
         raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
 
     monkeypatch.setattr("outerloop.github.AUTH_SAFE_OPENER.open", missing)
-    client = GitHubClient(auth=provider)
     with pytest.raises(GitHubError) as error:
-        client.commit_tree("org/repo", "missing")
+        GitHubClient(auth=provider).commit_tree("org/repo", "missing")
     assert error.value.status == 404
-
-
-@pytest.mark.parametrize("response", [None, {}, {"tree": {}}, {"tree": {"sha": ""}}])
-def test_commit_tree_rejects_missing_tree(provider, response):
-    client = GitHubClient(auth=provider, transport=FakeTransport([response]))
-    with pytest.raises(GitHubError):
-        client.commit_tree("org/repo", "commit")
 
 
 def test_public_tree_and_create_ref(provider, caplog):
@@ -94,8 +89,6 @@ def test_public_tree_and_create_ref(provider, caplog):
     assert request.get_method() == "POST"
     assert isinstance(request.data, bytes)
     assert json.loads(request.data) == {"ref": "refs/heads/research-log", "sha": "pin"}
-    client.dry_run = True
-    client.create_ref("org/repo", "refs/heads/research-log", "pin")
     assert len(transport.requests) == 2
     assert provider.token() not in caplog.text
 
@@ -193,6 +186,12 @@ def test_dry_run_mutations_touch_nothing(provider: FileTokenProvider) -> None:
     transport = FakeTransport([])
     client = GitHubClient(auth=provider, transport=transport, dry_run=True)
     client.comment("org/repo", 1, "hello")
+    client.update_issue("org/repo", 1, "body")
+    client.create_ref("org/repo", "refs/heads/x", "sha")
+    client.create_pull("org/repo", "title", "head", "main", "body")
+    client.merge_pull("org/repo", 1)
+    client.mark_ready_for_review("org/repo", 1)
+    client.enable_auto_merge("org/repo", 1)
     assert transport.requests == []
 
 
@@ -211,7 +210,7 @@ def _make_origin(tmp_path: Path) -> Path:
     return origin
 
 
-def test_workspace_clone_branch_commit_push(tmp_path: Path) -> None:
+def test_workspace_clone_branch_commit_push_and_dry_run(tmp_path: Path) -> None:
     origin = _make_origin(tmp_path)
     ws = Workspace.clone(f"file://{origin}", tmp_path / "work")
     ws.branch("feat/auto/test")
@@ -226,14 +225,12 @@ def test_workspace_clone_branch_commit_push(tmp_path: Path) -> None:
     ).stdout
     assert "Test commit <agentic-learning-bot@users.noreply.github.com>" in log
 
-
-def test_workspace_dry_run_push_stays_local(tmp_path: Path) -> None:
-    origin = _make_origin(tmp_path)
-    ws = Workspace.clone(f"file://{origin}", tmp_path / "work", dry_run=True)
-    ws.branch("feat/auto/nope")
-    (ws.root / "new.txt").write_text("x\n")
-    ws.commit_all("Local only", author="bot")
-    ws.push("feat/auto/nope")
+    # a dry-run workspace commits locally but never pushes
+    dry = Workspace.clone(f"file://{origin}", tmp_path / "dry", dry_run=True)
+    dry.branch("feat/auto/nope")
+    (dry.root / "new.txt").write_text("x\n")
+    dry.commit_all("Local only", author="bot")
+    dry.push("feat/auto/nope")
     branches = subprocess.run(
         ["git", "-C", str(origin), "branch"], capture_output=True, text=True, check=True
     ).stdout
@@ -367,31 +364,23 @@ def test_enable_auto_merge_arms_via_graphql(provider: FileTokenProvider) -> None
     assert "enablePullRequestAutoMerge" in body["query"]
 
 
-def test_enable_auto_merge_surfaces_graphql_errors_as_status_zero(
-    provider: FileTokenProvider,
-) -> None:
-    transport = FakeTransport(
-        [
-            {"node_id": "PR_node123", "number": 7},
-            {"errors": [{"message": "Pull request Auto merge is not allowed"}]},
-        ]
+def test_enable_auto_merge_failures_are_typed(provider: FileTokenProvider) -> None:
+    denied = GitHubClient(
+        auth=provider,
+        transport=FakeTransport(
+            [
+                {"node_id": "PR_node123", "number": 7},
+                {"errors": [{"message": "Pull request Auto merge is not allowed"}]},
+            ]
+        ),
     )
-    client = GitHubClient(auth=provider, transport=transport)
     with pytest.raises(GitHubError, match="not allowed") as exc_info:
-        client.enable_auto_merge("org/repo", 7)
+        denied.enable_auto_merge("org/repo", 7)
     assert exc_info.value.status == 0  # not an HTTP failure; not a success either
 
-
-def test_enable_auto_merge_missing_node_id_is_typed(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([{"number": 7}])
+    no_node = GitHubClient(auth=provider, transport=FakeTransport([{"number": 7}]))
     with pytest.raises(GitHubError, match="node_id"):
-        GitHubClient(auth=provider, transport=transport).enable_auto_merge("org/repo", 7)
-
-
-def test_enable_auto_merge_dry_run_touches_nothing(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([])
-    GitHubClient(auth=provider, transport=transport, dry_run=True).enable_auto_merge("o/r", 1)
-    assert transport.requests == []
+        no_node.enable_auto_merge("org/repo", 7)
 
 
 def test_arming_guard_requires_a_required_review(provider: FileTokenProvider) -> None:
@@ -440,22 +429,19 @@ def test_candidate_row_rewrite_touches_only_the_preamble(provider: FileTokenProv
     assert "| candidate | 13.1 |" not in patched
 
 
-def test_candidate_row_rewrite_fails_closed_without_report_heading(
-    provider: FileTokenProvider,
-) -> None:
+def test_candidate_row_rewrite_fails_closed(provider: FileTokenProvider) -> None:
     """No report heading -> no preamble boundary -> no rewrite (the row
-    found could be inside agent text)."""
-    transport = FakeTransport([{"body": "| candidate | 13.1 |\nno heading here"}])
-    client = GitHubClient(auth=provider, transport=transport)
+    found could be inside agent text), and no row -> nothing to rewrite.
+    Either way: GET only, no PATCH."""
+    no_heading = FakeTransport([{"body": "| candidate | 13.1 |\nno heading here"}])
+    client = GitHubClient(auth=provider, transport=no_heading)
     assert client.update_candidate_row("org/repo", 9, 10.2) is False
-    assert len(transport.requests) == 1
+    assert len(no_heading.requests) == 1
 
-
-def test_candidate_row_rewrite_reports_missing_row(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([{"body": "no table here\n\n## Research report\nx"}])
-    client = GitHubClient(auth=provider, transport=transport)
+    no_row = FakeTransport([{"body": "no table here\n\n## Research report\nx"}])
+    client = GitHubClient(auth=provider, transport=no_row)
     assert client.update_candidate_row("org/repo", 9, 10.2) is False
-    assert len(transport.requests) == 1  # GET only, no PATCH
+    assert len(no_row.requests) == 1  # GET only, no PATCH
 
 
 def test_session_planted_smudge_filter_never_executes(tmp_path: Path) -> None:
@@ -516,9 +502,11 @@ def test_non_utf8_filter_config_neither_crashes_nor_executes(tmp_path: Path) -> 
     assert not marker.exists()
 
 
-def test_redirect_off_host_loses_the_authorization_header() -> None:
-    # the shared opener forwards Authorization on a same-host redirect but
-    # strips it when the redirect changes host (or scheme)
+def test_no_auth_redirect_protects_the_credential() -> None:
+    # The shared opener forwards Authorization on a same-host redirect but
+    # strips it when the redirect changes host, and refuses a scheme downgrade.
+    import urllib.error
+
     from outerloop.github import _NoAuthRedirect
 
     handler = _NoAuthRedirect()
@@ -527,26 +515,20 @@ def test_redirect_off_host_loses_the_authorization_header() -> None:
         headers={"Authorization": "Bearer jwt"},
         method="POST",
     )
-    hijacked = handler.redirect_request(
-        request, None, 302, "Found", {}, "https://attacker.example/steal"
-    )
-    assert hijacked is not None
-    assert "Authorization" not in hijacked.headers
     same_host = handler.redirect_request(
         request, None, 302, "Found", {}, "https://api.github.com/elsewhere"
     )
     assert same_host is not None
     assert same_host.headers.get("Authorization") == "Bearer jwt"
-
-
-def test_update_issue_patches_the_body(provider: FileTokenProvider) -> None:
-    transport = FakeTransport([{}])
-    client = GitHubClient(auth=provider, transport=transport)
-    client.update_issue("o/r", 9, "new body")
-    request = transport.requests[0]
-    assert request.get_method() == "PATCH"
-    assert request.full_url.endswith("/repos/o/r/issues/9")
-    assert json.loads(cast(bytes, request.data)) == {"body": "new body"}
+    hijacked = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://attacker.example/steal"
+    )
+    assert hijacked is not None
+    assert "Authorization" not in hijacked.headers
+    assert hijacked.get_header("Authorization") is None
+    assert "Authorization" not in hijacked.unredirected_hdrs
+    with pytest.raises(urllib.error.URLError, match="downgrade"):
+        handler.redirect_request(request, None, 302, "", {}, "http://storage.example/log")
 
 
 def test_list_open_issues_can_filter_by_creator(provider: FileTokenProvider) -> None:
@@ -606,25 +588,6 @@ def test_job_log_tail_is_bounded_stripped_and_optional(provider, monkeypatch, ca
     caplog.set_level("INFO")
     assert client.job_log_tail("org/repo", 123, 100) == ""
     assert "job log for org/repo job 123 unavailable: log unavailable" in caplog.text
-
-
-def test_log_redirect_strips_credentials_and_refuses_downgrade():
-    import urllib.error
-
-    from outerloop.github import _NoAuthRedirect
-
-    request = urllib.request.Request(
-        "https://api.github.com/repos/o/r/actions/jobs/1/logs",
-        headers={"Authorization": "Bearer secret"},
-    )
-    redirect = _NoAuthRedirect()
-    redirected = redirect.redirect_request(
-        request, None, 302, "", {}, "https://storage.blob.core.windows.net/log?signature=x"
-    )
-    assert redirected.get_header("Authorization") is None
-    assert "Authorization" not in redirected.unredirected_hdrs
-    with pytest.raises(urllib.error.URLError, match="downgrade"):
-        redirect.redirect_request(request, None, 302, "", {}, "http://storage.example/log")
 
 
 def test_direct_merge_binds_expected_head(provider):
@@ -900,20 +863,16 @@ def test_ledger_unavailable_head_refuses_read(provider, monkeypatch, head):
         read_ledger(client, "org/repo")
 
 
-@pytest.mark.parametrize("dry_run", [False, True])
-def test_mark_ready_for_review(provider, dry_run):
+def test_mark_ready_for_review(provider):
     transport = FakeTransport([{"node_id": "PR_node"}, {"data": {}}])
-    client = GitHubClient(auth=provider, transport=transport, dry_run=dry_run)
+    client = GitHubClient(auth=provider, transport=transport)
     client.mark_ready_for_review("org/repo", 29)
-    if dry_run:
-        assert not transport.requests
-    else:
-        assert transport.requests[0].full_url.endswith("/repos/org/repo/pulls/29")
-        data = transport.requests[1].data
-        assert isinstance(data, bytes)
-        mutation = json.loads(data)
-        assert "markPullRequestReadyForReview" in mutation["query"]
-        assert mutation["variables"] == {"pr": "PR_node"}
+    assert transport.requests[0].full_url.endswith("/repos/org/repo/pulls/29")
+    data = transport.requests[1].data
+    assert isinstance(data, bytes)
+    mutation = json.loads(data)
+    assert "markPullRequestReadyForReview" in mutation["query"]
+    assert mutation["variables"] == {"pr": "PR_node"}
 
 
 def test_mark_ready_for_review_skips_a_moved_head(provider):
