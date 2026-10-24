@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- `outerloop trajectory <run-id>` now ends with the run's refusal count and its author models, for release canary comparisons; the agent-text inventory includes operator notes (#487, part 3). Session events record `role` (`author` or `judge`). Upgrading: session events written before this kernel have no `role` and count as author sessions.
 - On macOS without an image, sessions, evaluations and panel lenses run under a packaged Seatbelt profile (`sandbox-exec`, #292): they write only the workspace and a scratch directory, read only system and toolchain paths, and connect out only to TCP port 443, DNS and local ports. Linux and Apptainer runs are unchanged.
 - Kernel events now append to a per-run `trajectory.jsonl` with sequence numbers and a SHA-256 chain. `outerloop trajectory <run-id> [--verify] [--json]` reads it without changing run state. Operational files and their formats are unchanged; older kernels ignore the new file. Upgrading: runs started before this kernel have no trajectory and read as "no trajectory" until their next recorded event. No backfill is attempted.
 - Add a printable agent-text inventory and protocol wording lint, with clearer refusal recovery guidance (#487, parts 1–2).

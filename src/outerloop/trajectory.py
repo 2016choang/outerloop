@@ -118,6 +118,34 @@ def read(run_dir: Path) -> list[dict]:
     ]
 
 
+def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Count recorded syscall decisions and collect session authors in first-seen order."""
+    decisions = 0
+    refusals = 0
+    by_verb: dict[str, int] = {}
+    authors: list[str] = []
+    for event in events:
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        if event.get("type") == "syscall.decision":
+            decisions += 1
+            if data.get("outcome") == "refused":
+                refusals += 1
+                verb = data.get("verb") or "unknown"
+                by_verb[verb] = by_verb.get(verb, 0) + 1
+        elif event.get("type") == "session.start" and data.get("role") != "judge":
+            author = f"{data.get('backend') or 'unknown'}/{data.get('model') or 'unknown'}"
+            if author not in authors:
+                authors.append(author)
+    return {
+        "decisions": decisions,
+        "refusals": refusals,
+        "refusals_by_verb": by_verb,
+        "authors": authors,
+    }
+
+
 def verify(run_dir: Path, run_id: str) -> list[str]:
     """Check exact line bytes and sequence continuity without changing files."""
     try:
@@ -168,6 +196,7 @@ def session_event(
             "model": model,
             "session_id": session_id,
             "stage": state.get("stage", {}).get("phase", "author"),
+            "role": "judge" if workspace.relative_to(directory).parts[0] == "panel" else "author",
         }
         refs = []
         if result is not None:
