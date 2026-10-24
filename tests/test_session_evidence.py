@@ -161,6 +161,7 @@ def test_evidence_redaction_hash_cap_resume_and_retention(tmp_path, monkeypatch,
     events = read(tmp_path)
     assert [e["type"] for e in events] == ["session.start", "session.end"] * 2
     assert events[0]["data"]["stage"] == "author-sleep"
+    assert events[0]["data"]["role"] == "author"
     assert events[1]["data"]["session_id"] == "session-1"
     assert len(events[1]["refs"]) == 1
     native_ref = events[1]["refs"][0]
