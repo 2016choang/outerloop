@@ -50,6 +50,7 @@ REFUSAL_CONSTRUCTS = (
     ("orchestrator", "attempt_once", "keyword:problem", "refusal"),
     ("orchestrator", "attempt_once", "message", "refusal"),
     ("tick", "", "message", "refusal"),
+    ("cli", "message", "message", "note"),
 )
 # Message keys that mark a refusal; any other kernel message with a literal text is a note.
 REFUSAL_KEYS = {"message-refused", "refusal", "capacity-refusal"}

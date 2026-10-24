@@ -43,21 +43,24 @@ wording does not reach a parked run unless its deduplication key changes.
    run with an open PR, a run whose PR merged, and an ended run. A dev or rc pre-release still bumps the version (PyPI never
    accepts a version twice, so the next one is `.dev1`, `rc2`, ...) but leaves
    `[Unreleased]` in place until the final release.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow builds
+3. Pre-release canary runs report `refusals` per run by author model from
+   `outerloop trajectory <run-id>`. If refusals per run rise against the previous
+   release, explain why in the release PR before shipping.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`. The `release` workflow builds
    and publishes `outerloop-science` to PyPI through Trusted Publishing; the
    one-time PyPI setup is described at the top of
    `.github/workflows/release.yml`.
-4. Once the `release` workflow run for the tag is green (`gh run watch` on
+5. Once the `release` workflow run for the tag is green (`gh run watch` on
    it), `pip install outerloop-science==X.Y.Z` in a fresh venv, then
    `outerloop --help`. This comes before the GitHub release: publishing it is
    what Discord announces, so nothing is announced that did not install.
-5. `gh release create vX.Y.Z --generate-notes`, with `--prerelease` for a dev
+6. `gh release create vX.Y.Z --generate-notes`, with `--prerelease` for a dev
    or rc tag.
    For a final release, also move the `v0` tag that external callers of the
    reusable workflows track: `git tag -f v0 vX.Y.Z && git push -f origin v0`.
    Dev and rc tags never move it. This tag alias is the one force-push the
    repository allows; branches are never force-pushed.
-6. Announce. Discord's `#announcements` gets the release from the GitHub
+7. Announce. Discord's `#announcements` gets the release from the GitHub
    webhook on its own (docs/community.md). For a final release, also write
    the post for X (`@outerloop_sci`) and Bluesky (`@outerloop.science`): one
    or two sentences on what changed for the reader, the install line, the

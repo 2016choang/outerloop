@@ -6,6 +6,34 @@ The tutorial uses the simplest supported setup: everything runs on your machine.
 
 To watch a run before you write a contract, the [quickstart repository](https://github.com/outerloop-science/quickstart) has two CPU benchmarks and runs without GitHub or a cluster; its README has the three commands.
 
+## Use from your coding agent
+
+Install the skills-only Outerloop plugin in Claude Code:
+
+```text
+/plugin marketplace add outerloop-science/outerloop
+/plugin install outerloop@outerloop
+```
+
+Or in Codex:
+
+```bash
+codex plugin marketplace add outerloop-science/outerloop
+codex plugin add outerloop@outerloop
+```
+
+Both use the repository's `.claude-plugin/marketplace.json` and the same skills;
+Codex also supports this marketplace layout. Open a new agent session in your
+target repository and say "use outerloop on this repo". The setup skill installs
+`outerloop-science`, helps validate a contract, and offers local forge with local
+or Slurm compute. On a laptop, the plugin runs CPU benchmarks locally without
+needing GitHub or a cluster. For GPU benchmarks, SSH to the cluster's login node
+and run your coding agent there; the resident loop submits all work to Slurm.
+Model access is still needed;
+enter secrets only in the CLI's private prompts. Setup does not start the loop.
+Ask separately to start, inspect, message or stop a run. The plugin drives the
+CLI; budgets, measurement and forbidden paths remain enforced by the kernel.
+
 ## Before you start
 
 - Python 3.12 or later on a Linux machine, or any machine you can leave a terminal open on.
