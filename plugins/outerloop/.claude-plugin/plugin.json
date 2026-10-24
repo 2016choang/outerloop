@@ -1,0 +1,10 @@
+{
+  "name": "outerloop",
+  "version": "0.1.0",
+  "description": "Set up Outerloop, write benchmark contracts, and operate runs through the CLI.",
+  "author": {
+    "name": "Outerloop"
+  },
+  "license": "Apache-2.0",
+  "skills": "./skills/"
+}

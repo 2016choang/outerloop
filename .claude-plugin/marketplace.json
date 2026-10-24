@@ -1,0 +1,14 @@
+{
+  "name": "outerloop",
+  "owner": {
+    "name": "Outerloop"
+  },
+  "plugins": [
+    {
+      "name": "outerloop",
+      "source": "./plugins/outerloop",
+      "category": "Productivity"
+    }
+  ],
+  "description": "Set up and operate Outerloop from your coding agent."
+}
