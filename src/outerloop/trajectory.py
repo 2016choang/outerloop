@@ -125,7 +125,9 @@ def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     by_verb: dict[str, int] = {}
     authors: list[str] = []
     for event in events:
-        data = event.get("data", {})
+        data = event.get("data")
+        if not isinstance(data, dict):
+            data = {}
         if event.get("type") == "syscall.decision":
             decisions += 1
             if data.get("outcome") == "refused":

@@ -20,7 +20,7 @@ def test_summarize() -> None:
         )
     )
     events.append({"type": "session.start", "data": {"backend": "claude", "model": "model-y"}})
-    events.append(start)
+    events.extend([start, {"type": "wake", "data": ["malformed"]}])
     assert trajectory.summarize(iter(events)) == {
         "decisions": 4,
         "refusals": 3,
