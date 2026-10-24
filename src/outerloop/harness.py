@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from outerloop.containment import executable_roots, session_wrap
 from outerloop.endpoint_wait import session_url as endpoint_session_url
 from outerloop.endpoints import EndpointProfile
 from outerloop.hermes_install import hermes_ready, hermes_runtime
@@ -47,10 +48,8 @@ log = logging.getLogger(__name__)
 # What a session's environment contains — nothing else survives from the
 # parent. HOME is deliberately NOT inherited: it is redirected to a per-run
 # directory so a session cannot read key files under the real home or poison
-# other runs via ~/.claude state. (Residual risk: the filesystem itself is
-# not sandboxed — same-user absolute paths remain readable. See the threat
-# model; the bot PAT must not live on the account that runs sessions until
-# OS-level sandboxing lands.)
+# other runs via ~/.claude state. Without an image, macOS uses Seatbelt;
+# Linux still permits reads of same-user absolute paths.
 SESSION_ENV_ALLOWLIST = ("PATH", "TERM", "LANG", "LC_ALL", "TMPDIR")
 
 # Fallbacks only — every orchestrated path threads effective_limits in
@@ -798,6 +797,8 @@ class ClaudeCodeHarness:
             if self.vertex is not None and self.vertex.adc_file:
                 # Also mounted when an endpoint overrides Vertex authentication.
                 provision_credential_file(Path(self.vertex.adc_file))
+            if not self.container_image:
+                command = session_wrap(command, workspace, session_home, env)
             process = subprocess.Popen(
                 command,
                 cwd=workspace,
@@ -1416,6 +1417,14 @@ class CodexHarness:
                 env[f"APPTAINERENV_{key_env}"] = self.api_key
                 env["APPTAINERENV_CODEX_HOME"] = env["CODEX_HOME"]
             provision_credential_file(session_home / ".codex" / "auth.json")
+            if not self.container_image:
+                command = session_wrap(
+                    command,
+                    workspace,
+                    session_home,
+                    env,
+                    [Path(__file__).parent, *executable_roots(self.binary)],
+                )
             process = subprocess.Popen(
                 command,
                 cwd=workspace,
@@ -1788,6 +1797,10 @@ class HermesHarness:
             # cwd is the per-run home, NOT the workspace: --save_sample writes
             # its trajectory JSON to cwd, and artifacts must never land in the
             # clone (they would enter the diff).
+            if not self.container_image:
+                command = session_wrap(
+                    command, workspace, session_home, env, [repo, Path(__file__).parent]
+                )
             process = subprocess.Popen(
                 command,
                 cwd=session_home,

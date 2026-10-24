@@ -33,6 +33,7 @@ from urllib.parse import quote
 from outerloop.appauth import add_credential_args
 from outerloop.brief import BudgetState, distill_lessons
 from outerloop.compute import LocalCompute
+from outerloop.containment import seatbelt_available
 from outerloop.contract import (
     Benchmark,
     BenchmarkNotFoundError,
@@ -3772,7 +3773,7 @@ def _panel_lenses_from_args(
         prepared.append((kind, backend, model, lens_key))
     for kind, backend, model, lens_key in prepared:
         try:
-            if not args.image:
+            if not args.image and not seatbelt_available():
                 log.warning(
                     "panel lens %s runs uncontained (no image): the judge shares "
                     "this account with the operator's keys",

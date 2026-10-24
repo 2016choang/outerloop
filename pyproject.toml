@@ -96,6 +96,7 @@ testpaths = ["tests"]
 # the tests affected by your edits.
 addopts = "-ra --strict-markers -n auto"
 markers = [
+    "seatbelt: exercises the macOS containment wrapper (including real enforcement)",
     "real_locate_harness: exercises the real harness lookup (test_init fixture skips its patch)",
     "slow: long-running; nightly/manual only",
     "llm: calls a paid LLM API; manual only, never CI",

@@ -27,6 +27,7 @@ from pathlib import Path
 from secrets import randbits
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from outerloop.containment import executable_roots, seatbelt_available, seatbelt_wrap
 from outerloop.image import apptainer_from_env
 
 if TYPE_CHECKING:
@@ -258,7 +259,12 @@ class SubprocessEvaluator:
         # bound into the container — never the whole host /tmp.
         try:
             cache_dir = Path(
-                tempfile.mkdtemp(prefix="uv-cache-", dir=os.environ.get("TMPDIR", "/tmp"))
+                tempfile.mkdtemp(
+                    prefix="uv-cache-",
+                    dir=eval_home
+                    if not self.container_image and seatbelt_available()
+                    else os.environ.get("TMPDIR", "/tmp"),
+                )
             )
         except OSError as exc:
             import shutil
@@ -331,7 +337,16 @@ class SubprocessEvaluator:
                 command,
             ]
         else:
-            argv = ["sh", "-c", command]
+            import shlex
+
+            argv = seatbelt_wrap(
+                ["sh", "-c", command],
+                workspace=workspace,
+                scratch=eval_home,
+                read_only=executable_roots(*shlex.split(command)[:1])
+                if seatbelt_available()
+                else [],
+            )
         env = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR") if k in os.environ}
         # uv's cache does heavy small-file IO; on shared filesystems (NFS)
         # that flakes with stale-handle/copy errors. Keep the cache on
@@ -352,6 +367,8 @@ class SubprocessEvaluator:
             env["APPTAINERENV_UV_LINK_MODE"] = "copy"
             env["APPTAINERENV_UV_PROJECT_ENVIRONMENT"] = env["UV_PROJECT_ENVIRONMENT"]
         env["HOME"] = str(eval_home)
+        if not self.container_image and seatbelt_available():
+            env["TMPDIR"] = str(eval_home)
         if extra_env:
             # explicit injections only (the base env is a scrubbed
             # allowlist): today this carries the benchmark's run seed.
