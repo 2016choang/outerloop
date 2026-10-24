@@ -54,11 +54,37 @@ def fake_claude(tmp_path: Path, payload: str, exit_code: int = 0, sleep: int = 0
     return str(script)
 
 
-def test_successful_session_parses_everything(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
+def run_session(
+    tmp_path: Path,
+    payload: dict[str, Any] | str | None = None,
+    brief: str = "task",
+    *,
+    api_key: str = "k",
+    binary: str | None = None,
+    sleep: int = 0,
+    **options: Any,
+) -> SessionResult:
+    """Run one Claude session against a fake binary that records and replies."""
+    text = payload if isinstance(payload, str) else json.dumps(payload or CANNED)
     ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="sk-test-123", binary=binary).run("do the task", ws)
+    ws.mkdir(exist_ok=True)
+    return ClaudeCodeHarness(
+        api_key=api_key, binary=binary or fake_claude(tmp_path, text, sleep=sleep), **options
+    ).run(brief, ws)
+
+
+def seen(tmp_path: Path, name: str) -> str:
+    return (tmp_path / name).read_text()
+
+
+def seen_env(tmp_path: Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1) for line in seen(tmp_path, "seen_env").splitlines() if "=" in line
+    )
+
+
+def test_successful_session_parses_everything(tmp_path: Path) -> None:
+    result = run_session(tmp_path, api_key="sk-test-123")
     assert not result.is_error
     assert result.cost_usd == 0.42
     assert result.tokens == {"input_tokens": 150, "cached_input_tokens": 50, "output_tokens": 20}
@@ -72,56 +98,35 @@ def test_session_env_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
     """The threat model's credential-theft guard: no PAT, no stray secrets."""
     monkeypatch.setenv("OUTERLOOP_BOT_PAT", "github_pat_SECRET")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws_SECRET")
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key="sk-test-123", binary=binary).run("task", ws)
-    seen = (tmp_path / "seen_env").read_text()
-    assert "github_pat_SECRET" not in seen
-    assert "aws_SECRET" not in seen
-    assert "ANTHROPIC_API_KEY=sk-test-123" in seen
-    assert "PATH=" in seen
-    assert "CUDA_VISIBLE_DEVICES=" in seen  # the session sees no GPU
+    run_session(tmp_path, api_key="sk-test-123")
+    env = seen(tmp_path, "seen_env")
+    assert "github_pat_SECRET" not in env
+    assert "aws_SECRET" not in env
+    assert "ANTHROPIC_API_KEY=sk-test-123" in env
+    assert "PATH=" in env
+    assert "CUDA_VISIBLE_DEVICES=" in env  # the session sees no GPU
 
 
 @pytest.mark.parametrize(
-    ("key", "present", "absent"),
-    [
-        ("sk-ant-oat01-secret", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
-        ("sk-ant-api03-secret", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
-    ],
+    "key, oauth", [("sk-ant-oat01-secret", True), ("sk-ant-api03-secret", False)]
 )
-def test_auth_variable_follows_the_key_prefix(
-    tmp_path: Path, key: str, present: str, absent: str
-) -> None:
+def test_key_prefix_selects_the_credential_channel(tmp_path: Path, key: str, oauth: bool) -> None:
     """A `claude setup-token` token is a subscription OAuth credential, so the
-    CLI reads it from CLAUDE_CODE_OAUTH_TOKEN, never ANTHROPIC_API_KEY."""
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key=key, binary=binary).run("task", ws)
-    seen = (tmp_path / "seen_env").read_text().splitlines()
-    assert f"{present}={key}" in seen
-    assert not any(line.startswith(f"{absent}=") for line in seen)
-
-
-@pytest.mark.parametrize(
-    ("key", "flag", "other"),
-    [
-        ("sk-ant-oat01-secret", "--safe-mode", "--bare"),
-        ("sk-ant-api03-secret", "--bare", "--safe-mode"),
-    ],
-)
-def test_judge_isolation_flag_follows_the_key(
-    tmp_path: Path, key: str, flag: str, other: str
-) -> None:
-    """--bare never reads an OAuth token, so a judge on a subscription token
-    runs --safe-mode, which also skips CLAUDE.md, hooks, plugins and MCP."""
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key=key, binary=binary, bare=True).run("task", ws)
-    argv = (tmp_path / "seen_argv").read_text().split()
+    CLI reads it from CLAUDE_CODE_OAUTH_TOKEN, never ANTHROPIC_API_KEY. The same
+    prefix picks the judge isolation flag: --bare never reads an OAuth token, so
+    a judge on a subscription token runs --safe-mode (which also skips CLAUDE.md,
+    hooks, plugins and MCP)."""
+    run_session(tmp_path, api_key=key, bare=True)
+    env = seen(tmp_path, "seen_env").splitlines()
+    present, absent = (
+        ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+        if oauth
+        else ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+    )
+    assert f"{present}={key}" in env
+    assert not any(line.startswith(f"{absent}=") for line in env)
+    argv = seen(tmp_path, "seen_argv").split()
+    flag, other = ("--safe-mode", "--bare") if oauth else ("--bare", "--safe-mode")
     assert flag in argv and other not in argv
 
 
@@ -130,21 +135,18 @@ def test_home_is_redirected_per_session(tmp_path: Path) -> None:
     (harness key, bot PAT, ssh) must resolve nowhere."""
     import os
 
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
-    seen = dict(
-        line.split("=", 1)
-        for line in (tmp_path / "seen_env").read_text().splitlines()
-        if "=" in line
-    )
-    assert seen["HOME"] == str(tmp_path / "ws-home")
-    assert seen["HOME"] != os.environ.get("HOME")
-    assert Path(seen["HOME"]).is_dir()
+    run_session(tmp_path)
+    env = seen_env(tmp_path)
+    assert env["HOME"] == str(tmp_path / "ws-home")
+    assert env["HOME"] != os.environ.get("HOME")
+    assert Path(env["HOME"]).is_dir()
 
 
-def test_session_env_allowlist_is_exhaustive(tmp_path: Path) -> None:
+def test_session_env_is_an_allowlist_with_no_gpu(tmp_path: Path, monkeypatch) -> None:
+    """Only allowlisted variables cross into the session. GPU work goes through
+    `launch`, where it is recorded and metered, so a host that exposes GPUs to
+    the loop must not expose them to the session."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     env = session_env("key", "ANTHROPIC_API_KEY", home=tmp_path)
     assert set(env) <= set(SESSION_ENV_ALLOWLIST) | {
         "ANTHROPIC_API_KEY",
@@ -152,22 +154,12 @@ def test_session_env_allowlist_is_exhaustive(tmp_path: Path) -> None:
         "CUDA_VISIBLE_DEVICES",
     }
     assert env["HOME"] == str(tmp_path)
-
-
-def test_sessions_see_no_gpu(tmp_path: Path, monkeypatch) -> None:
-    """The session reasons; GPU work goes through `launch`, where it is recorded
-    and metered. A host that exposes GPUs to the loop must not expose them to
-    the session, on any backend."""
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    assert session_env("key", "ANTHROPIC_API_KEY", home=tmp_path)["CUDA_VISIBLE_DEVICES"] == ""
+    assert env["CUDA_VISIBLE_DEVICES"] == ""
 
 
 def test_argv_carries_the_controls(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key="k", binary=binary, max_turns=7).run("the brief", ws)
-    argv = (tmp_path / "seen_argv").read_text()
+    run_session(tmp_path, brief="the brief", max_turns=7)
+    argv = seen(tmp_path, "seen_argv")
     assert "--max-turns 7" in argv
     assert "--output-format json" in argv
     assert "--permission-mode acceptEdits" in argv
@@ -176,34 +168,27 @@ def test_argv_carries_the_controls(tmp_path: Path) -> None:
 def test_brief_travels_on_stdin_never_argv(tmp_path: Path) -> None:
     """argv is world-readable via /proc on shared nodes; briefs carry private
     research text."""
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key="k", binary=binary).run("SECRET research brief", ws)
-    assert "SECRET research brief" not in (tmp_path / "seen_argv").read_text()
-    assert (tmp_path / "seen_stdin").read_text() == "SECRET research brief"
+    run_session(tmp_path, brief="SECRET research brief")
+    assert "SECRET research brief" not in seen(tmp_path, "seen_argv")
+    assert seen(tmp_path, "seen_stdin") == "SECRET research brief"
 
 
-def test_transcript_lives_outside_the_workspace(tmp_path: Path) -> None:
-    """The workspace is a git clone that gets committed and pushed; the
-    transcript must never be part of that diff."""
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+def test_transcript_is_stored_outside_the_workspace_owner_only(tmp_path: Path) -> None:
+    """The workspace is a git clone that gets committed and pushed, so the
+    transcript (private research text on a shared filesystem) must live outside
+    it, readable by its owner alone."""
+    result = run_session(tmp_path)
     transcript = Path(result.transcript_path).resolve()
-    assert ws.resolve() not in transcript.parents
+    assert (tmp_path / "ws").resolve() not in transcript.parents
     assert transcript.exists()
+    assert stat.S_IMODE(transcript.stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "ws-home").stat().st_mode) == 0o700
 
 
 def test_malformed_fields_are_salvaged_not_discarded(tmp_path: Path) -> None:
     """A quirky cost value must not cost us the session id (resume depends
     on it) — field-level salvage, and never an exception."""
-    bad = dict(CANNED, total_cost_usd="not-a-number")
-    binary = fake_claude(tmp_path, json.dumps(bad))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path, dict(CANNED, total_cost_usd="not-a-number"))
     assert result.cost_usd is None
     assert result.session_id == "sess-1"
     assert result.num_turns == 3
@@ -212,21 +197,17 @@ def test_malformed_fields_are_salvaged_not_discarded(tmp_path: Path) -> None:
 
 def test_result_object_recovered_from_surrounding_log_lines(tmp_path: Path) -> None:
     noisy = "warning: something\n" + json.dumps(CANNED) + "\ntrailing line"
-    binary = fake_claude(tmp_path, noisy)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path, noisy)
     assert not result.is_error
     assert result.cost_usd == 0.42
 
 
-def test_timeout_returns_error_result_not_exception(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED), sleep=30)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary, timeout_s=1).run("task", ws)
+def test_timeout_is_budget_exhaustion_with_error_result(tmp_path: Path) -> None:
+    result = run_session(tmp_path, sleep=30, timeout_s=1)
     assert result.is_error
     assert result.stop_reason == "timeout"
+    assert budget_exhausted(result)
+    assert "walltime" in result.error_detail
 
 
 def test_exhausted_turns_carry_an_honest_detail(tmp_path: Path) -> None:
@@ -240,22 +221,10 @@ def test_exhausted_turns_carry_an_honest_detail(tmp_path: Path) -> None:
         subtype="error_max_turns",
         errors=["Reached maximum number of turns (120)"],
     )
-    binary = fake_claude(tmp_path, json.dumps(payload))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path, payload)
     assert result.is_error
     assert result.error_detail == "error_max_turns: Reached maximum number of turns (120)"
     assert budget_exhausted(result)
-
-
-def test_timeout_is_budget_exhaustion_with_walltime_detail(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED), sleep=30)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary, timeout_s=1).run("task", ws)
-    assert budget_exhausted(result)
-    assert "walltime" in result.error_detail
 
 
 def test_outage_classification_matches_api_refusals_only() -> None:
@@ -315,10 +284,7 @@ def test_error_detail_carries_the_real_cause_when_subtype_is_success(tmp_path: P
             "result": "API Error: 400 You have reached your specified workspace API usage limits.",
         }
     )
-    binary = fake_claude(tmp_path, payload)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    res = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    res = run_session(tmp_path, payload)
     assert res.is_error
     # the detail is the real error, not the useless "success" subtype
     assert res.error_detail.startswith("API Error: 400")
@@ -342,10 +308,7 @@ def test_parse_keeps_a_real_subtype_when_the_result_quotes_an_api_error(tmp_path
             "result": "API Error: 429 rate limit — retried, then hit the turn cap.",
         }
     )
-    binary = fake_claude(tmp_path, payload)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    res = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    res = run_session(tmp_path, payload)
     assert res.is_error
     assert res.error_detail.startswith("error_max_turns")  # subtype NOT clobbered
     assert budget_exhausted(res)  # still a budget ending
@@ -364,10 +327,7 @@ def test_parse_keeps_backend_error_messages_over_a_success_subtype(tmp_path: Pat
             "result": "API Error: 400 something the agent echoed",
         }
     )
-    binary = fake_claude(tmp_path, payload)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    res = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    res = run_session(tmp_path, payload)
     assert res.is_error
     # the real backend cause is kept, not replaced by the result text
     assert "overloaded_error" in res.error_detail
@@ -388,10 +348,7 @@ def test_parse_does_not_lift_a_real_subtype_so_agent_prose_cannot_latch(tmp_path
             "result": "API Error: 429 the agent quoted while writing its report.",
         }
     )
-    binary = fake_claude(tmp_path, payload)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    res = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    res = run_session(tmp_path, payload)
     assert res.error_detail.startswith("error_during_execution")  # NOT lifted
     assert not outage(res)  # agent prose does not trip the latch
 
@@ -408,37 +365,26 @@ def test_parse_captures_a_non_list_errors_cause_and_skips_the_lift(tmp_path: Pat
             "result": "API Error: 400 something the agent echoed",
         }
     )
-    binary = fake_claude(tmp_path, payload)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    res = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    res = run_session(tmp_path, payload)
     assert "overloaded_error" in res.error_detail  # non-list cause captured
     assert not res.error_detail.startswith("API Error")  # lift skipped
     assert outage(res)  # classified from the real cause
 
 
 def test_clean_sessions_and_real_failures_are_not_budget_endings(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ok = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    ok = run_session(tmp_path)
     assert ok.error_detail == "" and not budget_exhausted(ok)
-    dead = ClaudeCodeHarness(api_key="k", binary=str(tmp_path / "nope")).run("task", tmp_path)
+    dead = ClaudeCodeHarness(api_key="k", binary=str(tmp_path / "nope")).run(
+        "task", tmp_path / "ws"
+    )
+    assert dead.is_error
+    assert dead.stop_reason == "spawn-error"
+    assert "nope" in dead.error_detail  # #294: the report names what failed to spawn
     assert not budget_exhausted(dead)
 
 
-def test_missing_binary_returns_spawn_error(tmp_path: Path) -> None:
-    result = ClaudeCodeHarness(api_key="k", binary=str(tmp_path / "nope")).run("task", tmp_path)
-    assert result.is_error
-    assert result.stop_reason == "spawn-error"
-    assert "nope" in result.error_detail  # #294: the report names what failed to spawn
-
-
 def test_garbage_output_is_an_error_with_transcript(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, "not json at all")
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path, "not json at all")
     assert result.is_error
     assert result.stop_reason == "unparseable-output"
     assert "not json" in Path(result.transcript_path).read_text()
@@ -449,12 +395,9 @@ def test_transcript_write_refuses_symlinks(tmp_path: Path) -> None:
     the write to another same-user file."""
     import os as _os
 
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
     target = tmp_path / "victim"
     _os.symlink(target, tmp_path / "ws-session.json")
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path)
     assert not target.exists()  # the symlink was not followed
     assert result.transcript_path.endswith("ws-session-2.json")
 
@@ -462,10 +405,7 @@ def test_transcript_write_refuses_symlinks(tmp_path: Path) -> None:
 def test_transcript_is_redacted(tmp_path: Path) -> None:
     """A session that echoes its own key must not leak it into storage."""
     leaked = dict(CANNED, result="the key is sk-leak-me-456 whoops")
-    binary = fake_claude(tmp_path, json.dumps(leaked))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="sk-leak-me-456", binary=binary).run("task", ws)
+    result = run_session(tmp_path, leaked, api_key="sk-leak-me-456")
     stored = Path(result.transcript_path).read_text()
     assert "sk-leak-me-456" not in stored
     assert "[redacted]" in stored
@@ -504,16 +444,6 @@ def test_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
     assert wait_until(gone, interval=0.05), f"child {child} survived the group kill"
 
 
-def test_transcript_and_home_are_owner_only(tmp_path: Path) -> None:
-    """Transcripts carry private research text on a shared filesystem."""
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
-    assert stat.S_IMODE(Path(result.transcript_path).stat().st_mode) == 0o600
-    assert stat.S_IMODE((tmp_path / "ws-home").stat().st_mode) == 0o700
-
-
 @pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root ignores mode bits")
 def test_unwritable_parent_degrades_not_raises(tmp_path: Path) -> None:
     """The adapter never raises — even when the shared filesystem misbehaves."""
@@ -540,10 +470,7 @@ def test_stray_trailing_json_does_not_hijack_the_result(tmp_path: Path) -> None:
         + "\n"
         + json.dumps({"session_id": "evil", "total_cost_usd": 9.99, "is_error": True})
     )
-    binary = fake_claude(tmp_path, noisy)
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    result = ClaudeCodeHarness(api_key="k", binary=binary).run("task", ws)
+    result = run_session(tmp_path, noisy)
     assert not result.is_error
     assert result.session_id == "sess-1"
     assert result.cost_usd == 0.42
@@ -570,34 +497,18 @@ def test_fake_harness_records_calls(tmp_path: Path) -> None:
 
 
 def test_resume_passes_session_id_and_reuses_run_home(tmp_path: Path) -> None:
-    """A wake must restore the run's context: --resume in argv, same HOME."""
+    """A wake must restore the run's context: --resume in argv, same HOME. A
+    fresh session carries no --resume."""
     binary = fake_claude(tmp_path, json.dumps(CANNED))
     ws = tmp_path / "ws"
     ws.mkdir()
     harness = ClaudeCodeHarness(api_key="k", binary=binary)
     harness.run("initial brief", ws)
-    first_home = dict(
-        line.split("=", 1)
-        for line in (tmp_path / "seen_env").read_text().splitlines()
-        if "=" in line
-    )["HOME"]
+    assert "--resume" not in seen(tmp_path, "seen_argv")
+    first_home = seen_env(tmp_path)["HOME"]
     harness.run("wake update", ws, resume_session_id="sess-1")
-    argv = (tmp_path / "seen_argv").read_text()
-    second_home = dict(
-        line.split("=", 1)
-        for line in (tmp_path / "seen_env").read_text().splitlines()
-        if "=" in line
-    )["HOME"]
-    assert "--resume sess-1" in argv
-    assert second_home == first_home
-
-
-def test_no_resume_flag_on_fresh_sessions(tmp_path: Path) -> None:
-    binary = fake_claude(tmp_path, json.dumps(CANNED))
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    ClaudeCodeHarness(api_key="k", binary=binary).run("brief", ws)
-    assert "--resume" not in (tmp_path / "seen_argv").read_text()
+    assert "--resume sess-1" in seen(tmp_path, "seen_argv")
+    assert seen_env(tmp_path)["HOME"] == first_home
 
 
 def test_transcripts_accumulate_per_session_not_clobber(tmp_path: Path) -> None:
@@ -641,8 +552,7 @@ def test_container_image_wraps_in_apptainer(tmp_path: Path, monkeypatch, configu
     assert "--bind /real/claude:/opt/agent/claude:ro" in argv
     assert "/img/agent.sif /opt/agent/claude -p" in argv
     assert "sk-c" not in argv  # the key travels via env, never argv
-    seen_env = (tmp_path / "seen_env").read_text()
-    assert "APPTAINERENV_ANTHROPIC_API_KEY=sk-c" in seen_env
+    assert "APPTAINERENV_ANTHROPIC_API_KEY=sk-c" in seen(tmp_path, "seen_env")
 
 
 def _recording_apptainer(tmp_path: Path, payload: str) -> tuple[str, Path, Path]:
@@ -781,24 +691,22 @@ def test_codex_author_resolves_a_relative_workspace(tmp_path: Path, monkeypatch)
     assert "--bind ws:ws" not in argv
 
 
-def test_contained_codex_requires_an_absolute_binary(tmp_path: Path) -> None:
-    """A relative codex binary is a bind source that fails at mount time — caught
-    before any spend (mirrors the claude author's guard)."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    harness = CodexHarness(
-        api_key="k", binary="codex", container_image="/img/agent.sif", apptainer_binary="apptainer"
-    )
-    result = harness.run("task", ws)
-    assert result.is_error and result.stop_reason == "config-error"
-
-
-def test_container_requires_absolute_binary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_contained_harness_requires_an_absolute_binary(tmp_path: Path, backend: str) -> None:
     """A relative bind source fails at mount time deep inside apptainer —
-    catch the misconfiguration before any money is spent."""
+    catch the misconfiguration before any money is spent, on any backend."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    harness = ClaudeCodeHarness(api_key="k", binary="claude", container_image="/img/agent.sif")
+    harness: ClaudeCodeHarness | CodexHarness
+    if backend == "claude":
+        harness = ClaudeCodeHarness(api_key="k", binary=backend, container_image="/img/agent.sif")
+    else:
+        harness = CodexHarness(
+            api_key="k",
+            binary=backend,
+            container_image="/img/agent.sif",
+            apptainer_binary="apptainer",
+        )
     result = harness.run("task", ws)
     assert result.is_error
     assert result.stop_reason == "config-error"
