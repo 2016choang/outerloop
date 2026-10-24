@@ -93,7 +93,7 @@ from outerloop.ledger_events import (
 )
 from outerloop.limits import bound_limits, capped_limits, clamp_bound_limits, effective_limits
 from outerloop.markers import has_marker, marker
-from outerloop.measure import DispatchedMeasurer, DispatchSettings, image_digest
+from outerloop.measure import DispatchedMeasurer, DispatchSettings, measured_image
 from outerloop.orchestrator import (
     MAX_REPORT_BODY,
     AttemptResult,
@@ -3389,7 +3389,7 @@ def _resume_run(
         "head_sha": candidate_sha,
         "ruler": _ruler_provenance(ws, contract, bench, candidate_sha),
     }
-    image_sha256 = image_digest(str(getattr(measurer, "image", "") or ""))
+    image_sha256 = measured_image(str(getattr(measurer, "image", "") or ""), result.eval_files)
     if image_sha256:
         measure_data["image_sha256"] = image_sha256
     record_event(

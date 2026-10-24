@@ -17,6 +17,7 @@ phase flows straight through to the decision.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -56,6 +57,18 @@ def image_digest(image: str) -> str:
         return _image_digests[key]
     except OSError:
         return ""
+
+
+def measured_image(image: str, eval_files: tuple[Path, ...]) -> str:
+    """The image digest(s) the measures ran under: those recorded at dispatch,
+    comma-joined when baseline and candidate differ, else the image's digest now."""
+    recorded = set()
+    for path in eval_files:
+        if path.name == "image-sha256":
+            with contextlib.suppress(OSError):
+                recorded.add(path.read_text().strip())
+    recorded.discard("")
+    return ",".join(sorted(recorded)) if recorded else image_digest(image)
 
 
 class MeasurementPending(Exception):
@@ -378,12 +391,13 @@ class DispatchedMeasurer:
         """The eval result files the kernel reads, when they exist.
 
         `read_eval_result` reads exit-code and stdout for the metric, and
-        stderr to explain a failure; provenance refs name the same files.
+        stderr to explain a failure; provenance refs name the same files, plus
+        the image digest recorded at dispatch.
         """
         files: list[Path] = []
         for m in measures:
             ev = self._ev(m)
-            for name in ("exit-code", "stdout", "stderr"):
+            for name in ("exit-code", "stdout", "stderr", "image-sha256"):
                 path = ev / name
                 if path.exists():
                     files.append(path)
@@ -552,6 +566,10 @@ class DispatchedMeasurer:
                 write_atomic(self._infra_retry_path(m), json.dumps(prior))
             raise
         (self._ev(m) / "submitted").write_text(job_id)
+        # recorded at dispatch: the image file may be replaced while the run parks
+        digest = image_digest(self.image)
+        if digest:
+            (self._ev(m) / "image-sha256").write_text(digest)
         log.info("dispatched measure %s (sha %s) as job %s", m.name, m.tree_sha[:12], job_id)
         return job_id
 

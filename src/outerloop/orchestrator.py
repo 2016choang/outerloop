@@ -1472,10 +1472,10 @@ def attempt_once(
             log.warning("could not compute ruler identity: %s", exc)
             return ""
 
-    def _image_sha() -> str:
-        from outerloop.measure import image_digest
+    def _image_sha(eval_files: tuple[Path, ...]) -> str:
+        from outerloop.measure import measured_image
 
-        return image_digest(str(getattr(measurer, "image", "") or ""))
+        return measured_image(str(getattr(measurer, "image", "") or ""), eval_files)
 
     leg_start_seq = inbox_seq  # the cursor before this leg delivers anything
     if not spec.execution.can_execute:
@@ -1771,6 +1771,7 @@ def attempt_once(
     suite: tuple[SuiteMeasurement, ...] = ()
     suite_seed_ran = 0
     baseline_note = ""
+    eval_files: tuple[Path, ...] = ()
     measured: tuple[str, ...] = ()
     refused_once = False
     # A session that stops without staging anything (an empty reply, a line of
@@ -2510,7 +2511,7 @@ def attempt_once(
                         "head_sha": candidate_sha,
                         "ruler": _ruler(candidate_sha),
                     }
-                    digest = _image_sha()
+                    digest = _image_sha(outcome.eval_files)
                     if digest:
                         data["image_sha256"] = digest
                     record_event(
@@ -2684,6 +2685,7 @@ def attempt_once(
         suite = outcome.suite
         suite_seed_ran = outcome.suite_seed
         baseline_note = outcome.baseline_note  # cached-baseline provenance, to the report
+        eval_files = outcome.eval_files
 
         if panel_runner is None:
             break
@@ -2756,6 +2758,7 @@ def attempt_once(
         panel_rounds=panel_reads,
         panel_blocking_open=panel_blocking_open,
         panel_degraded=panel_degraded,
+        eval_files=eval_files,
     )
 
 
