@@ -74,8 +74,9 @@ def test_env_file_values_unreadable_is_a_start_error(tmp_path: Path) -> None:
         env_file_values(tmp_path / ".env")
 
 
-def test_env_file_values_refuses_a_writable_file(tmp_path: Path) -> None:
-    path = env_file(tmp_path, "OUTERLOOP_ROOT=/x\n", 0o666)
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+def test_env_file_values_refuses_a_writable_file(tmp_path: Path, mode: int) -> None:
+    path = env_file(tmp_path, "OUTERLOOP_ROOT=/x\n", mode)
     if not path.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         pytest.skip("filesystem drops group/other write bits")
     with pytest.raises(StartError, match="refusing to read"):
@@ -156,7 +157,8 @@ def test_local_without_sbatch_defaults_the_root(tmp_path: Path) -> None:
     assert p.root == DEFAULT_LOCAL_ROOT
     assert p.home == tmp_path / "checkout"  # the loop needs the checkout too
     cmd = p.command()
-    assert "outerloop.tick" in cmd and "--loop" in cmd and str(DEFAULT_LOCAL_ROOT) in cmd
+    assert "outerloop.tick" in cmd and "--loop" in cmd
+    assert cmd[cmd.index("--root") + 1] == str(DEFAULT_LOCAL_ROOT)
 
 
 def test_local_by_flag_or_env_or_file_even_with_sbatch(tmp_path: Path) -> None:
@@ -266,7 +268,7 @@ def test_slurm_accepts_a_comma_list_partition(tmp_path: Path) -> None:
         plan(tmp_path, root="/r", account="a", partition="cpu\nlong")
 
 
-@pytest.mark.parametrize("bad", ["30m", ""])
+@pytest.mark.parametrize("bad", ["0", "-5", "30m", ""])
 def test_cadence_must_be_a_positive_number_in_both_modes(tmp_path: Path, bad: str) -> None:
     if bad == "":
         assert plan(tmp_path, local=True, environ={"OUTERLOOP_CADENCE_MIN": ""}).cadence_min == ""
@@ -788,15 +790,18 @@ def test_upgrade_reports_the_version_outcome(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     versions = iter(["0.1.0.dev3", "0.1.0.dev4"])
+    calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kw: Any) -> Any:
         import subprocess
 
+        calls.append(argv)
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     monkeypatch.setattr(cli, "_installed_version", lambda _python: next(versions))
     assert main(["upgrade"]) == 0
+    assert calls[0][1:] == ["-m", "pip", "install", "--upgrade", "outerloop-science"]
     out = capsys.readouterr().out
     assert "0.1.0.dev3 -> 0.1.0.dev4" in out
     assert "outerloop start" in out
