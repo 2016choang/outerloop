@@ -65,6 +65,14 @@ description: Set up Outerloop when the user asks to use it on a repository, with
    to files, put them in argv, or read key files. If interactive secret entry is
    unavailable, hand this exact command to the user and stop. The CLI owns
    credential storage. Local forge needs no GitHub credential.
+
+   For a Claude author, ask whether the user wants an API key or their Claude
+   subscription. For the subscription, the user runs `claude setup-token` in
+   their own terminal and pastes the token at the wizard's hidden author-key
+   prompt; never run `setup-token` yourself or ask to see the token. Mention that
+   runs then share the plan's usage limits with the user's own Claude use. Panel
+   judges need a separate credential (a second key or token), because the
+   author's credential is refused for judges.
 5. Check the exit status and the wizard's configuration summary without reading
    secrets. If settings or a forge already exist, stop before overwriting or
    switching them; do not add `--force` or silently reseed. Report the target,
