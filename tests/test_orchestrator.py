@@ -331,6 +331,12 @@ def test_checkpoint_sleep_parks_with_no_dependency(tmp_path: Path) -> None:
         run_climb(tmp_path, [], contract=DEEP_CONTRACT, launcher=_fake_launcher([]))
     assert exc.value.afterany == "" and exc.value.sleeps_used == 1
     assert exc.value.launches_used == 0  # a checkpoint burns only the sleep
+    from outerloop.trajectory import read
+
+    decisions = [
+        event["data"] for event in read(run_dir(tmp_path)) if event["type"] == "syscall.decision"
+    ]
+    assert decisions == [{"verb": "sleep", "outcome": "accepted", "reason": ""}]
 
 
 @pytest.mark.parametrize("capacity_wait", [False, True])
@@ -504,6 +510,9 @@ def test_identical_resubmit_is_told_so_without_a_second_gate(tmp_path: Path) -> 
     assert harness.resumes == [None, "s1", "s2"]
     assert len(evaluator.calls) == 2
     assert "identical to the candidate the gate already measured" in harness.prompts[2]
+    from outerloop.trajectory import read
+
+    assert len([event for event in read(run_dir(tmp_path)) if event["type"] == "measure"]) == 1
 
 
 def test_conceding_after_an_errored_eval_ends_without_another_gate(tmp_path: Path) -> None:

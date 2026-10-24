@@ -152,6 +152,11 @@ def test_experiments_rows_come_from_the_ledger_including_each_jobs_last_line(
     ]
     assert rows[1]["why"] == "" and rows[1]["array"] == 2 and rows[1]["concurrency"] == 1
     assert len(history(tmp_path)[0]["jobs"]) == 1  # the duplicate ended row was skipped
+    from outerloop.trajectory import read
+
+    events = [event["data"] for event in read(tmp_path) if event["type"] == "launch.result"]
+    assert events[0] == {"event": "ended", "sleep": 1, "name": "wd", "state": "", "exit_code": 0}
+    assert all("last_line" not in event for event in events)
 
 
 def test_legacy_commit_tolerance_and_retry(tmp_path: Path) -> None:

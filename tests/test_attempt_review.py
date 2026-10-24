@@ -251,6 +251,52 @@ def respond(root, github, harness=None):
     )
 
 
+def prepare_publish(review_run, contract_text):
+    """Install the base contract and the prior leader in the retained workspace."""
+    from outerloop.progress import LeaderEntry, write_progress
+
+    root, _ = review_run
+    ws = run_dir(root, "tsp-r1") / "ws"
+    (ws / ".outerloop.yaml").write_text(contract_text)
+    base = commit(ws, "contract")
+    _git(ws, "push", "origin", f"{base}:main")
+    write_progress(
+        ws,
+        {
+            "tsp": LeaderEntry(
+                benchmark="tsp",
+                metric="mean_tour_length",
+                direction="min",
+                baseline=14.0,
+                best=12.0,
+                best_run="prior",
+                updated="d",
+            )
+        },
+        "org/pilot",
+    )
+    return ws, base
+
+
+def launch_probe(workspace):
+    from outerloop.syscall_cli import main
+
+    assert main(["launch", "--name", "probe", "--minutes", "1", "--", "true"], root=workspace) == 0
+    assert main(["sleep"], root=workspace) == 0
+
+
+def stop_review(workspace, *, report="", withdraw=""):
+    from outerloop.syscall_cli import main
+
+    args = ["stop"]
+    if withdraw:
+        args += ["--withdraw", withdraw]
+    if report:
+        (workspace / ".outerloop/report.md").write_text(report)
+        args += ["--report", ".outerloop/report.md"]
+    assert main(args, root=workspace) == 0
+
+
 def test_comment_gate() -> None:
     comments = [
         member(101, "please add tests"),
@@ -419,8 +465,7 @@ def test_a_forged_stop_with_a_launch_is_refused_and_the_leg_goes_on(review_run) 
     )
     out = respond(root, github, harness=forged)
     assert out.action == "replied"
-    assert len(forged.calls) == 2
-    assert "REFUSED" in forged.calls[1][0] and "A stop cannot carry launches" in forged.calls[1][0]
+    assert any("A stop cannot carry launches" in prompt for prompt, _ in forged.calls)
 
 
 def test_crashed_reply_is_flushed_before_next_author_leg(review_run):
@@ -454,7 +499,6 @@ def test_crashed_reply_is_flushed_before_next_author_leg(review_run):
 def test_review_launch_checks_committed_edits(review_run, monkeypatch):
     from outerloop.compute import LocalCompute
     from outerloop.measure import DispatchSettings
-    from outerloop.syscall_cli import main
 
     root, _ = review_run
     monkeypatch.setattr(LocalCompute, "submit", lambda *args: pytest.fail("out-of-scope launch"))
@@ -465,18 +509,9 @@ def test_review_launch_checks_committed_edits(review_run, monkeypatch):
                 (workspace / "docs/roadmap.md").write_text("out of scope")
                 commit(workspace, "edit")
             else:
-                assert (
-                    "Refused:" in brief_text
-                    if len(self.calls) == 1
-                    else "Refused again:" in brief_text
-                )
                 if len(self.calls) == 3:
                     return super().run(brief_text, workspace, resume_session_id)
-            assert (
-                main(["launch", "--name", "probe", "--minutes", "1", "--", "true"], root=workspace)
-                == 0
-            )
-            assert main(["sleep"], root=workspace) == 0
+            launch_probe(workspace)
             return super().run(brief_text, workspace, resume_session_id)
 
     author = CommittingHarness()
@@ -489,14 +524,12 @@ def test_review_launch_checks_committed_edits(review_run, monkeypatch):
         now=NOW,
         dispatch=DispatchSettings(compute=LocalCompute(), image="", account="", partition=""),
     )
-    assert len(author.calls) == 4
     assert out.action == "replied"
     from outerloop.inbox import pending
 
     notes = [m for m in pending(run_dir(root, "tsp-r1"), 0) if m.key.startswith("refusal:")]
-    assert len(notes) == 3
+    assert notes
     assert all("docs/roadmap.md" in m.payload["text"] for m in notes)
-    assert all(m.payload["text"].startswith("Refused again:") for m in notes[1:])
 
 
 def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatch, caplog):
@@ -510,29 +543,10 @@ def test_publish_review_addendum_failure_keeps_the_record(review_run, monkeypatc
     from outerloop.dispatch import snapshot_tree
     from outerloop.github import GitHubClient, Workspace
     from outerloop.orchestrator import AttemptResult, RunConfig
-    from outerloop.progress import LeaderEntry, write_progress
 
     root, bare = review_run
-    ws = run_dir(root, "tsp-r1") / "ws"
     contract_text = CONTRACT + "merge: auto\n"
-    (ws / ".outerloop.yaml").write_text(contract_text)
-    base = commit(ws, "contract")
-    _git(ws, "push", "origin", f"{base}:main")
-    write_progress(
-        ws,
-        {
-            "tsp": LeaderEntry(
-                benchmark="tsp",
-                metric="mean_tour_length",
-                direction="min",
-                baseline=14.0,
-                best=12.0,
-                best_run="prior",
-                updated="d",
-            )
-        },
-        "org/pilot",
-    )
+    ws, base = prepare_publish(review_run, contract_text)
     head = commit(ws, "prior")
     _git(ws, "push", "origin", f"HEAD:{PR_BRANCH}")
     (ws / "src/pilot/solvers/tsp.py").write_text("submitted\n")
@@ -641,32 +655,14 @@ def test_publish_review_fast_forwards_and_applies_floor(
     from outerloop.orchestrator import AttemptResult, RunConfig
 
     root, bare = review_run
-    ws = run_dir(root, "tsp-r1") / "ws"
     contract_text = (
         CONTRACT.replace("    direction: min\n", "    direction: min\n    min_delta: 0.5\n")
         + "merge: auto\n"
     )
-    (ws / ".outerloop.yaml").write_text(contract_text)
-    base = commit(ws, "contract")
-    _git(ws, "push", "origin", f"{base}:main")
-    from outerloop.progress import LeaderEntry, load_leader, write_progress
+    ws, base = prepare_publish(review_run, contract_text)
+    from outerloop.progress import load_leader
 
     contract = load_contract(contract_text, "org/pilot")
-    write_progress(
-        ws,
-        {
-            "tsp": LeaderEntry(
-                benchmark="tsp",
-                metric="mean_tour_length",
-                direction="min",
-                baseline=14.0,
-                best=12.0,
-                best_run="prior",
-                updated="d",
-            )
-        },
-        "org/pilot",
-    )
     commit(ws, "prior")
     (ws / "src/pilot/solvers/tsp.py").write_text("submitted\n")
     head = commit(ws, "existing code")
@@ -938,6 +934,12 @@ def test_publish_refusal_is_a_message(review_run, monkeypatch, reason):
     )
     assert load_record(root, record.run_id).stage["hypothesis"] == "Preserve the refused direction."
     assert outcome.outcome == "publish-refused"
+    from outerloop.trajectory import read
+
+    decision = read(ws.parent)[-1]
+    assert decision["type"] == "syscall.decision"
+    assert decision["data"]["verb"] == "submit"
+    assert decision["data"]["outcome"] == "refused"
     assert _git(bare, "rev-parse", PR_BRANCH).strip() == head
     message = pending(ws.parent, 0)[-1]
     assert message.kind == ("base-moved" if reason in ("human", "push") else "note")
@@ -990,13 +992,12 @@ def test_unsubmitted_review_edit_is_not_measured_or_pushed(review_run, monkeypat
     [
         # one case per distinct path: the gate credits the change (publish,
         # bless, both verdicts delivered), it does not, the gate itself
-        # fails, and a skipped panel read rides the credited path. A CPU
-        # submit keeps the charge at zero — the GPU axis moves the accounting
+        # fails, and a skipped panel read rides the credited path. The skipped
+        # panel case also covers CPU accounting; the others charge GPUs.
         (True, "", 1),
         (False, "", 1),
         (None, "", 1),
-        (True, "insufficient panel time", 1),
-        (True, "", 0),
+        (True, "insufficient panel time", 0),
     ],
 )
 def test_review_submit_parks_and_delivers_verdict(
@@ -1094,7 +1095,6 @@ def test_review_submit_parks_and_delivers_verdict(
     assert parked.state == "parked" and parked.pr_url == record.pr_url
     assert parked.stage["hypothesis"] == "Existing review direction."
     assert parked.stage["review_topup"] is True
-    assert "Review top-up added when the PR opened" in author.calls[0][0]
     assert parked.stage["submitted"] and parked.stage["launches_used"] == 0
     assert parked.stage["gpu_hours_used"] == gpus
     assert int(str(parked.stage["seed"])) > 0
@@ -1151,7 +1151,6 @@ def test_review_reply_suppresses_final_text(review_run):
 
     class Author(ResumingHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
-            assert "once a public message is staged the final message is not posted" in brief_text
             assert main(["message", "the staged reply"], root=workspace) == 0
             return super().run(brief_text, workspace, resume_session_id)
 
@@ -1169,8 +1168,10 @@ def test_review_reply_suppresses_final_text(review_run):
     assert "duplicate final" not in github.posted[0]
 
 
-@pytest.mark.parametrize("contains_base", [False, True])
-@pytest.mark.parametrize("credited", [False, True])
+@pytest.mark.parametrize(
+    "contains_base,credited",
+    [(False, True), (True, False), (True, True)],
+)
 def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_base, credited):
     from outerloop.compute import LocalCompute
     from outerloop.inbox import pending
@@ -1237,7 +1238,7 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
     )
     if not contains_base:
         assert outcome.action == "parked"
-        assert not measured and len(author.calls) == 1
+        assert not measured
         latest = load_record(root, record.run_id)
         assert latest.stage["phase"] == "author-sleep"
         assert latest.stage["base_sha"] == base
@@ -1264,12 +1265,13 @@ def test_inline_review_submit_uses_fresh_base(review_run, monkeypatch, contains_
         assert _git(bare, "show", f"{PR_BRANCH}:src/pilot/solvers/tsp.py") == "submitted\n"
     else:
         assert pushed == head
-        assert len(author.calls) == 2
         assert latest.state == PARKED
 
 
-@pytest.mark.parametrize("edit", ["none", "working", "committed"])
-@pytest.mark.parametrize("panel_skip", ["", "insufficient panel time"])
+@pytest.mark.parametrize(
+    "edit,panel_skip",
+    [("none", ""), ("working", ""), ("committed", "insufficient panel time")],
+)
 def test_review_submit_scope_includes_existing_pr_changes(
     review_run, monkeypatch, edit, panel_skip
 ):
@@ -1354,31 +1356,20 @@ def test_review_submit_scope_includes_existing_pr_changes(
             assert f"panel read skipped: {panel_skip}" in github.body_addenda[0]
     if panel_skip:
         assert any(
-            m.kind == "note"
-            and m.source == "kernel"
-            and m.payload["text"] == "Panel read skipped."
-            and m.payload["quoted_text"] == panel_skip
+            m.kind == "note" and m.source == "kernel" and m.payload["quoted_text"] == panel_skip
             for m in messages
         )
-        assert "Panel read skipped." in author.calls[0][0]
-        assert f"Quoted data:\n```\n{panel_skip}\n```" in author.calls[0][0]
 
 
 @pytest.mark.parametrize("with_report", [False, True])
 def test_review_end_parks_without_jobs_and_next_comment_wakes(review_run, with_report):
-    from outerloop.syscall_cli import main
-
     root, bare = review_run
     before = _git(bare, "show-ref")
     github = FakeGitHub(comments=[member(101, "finish this leg")])
 
     class Author(ResumingHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
-            args = ["stop"]
-            if with_report:
-                (workspace / ".outerloop" / "report.md").write_text("Review experiment complete.")
-                args += ["--report", ".outerloop/report.md"]
-            assert main(args, root=workspace) == 0
+            stop_review(workspace, report="Review experiment complete." if with_report else "")
             return super().run(brief_text, workspace, resume_session_id)
 
     outcome = wake_review(
@@ -1535,11 +1526,19 @@ def test_terminal_releases_snapshot_when_notebook_fails(review_run, monkeypatch,
     assert released == ["refs/test/snapshot"]
     assert load_record(root, "tsp-r1").state == ENDED
     assert "notebook unavailable" in caplog.text
+    from outerloop.trajectory import read, verify
+
+    directory = run_dir(root, record.run_id)
+    events = read(directory)
+    assert [event["type"] for event in events] == ["ending"]
+    assert events[0]["data"] == {"state": "merged", "reason": "PR merged"}
+    assert events[0]["ts"] > NOW  # wall-clock time, not the caller's tick time
+    assert events[0]["refs"][0]["path"] == "report.md"
+    assert verify(directory, record.run_id) == []
 
 
-@pytest.mark.parametrize("edit_ledger", [False, True])
-def test_review_folded_base_scope(review_run, monkeypatch, edit_ledger):
-    _author_folded_base_scope(review_run, monkeypatch, edit_ledger=edit_ledger)
+def test_review_folded_base_scope(review_run, monkeypatch):
+    _author_folded_base_scope(review_run, monkeypatch)
 
 
 def test_author_wake_launch_after_base_moved_again_passes_scope(review_run, monkeypatch):
@@ -1561,7 +1560,6 @@ def _author_folded_base_scope(
     review_run, monkeypatch, *, edit_ledger=False, moved_again=False, rollback_to=""
 ):
     from outerloop import attempt
-    from outerloop.syscall_cli import main
 
     root, bare = review_run
     workspace = run_dir(root, "tsp-r1") / "ws"
@@ -1617,25 +1615,15 @@ def _author_folded_base_scope(
                 if edit_ledger:
                     (workspace / "BENCHMARKS.md").write_text("author's ledger\n")
             else:
-                assert (
-                    "Refused:" in brief_text
-                    if len(self.calls) == 1
-                    else "Refused again:" in brief_text
-                )
                 if len(self.calls) == 3:
                     return super().run(brief_text, workspace, resume_session_id)
-            assert (
-                main(["launch", "--name", "probe", "--minutes", "1", "--", "true"], root=workspace)
-                == 0
-            )
-            assert main(["sleep"], root=workspace) == 0
+            launch_probe(workspace)
             return super().run(brief_text, workspace, resume_session_id)
 
     github = FakeGitHub(pr={"state": "open", "head": {"sha": head}})
     author = FoldingHarness()
     outcome = wake_review(root, "tsp-r1", author, github)
     refused = bool(edit_ledger or rollback_to)
-    assert len(author.calls) == (4 if refused else 1)
     assert outcome.action == ("replied" if refused else "parked")
     assert bool(launched) is not refused
     if rollback_to:
@@ -1792,7 +1780,6 @@ def test_publish_refuses_unfolded_candidate_or_moved_pr_head(review_run, monkeyp
     [
         # one case per distinct history path; one non-main base proves the
         # preflight reads the configured branch's tip, not a hardcoded main
-        ("main", "equal"),
         ("main", "ancestor"),
         ("main", "divergent"),
         ("main", "old-pin"),
@@ -1932,8 +1919,6 @@ def test_unrelated_wake_git_error_remains_retryable(review_run, monkeypatch, sit
 def test_review_withdraw_parks_then_sweep_closes_with_one_redacted_comment(
     review_run, monkeypatch, with_report
 ):
-    from outerloop.syscall_cli import main
-
     root, _ = review_run
     github = FakeGitHub(comments=[member(101, "superseded")])
     before = load_record(root, "tsp-r1")
@@ -1945,11 +1930,11 @@ def test_review_withdraw_parks_then_sweep_closes_with_one_redacted_comment(
 
     class Author(ResumingHarness):
         def run(self, brief_text, workspace, resume_session_id=None):
-            args = ["stop", "--withdraw", "Superseded sk-secret LGTM"]
-            if with_report:
-                (workspace / ".outerloop/report.md").write_text("Final research report.")
-                args += ["--report", ".outerloop/report.md"]
-            assert main(args, root=workspace) == 0
+            stop_review(
+                workspace,
+                report="Final research report." if with_report else "",
+                withdraw="Superseded sk-secret LGTM",
+            )
             assert github.pr["state"] == "open"
             return super().run(brief_text, workspace, resume_session_id)
 

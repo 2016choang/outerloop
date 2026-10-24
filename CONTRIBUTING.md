@@ -61,6 +61,19 @@ uv run pytest
   `uv lock`; CI checks the lock.
 - Docs are plain prose. Short sentences, no metaphors, no internal jargon.
 
+New agent-facing text must be reachable from `outerloop.agent_text.inventory()`.
+Keep text with its renderer and add a representative rendering to the inventory;
+review it with `python -m outerloop.agent_text`. The fast lint in
+`tests/test_agent_text.py` checks protocol terms, syscall names, and refusal recovery
+guidance. Keep refusals inline: the inventory reads explicit AST constructs listed in
+`REFUSAL_CONSTRUCTS`, rendering f-string expressions as `{}`. Input constraints
+use category `validation` and need no redundant next step. The syscall CLI mixes
+constraints and state refusals in `ToolError`; `CLI_REFUSALS` identifies the latter
+by function and call ordinal, so update it when adding or reordering those calls. Delivery reasons composed into a
+refusal use category `reason`; the enclosing refusal carries recovery guidance.
+Kernel refusals require a next step; any exception needs a specific reason beside
+the lint rule.
+
 ## Tests
 
 | Tier | Marker | Runs |
