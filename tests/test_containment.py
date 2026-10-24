@@ -104,6 +104,21 @@ def test_eval_wrap(tmp_path, monkeypatch, contained):
         assert wrap.call_args.kwargs["workspace"] == workspace
 
 
+def test_check_cache_inside_scratch_and_malformed_command(tmp_path, monkeypatch):
+    wrap = Mock(return_value=["wrapped"])
+    monkeypatch.setattr("outerloop.orchestrator.seatbelt_wrap", wrap)
+    monkeypatch.setattr("outerloop.orchestrator.seatbelt_available", lambda: True)
+    process = Mock(returncode=0)
+    process.communicate.return_value = ("", "")
+    popen = Mock(return_value=process)
+    monkeypatch.setattr("outerloop.orchestrator.subprocess.Popen", popen)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    SubprocessEvaluator().check(workspace, "python -c 'unterminated")
+    scratch = wrap.call_args.kwargs["scratch"]
+    assert Path(popen.call_args.kwargs["env"]["UV_CACHE_DIR"]).is_relative_to(scratch)
+
+
 @pytest.mark.parametrize("contained", [False, True])
 def test_session_wrap(tmp_path, monkeypatch, contained):
     wrap = Mock(return_value=["wrapped"])

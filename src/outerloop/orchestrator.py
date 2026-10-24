@@ -337,15 +337,13 @@ class SubprocessEvaluator:
                 command,
             ]
         else:
-            import shlex
-
+            # the first word locates the tool; a plain split never raises on a
+            # malformed command, which sh then reports as a failed eval
             argv = seatbelt_wrap(
                 ["sh", "-c", command],
                 workspace=workspace,
                 scratch=eval_home,
-                read_only=executable_roots(*shlex.split(command)[:1])
-                if seatbelt_available()
-                else [],
+                read_only=executable_roots(*command.split()[:1]) if seatbelt_available() else [],
             )
         env = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR") if k in os.environ}
         # uv's cache does heavy small-file IO; on shared filesystems (NFS)
