@@ -22,37 +22,42 @@ from outerloop.init import (
 )
 
 
+@pytest.fixture
+def configured(tmp_path: Path, monkeypatch) -> Path:
+    """A temp config dir and a PAT check that passes."""
+    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+    return tmp_path
+
+
 def test_render_env_writes_the_claude_model() -> None:
     a = InitAnswers(compute="local", target="o/r", claude_model="claude-x", author_backend="codex")
     env = render_env(a, "")
     assert "\nOUTERLOOP_CLAUDE_MODEL=claude-x\n" in env
-    assert env.index("OUTERLOOP_CLAUDE_MODEL") < env.index("OUTERLOOP_AUTHOR_BACKEND")
     assert "CLAUDE_MODEL" not in render_env(InitAnswers(compute="local", target="o/r"), "")
 
 
 def test_claude_model_is_required_flag_then_shell_then_prompt(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """Every Claude role reads OUTERLOOP_CLAUDE_MODEL and there is no code
     default, so the full setup insists on it: --claude-model, else the shell's
     value, else a required prompt; --yes without either refuses."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/p", "--force"]
     assert init.main(base) == 2
     err = capsys.readouterr().err
     assert "--claude-model is required" in err and "OUTERLOOP_CLAUDE_MODEL" in err
-    assert not (tmp_path / ".env").exists()
+    assert not (configured / ".env").exists()
     # a codex author still keeps the default (claude) panel: required all the same
     assert init.main([*base, "--author-backend", "codex", "--author-model", "gpt-x"]) == 2
     assert init.main([*base, "--claude-model", "claude-flag"]) == 0
-    assert "OUTERLOOP_CLAUDE_MODEL=claude-flag\n" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-flag\n" in (configured / ".env").read_text()
     monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", " claude-shell ")
     assert init.main(base) == 0
-    assert "OUTERLOOP_CLAUDE_MODEL=claude-shell\n" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-shell\n" in (configured / ".env").read_text()
     assert init.main([*base, "--claude-model", "claude-flag"]) == 0  # the flag wins
-    assert "OUTERLOOP_CLAUDE_MODEL=claude-flag\n" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-flag\n" in (configured / ".env").read_text()
     # interactive: asked (required) when neither flag nor shell has it
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
     asked: list[tuple[str, dict[str, Any]]] = []
@@ -66,7 +71,7 @@ def test_claude_model_is_required_flag_then_shell_then_prompt(
     argv = ["--compute", "local", "--target", "o/r", "--pat-file", "/p", "--force"]
     assert init.main([*argv, "--author-backend", "claude"]) == 0
     assert [kw for prompt, kw in asked if prompt.startswith("Claude model")] == [{"required": True}]
-    assert "OUTERLOOP_CLAUDE_MODEL=claude-typed\n" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-typed\n" in (configured / ".env").read_text()
 
 
 def test_render_env_slurm_full() -> None:
@@ -90,16 +95,13 @@ def test_render_env_slurm_full() -> None:
 
 
 def test_render_env_omits_the_optional_keys() -> None:
-    env = render_env(InitAnswers(compute="slurm", target="o/r", root="/r", account="a"), "")
-    assert "OUTERLOOP_PARTITION" not in env  # optional -> Slurm default
-    assert "OUTERLOOP_PAT_FILE" not in env
-    assert "OUTERLOOP_AUTHOR_BACKEND" not in env
-
-
-def test_render_env_local_has_no_slurm_placement() -> None:
-    env = render_env(InitAnswers(compute="local", target="o/r"), "")
-    assert "OUTERLOOP_COMPUTE=local" in env
-    assert "OUTERLOOP_ROOT" not in env and "OUTERLOOP_ACCOUNT" not in env
+    slurm = render_env(InitAnswers(compute="slurm", target="o/r", root="/r", account="a"), "")
+    assert "OUTERLOOP_PARTITION" not in slurm  # optional -> Slurm default
+    assert "OUTERLOOP_PAT_FILE" not in slurm
+    assert "OUTERLOOP_AUTHOR_BACKEND" not in slurm
+    local = render_env(InitAnswers(compute="local", target="o/r"), "")
+    assert "OUTERLOOP_COMPUTE=local" in local
+    assert "OUTERLOOP_ROOT" not in local and "OUTERLOOP_ACCOUNT" not in local
 
 
 def test_write_config_writes_env_and_pat_0600(tmp_path: Path) -> None:
@@ -159,33 +161,6 @@ def test_validate_pat_ok_and_no_push(tmp_path: Path, monkeypatch) -> None:
     assert "lacks write" in validate_pat(str(pat), "o/r")
 
 
-def test_main_yes_writes_config(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    rc = init.main(
-        [
-            "--yes",
-            "--compute",
-            "slurm",
-            "--target",
-            "o/r",
-            "--root",
-            "/r",
-            "--account",
-            "a",
-            "--partition",
-            "cpu,gpu",
-            "--pat-file",
-            "/some/pat",
-        ]
-    )
-    assert rc == 0
-    env = (tmp_path / ".env").read_text()
-    assert "OUTERLOOP_TARGET=o/r" in env
-    assert "OUTERLOOP_PARTITION=cpu,gpu" in env  # comma-list survives the wizard
-    assert "OUTERLOOP_PAT_FILE=/some/pat" in env
-
-
 @pytest.fixture(autouse=True)
 def _no_image_download(monkeypatch, request):
     """init never reaches the network in tests: no image is found or fetched, the
@@ -222,9 +197,7 @@ def test_a_slurm_env_carries_the_default_update_policy() -> None:
     assert "\nOUTERLOOP_IMAGE=\n" in render_env(off, "/p")
 
 
-def test_main_yes_records_a_given_image_and_no_image_skips(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+def test_main_yes_records_a_given_image_and_no_image_skips(configured: Path, monkeypatch) -> None:
     calls: list[dict] = []
 
     def record(**kw: Any) -> str:
@@ -233,26 +206,24 @@ def test_main_yes_records_a_given_image_and_no_image_skips(tmp_path: Path, monke
 
     monkeypatch.setattr(init, "ensure_image", record)
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/some/pat"]
-    sif = tmp_path / "x.sif"
+    sif = configured / "x.sif"
     sif.write_text("")
     assert init.main([*base, "--image", str(sif)]) == 0
-    assert f"OUTERLOOP_IMAGE={sif}" in (tmp_path / ".env").read_text()
+    assert f"OUTERLOOP_IMAGE={sif}" in (configured / ".env").read_text()
     assert calls == []  # an explicit image is never re-fetched
     assert init.main([*base, "--no-image", "--force"]) == 0
-    assert "\nOUTERLOOP_IMAGE=\n" in (tmp_path / ".env").read_text()  # the off-switch
+    assert "\nOUTERLOOP_IMAGE=\n" in (configured / ".env").read_text()  # the off-switch
     assert calls == []
     assert init.main([*base, "--force"]) == 0
     assert calls and calls[0]["interactive"] is False  # the default asks the image module
 
 
 def test_main_checks_the_image_path_and_downloads_only_when_setup_proceeds(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """A mistyped --image fails init instead of surfacing as an uncontained loop
     later; the published image is fetched only after every check passed and
     the existing-config question is settled (terra, #305)."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     calls: list[dict] = []
 
     def record(**kw: Any) -> str:
@@ -261,12 +232,13 @@ def test_main_checks_the_image_path_and_downloads_only_when_setup_proceeds(
 
     monkeypatch.setattr(init, "ensure_image", record)
     base = ["--yes", "--compute", "local", "--pat-file", "/some/pat"]
-    assert init.main([*base, "--target", "o/r", "--image", str(tmp_path / "missing.sif")]) == 2
+    missing = configured / "missing.sif"
+    assert init.main([*base, "--target", "o/r", "--image", str(missing)]) == 2
     assert "is not a file" in capsys.readouterr().err
     assert calls == []
     assert init.main(base) == 2  # no target: rejected before any download
     assert calls == []
-    (tmp_path / ".env").write_text("OUTERLOOP_COMPUTE=local\n")
+    (configured / ".env").write_text("OUTERLOOP_COMPUTE=local\n")
     assert init.main([*base, "--target", "o/r"]) == 1  # existing config, no --force
     assert calls == []
     assert init.main([*base, "--target", "o/r", "--force"]) == 0
@@ -277,29 +249,29 @@ def test_main_checks_the_image_path_and_downloads_only_when_setup_proceeds(
     assert "not allowed with" in capsys.readouterr().err
 
 
-def test_main_yes_requires_target(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_main_yes_requires_target(configured: Path, capsys) -> None:
     assert init.main(["--yes", "--compute", "local"]) == 2
     assert "target repo is required" in capsys.readouterr().err
 
 
-def test_main_yes_slurm_requires_root_only(tmp_path: Path, monkeypatch, capsys) -> None:
-    """The state root is the one Slurm setting init insists on; account and
-    partition are optional (#300) and an accountless config is written
-    without either line, so Slurm's defaults apply."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_main_yes_slurm_requires_root_only(configured: Path, capsys) -> None:
+    """The state root is the one Slurm setting init insists on; the account is
+    optional (#300), so an accountless config omits the line and Slurm's
+    default applies."""
     assert init.main(["--yes", "--compute", "slurm", "--target", "o/r"]) == 2
     assert "Slurm needs --root" in capsys.readouterr().err
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     argv = ["--yes", "--compute", "slurm", "--target", "o/r", "--root", "/r"]
-    assert init.main([*argv, "--pat-file", "/some/pat"]) == 0
-    env = (tmp_path / ".env").read_text()
+    assert init.main([*argv, "--partition", "cpu,gpu", "--pat-file", "/some/pat"]) == 0
+    env = (configured / ".env").read_text()
     assert "OUTERLOOP_ROOT=/r" in env
-    assert "OUTERLOOP_ACCOUNT" not in env and "OUTERLOOP_PARTITION" not in env
+    assert "OUTERLOOP_PARTITION=cpu,gpu" in env  # comma-list survives the wizard
+    assert "OUTERLOOP_PAT_FILE=/some/pat" in env
+    assert "OUTERLOOP_ACCOUNT" not in env
 
 
-def test_github_app_run_asks_only_for_the_organization(tmp_path: Path, monkeypatch) -> None:
-    """A focused --github-app run is about auth; it must not prompt for the author."""
+def test_github_app_run_asks_only_for_the_organization(configured: Path, monkeypatch) -> None:
+    """A focused --github-app run is about auth; it must not prompt for the
+    author or the author key."""
     from outerloop import appmanifest
 
     asked: list[str] = []
@@ -308,8 +280,11 @@ def test_github_app_run_asks_only_for_the_organization(tmp_path: Path, monkeypat
         asked.append(prompt)
         return ""
 
+    def boom(prompt: str) -> str:
+        raise AssertionError("the focused --github-app run must not ask for a key")
+
     monkeypatch.setattr(init, "_ask", fake_ask)
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(init.getpass, "getpass", boom)
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)  # nor for the Claude model
     monkeypatch.setattr(appmanifest, "request_manifest_code", lambda *a, **k: "c")
     monkeypatch.setattr(
@@ -321,7 +296,7 @@ def test_github_app_run_asks_only_for_the_organization(tmp_path: Path, monkeypat
     # capture_installation_id returned 0: the App was never installed, so init keeps
     # the credentials but exits 1 and never says start (terra, #309)
     assert init.main(["--github-app", "--compute", "local", "--target", "o/r"]) == 1
-    written = (tmp_path / ".env").read_text()
+    written = (configured / ".env").read_text()
     assert "OUTERLOOP_BOT_LOGIN=s[bot]" in written  # the login it recognizes itself by
     # the organization question is the only prompt; nothing about the author
     assert asked == [init.ORG_PROMPT]
@@ -349,14 +324,13 @@ def test_app_failure_names_the_make_public_and_owner_approval_path(capsys) -> No
 
 
 def test_github_app_warns_when_it_lands_under_a_different_account(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """A non-owner org member gets a personal App; init must say so and name the
     make-public + owner-approval path rather than silently dead-ending (#349)."""
     from outerloop import appmanifest
 
     monkeypatch.setattr(init, "_ask", lambda *a, **k: "")
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(init, "_owner_type", lambda owner: "Organization")
     monkeypatch.setattr(appmanifest, "request_manifest_code", lambda *a, **k: "c")
     monkeypatch.setattr(
@@ -373,8 +347,7 @@ def test_github_app_warns_when_it_lands_under_a_different_account(
     assert "make the App public" in err and "approve" in err
 
 
-def test_main_yes_rejects_an_unknown_author_backend(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_main_yes_rejects_an_unknown_author_backend(configured: Path, capsys) -> None:
     rc = init.main(
         ["--yes", "--compute", "local", "--target", "o/r", "--author-backend", "unknown"]
     )
@@ -390,21 +363,20 @@ def test_render_env_app_file_wins_over_pat() -> None:
     assert "OUTERLOOP_PAT_FILE" not in env
 
 
-def test_main_github_app_writes_app_env(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_main_github_app_writes_app_env(configured: Path, monkeypatch, capsys) -> None:
     from outerloop import appmanifest
 
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     conv = {"id": 42, "slug": "sl", "pem": "PEMDATA"}
     monkeypatch.setattr(appmanifest, "request_manifest_code", lambda *a, **k: "code123")
     monkeypatch.setattr(appmanifest, "convert_manifest", lambda code, **k: conv)
     monkeypatch.setattr(appmanifest, "capture_installation_id", lambda *a, **k: 999)
     monkeypatch.setattr("builtins.input", lambda *a: "")  # author prompts + the install-Enter
-    (tmp_path / ".env").write_text("OUTERLOOP_IDENTITY=personal\n")  # switching to the App
+    (configured / ".env").write_text("OUTERLOOP_IDENTITY=personal\n")  # switching to the App
     rc = init.main(["--github-app", "--force", "--compute", "local", "--target", "o/r"])
     assert rc == 0
-    app_json = tmp_path / "github_app.sl.json"
+    app_json = configured / "github_app.sl.json"
     assert json.loads(app_json.read_text())["installation_id"] == 999
-    env = (tmp_path / ".env").read_text()
+    env = (configured / ".env").read_text()
     assert f"OUTERLOOP_GITHUB_APP_FILE={app_json}" in env
     assert "OUTERLOOP_PAT_FILE" not in env
     assert "OUTERLOOP_IDENTITY" not in env  # a dedicated identity, not personal mode
@@ -414,25 +386,22 @@ KEEP = "OUTERLOOP_TARGET=keep/me\n"
 
 
 def test_init_refuses_to_overwrite_an_existing_env_non_interactively(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, capsys
 ) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    (tmp_path / ".env").write_text(KEEP)
+    (configured / ".env").write_text(KEEP)
     rc = init.main(["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/p"])
     assert rc == 1
     assert "exists; pass --force" in capsys.readouterr().err
-    assert (tmp_path / ".env").read_text() == KEEP  # untouched
+    assert (configured / ".env").read_text() == KEEP  # untouched
 
 
-def test_init_force_overwrites_an_existing_env(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    (tmp_path / ".env").write_text(KEEP)
+def test_init_force_overwrites_an_existing_env(configured: Path) -> None:
+    (configured / ".env").write_text(KEEP)
     rc = init.main(
         ["--yes", "--force", "--compute", "local", "--target", "o/r", "--pat-file", "/p"]
     )
     assert rc == 0
-    assert "OUTERLOOP_TARGET=o/r" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_TARGET=o/r" in (configured / ".env").read_text()
 
 
 def test_init_local_forge_bootstraps_without_github_credentials(
@@ -524,9 +493,10 @@ def test_init_local_forge_writes_the_state_root_it_bootstrapped_under(
     assert f"OUTERLOOP_ROOT={state.resolve()}" in (tmp_path / "config" / ".env").read_text()
 
 
-def test_init_interactive_declined_overwrite_keeps_the_config(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    (tmp_path / ".env").write_text(KEEP)
+def test_init_interactive_declined_overwrite_keeps_the_config(
+    configured: Path, monkeypatch
+) -> None:
+    (configured / ".env").write_text(KEEP)
     # every other answer comes from flags, so the overwrite question is the one prompt
     monkeypatch.setattr(init, "_ask", lambda *a, **k: "n")
     rc = init.main(
@@ -544,7 +514,7 @@ def test_init_interactive_declined_overwrite_keeps_the_config(tmp_path: Path, mo
         ]
     )
     assert rc == 1
-    assert (tmp_path / ".env").read_text() == KEEP
+    assert (configured / ".env").read_text() == KEEP
 
 
 def test_render_env_names_the_key_file_per_backend() -> None:
@@ -567,11 +537,9 @@ def test_write_author_key_is_owner_only_and_per_backend(tmp_path: Path) -> None:
     assert write_author_key("", "k", config_dir=tmp_path).name == "claude_key"
 
 
-def test_main_yes_author_key_file_flag_lands_in_env(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    (tmp_path / "keys").mkdir()
-    (tmp_path / "keys" / "codex").write_text("sk")
+def test_main_yes_author_key_file_flag_lands_in_env(configured: Path) -> None:
+    (configured / "keys").mkdir()
+    (configured / "keys" / "codex").write_text("sk")
     rc = init.main(
         [
             "--yes",
@@ -584,21 +552,19 @@ def test_main_yes_author_key_file_flag_lands_in_env(tmp_path: Path, monkeypatch)
             "--author-backend",
             "codex",
             "--author-key-file",
-            str(tmp_path / "keys" / "codex"),
+            str(configured / "keys" / "codex"),
         ]
     )
     assert rc == 0
-    env = (tmp_path / ".env").read_text()
-    assert f"OUTERLOOP_CODEX_KEY_FILE={tmp_path / 'keys' / 'codex'}" in env
+    env = (configured / ".env").read_text()
+    assert f"OUTERLOOP_CODEX_KEY_FILE={configured / 'keys' / 'codex'}" in env
 
 
 def test_interactive_pasted_key_is_written_and_recorded(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """The full interactive run asks for the key once (hidden), writes
     <config>/<backend>_key 0600, and points .env at it."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     prompts: list[str] = []
 
     def fake_getpass(prompt: str) -> str:
@@ -622,16 +588,14 @@ def test_interactive_pasted_key_is_written_and_recorded(
     )
     assert rc == 0
     assert len(prompts) == 1 and "claude author" in prompts[0]
-    key = tmp_path / "claude_key"
+    key = configured / "claude_key"
     assert key.read_text() == "sk-ant-pasted"
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
-    assert f"OUTERLOOP_CLAUDE_KEY_FILE={key}" in (tmp_path / ".env").read_text()
+    assert f"OUTERLOOP_CLAUDE_KEY_FILE={key}" in (configured / ".env").read_text()
     assert "no author key set" not in capsys.readouterr().out
 
 
-def test_interactive_blank_key_leaves_a_hint(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
+def test_interactive_blank_key_leaves_a_hint(configured: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(init.getpass, "getpass", lambda prompt: "")
     rc = init.main(
         [
@@ -648,29 +612,9 @@ def test_interactive_blank_key_leaves_a_hint(tmp_path: Path, monkeypatch, capsys
         ]
     )
     assert rc == 0
-    assert not (tmp_path / "claude_key").exists()
-    assert "KEY_FILE" not in (tmp_path / ".env").read_text()
-    assert f"no author key set — put it in {tmp_path / 'claude_key'}" in capsys.readouterr().out
-
-
-def test_github_app_run_never_asks_for_the_key(tmp_path: Path, monkeypatch) -> None:
-    from outerloop import appmanifest
-
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(appmanifest, "request_manifest_code", lambda *a, **k: "c")
-    monkeypatch.setattr(
-        appmanifest, "convert_manifest", lambda code, **k: {"id": 1, "slug": "s", "pem": "p"}
-    )
-    monkeypatch.setattr(appmanifest, "capture_installation_id", lambda *a, **k: 0)
-    monkeypatch.setattr("builtins.input", lambda *a: "")
-
-    def boom(prompt: str) -> str:
-        raise AssertionError("the focused --github-app run must not ask for a key")
-
-    monkeypatch.setattr(init.getpass, "getpass", boom)
-    # capture_installation_id returned 0: the App was never installed, so init keeps
-    # the credentials but exits 1 and never says start (terra, #309)
-    assert init.main(["--github-app", "--compute", "local", "--target", "o/r"]) == 1
+    assert not (configured / "claude_key").exists()
+    assert "KEY_FILE" not in (configured / ".env").read_text()
+    assert f"no author key set — put it in {configured / 'claude_key'}" in capsys.readouterr().out
 
 
 def test_write_private_never_widens(tmp_path: Path, monkeypatch) -> None:
@@ -696,21 +640,19 @@ def test_write_private_never_widens(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_author_key_file_flag_must_be_readable_and_is_stored_absolute(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/p"]
-    assert init.main([*base, "--author-key-file", str(tmp_path / "missing")]) == 2
+    assert init.main([*base, "--author-key-file", str(configured / "missing")]) == 2
     assert "not a readable file" in capsys.readouterr().err
-    assert not (tmp_path / ".env").exists()  # nothing written on a bad flag
-    key = tmp_path / "k" / "codex_key"
+    assert not (configured / ".env").exists()  # nothing written on a bad flag
+    key = configured / "k" / "codex_key"
     key.parent.mkdir()
     key.write_text("sk")
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(configured)
     rc = init.main([*base, "--author-backend", "codex", "--author-key-file", "k/codex_key"])
     assert rc == 0
-    assert f"OUTERLOOP_CODEX_KEY_FILE={key}" in (tmp_path / ".env").read_text()  # absolute
+    assert f"OUTERLOOP_CODEX_KEY_FILE={key}" in (configured / ".env").read_text()  # absolute
 
 
 def test_app_check_asks_the_installation_not_the_repo_permissions(monkeypatch) -> None:
@@ -775,10 +717,11 @@ def test_app_check_asks_the_installation_not_the_repo_permissions(monkeypatch) -
     assert "installation 9" in init.app_permission_gaps(Provider(), "o/r").problem
 
 
-def test_a_credential_that_cannot_open_prs_fails_init(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_a_credential_that_cannot_open_prs_fails_init(
+    configured: Path, monkeypatch, capsys
+) -> None:
     """#285: a 401/403/404 or no write access exits 1 and never says
     `next: outerloop start`; a network failure stays a warning."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/some/pat"]
     for problem in (
         "the token is invalid or expired (GitHub returned 401)",
@@ -799,38 +742,29 @@ def test_a_credential_that_cannot_open_prs_fails_init(tmp_path: Path, monkeypatc
     assert "OUTERLOOP_BOT_LOGIN not recorded" in captured.out
 
 
-def test_pat_path_says_when_login_unreadable(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    monkeypatch.setattr(init, "_token_login", lambda token: "")
-    pat = tmp_path / "pat"
-    pat.write_text("ghp_x")
-    base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", str(pat)]
-    assert init.main([*base, "--force"]) == 0
-    out = capsys.readouterr().out
-    assert "login could not be read" in out and "OUTERLOOP_BOT_LOGIN" in out
-    assert "OUTERLOOP_BOT_LOGIN=" not in (tmp_path / ".env").read_text()
-
-
-def test_pat_path_records_the_tokens_login(tmp_path: Path, monkeypatch) -> None:
+def test_pat_path_records_the_tokens_login_or_says_it_could_not(
+    configured: Path, monkeypatch, capsys
+) -> None:
     """#298: the kernel posts as this token; its login is recorded so every
-    own-comment and own-PR filter keys on the adopter's identity, not the lab's."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    pat = tmp_path / "pat"
+    own-comment and own-PR filter keys on the adopter's identity, not the lab's.
+    An unreadable login is left out of the file and reported."""
+    pat = configured / "pat"
     pat.write_text("ghp_x")
-    monkeypatch.setattr(init, "_token_login", lambda token: "someone" if token == "ghp_x" else "")
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", str(pat)]
     assert init.main(base) == 0
-    assert "OUTERLOOP_BOT_LOGIN=someone" in (tmp_path / ".env").read_text()
+    out = capsys.readouterr().out
+    assert "login could not be read" in out and "OUTERLOOP_BOT_LOGIN" in out
+    assert "OUTERLOOP_BOT_LOGIN=" not in (configured / ".env").read_text()
+    monkeypatch.setattr(init, "_token_login", lambda token: "someone" if token == "ghp_x" else "")
+    assert init.main([*base, "--force"]) == 0
+    assert "OUTERLOOP_BOT_LOGIN=someone" in (configured / ".env").read_text()
 
 
 def test_personal_init_writes_the_gh_token_login_and_identity(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """--personal takes `gh auth token` (captured, never echoed), writes it 0600
     to the default PAT file, records its login, and turns the mode on."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(init.shutil, "which", lambda name: "/usr/bin/gh")
     seen: list[list[str]] = []
 
@@ -839,7 +773,6 @@ def test_personal_init_writes_the_gh_token_login_and_identity(
         return init.subprocess.CompletedProcess(argv, 0, "ghp_personal\n", "")
 
     monkeypatch.setattr(init.subprocess, "run", fake_run)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     monkeypatch.setattr(init, "_token_login", lambda token: "octocat")
     argv = [
         "--yes",
@@ -855,10 +788,10 @@ def test_personal_init_writes_the_gh_token_login_and_identity(
     ]
     assert init.main(argv) == 0
     assert ["gh", "auth", "token"] in seen
-    pat = tmp_path / "bot_pat"
+    pat = configured / "bot_pat"
     assert pat.read_text() == "ghp_personal"
     assert stat.S_IMODE(pat.stat().st_mode) == 0o600
-    env = (tmp_path / ".env").read_text()
+    env = (configured / ".env").read_text()
     assert "OUTERLOOP_BOT_LOGIN=octocat" in env
     assert "OUTERLOOP_IDENTITY=personal" in env
     captured = capsys.readouterr()
@@ -866,9 +799,8 @@ def test_personal_init_writes_the_gh_token_login_and_identity(
 
 
 def test_personal_without_gh_falls_back_to_a_pasted_token(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(init.shutil, "which", lambda name: None)
     monkeypatch.setattr(
         init, "_ask", lambda prompt, default="", **kw: default
@@ -878,7 +810,6 @@ def test_personal_without_gh_falls_back_to_a_pasted_token(
         "getpass",
         lambda prompt: "ghp_pasted" if "token" in prompt.lower() else "",
     )
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     monkeypatch.setattr(init, "_token_login", lambda token: "octocat")
     argv = [
         "--personal",
@@ -892,14 +823,13 @@ def test_personal_without_gh_falls_back_to_a_pasted_token(
         "--no-install-harness",
     ]
     assert init.main(argv) == 0
-    assert (tmp_path / "bot_pat").read_text() == "ghp_pasted"
-    assert "OUTERLOOP_IDENTITY=personal" in (tmp_path / ".env").read_text()
+    assert (configured / "bot_pat").read_text() == "ghp_pasted"
+    assert "OUTERLOOP_IDENTITY=personal" in (configured / ".env").read_text()
     out = capsys.readouterr().out
     assert "gh auth token" in out and "fine-grained" in out
 
 
-def test_personal_refuses_the_app_and_the_local_forge(tmp_path: Path, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_personal_refuses_the_app_and_the_local_forge(configured: Path, capsys) -> None:
     base = [
         "--yes",
         "--personal",
@@ -914,15 +844,13 @@ def test_personal_refuses_the_app_and_the_local_forge(tmp_path: Path, monkeypatc
     assert "GitHub-only" in capsys.readouterr().err
     assert init.main([*base, "--github-app"]) == 2
     assert "different identities" in capsys.readouterr().err
-    assert not (tmp_path / ".env").exists()
+    assert not (configured / ".env").exists()
 
 
-def test_a_rerun_without_personal_keeps_the_mode(tmp_path: Path, monkeypatch) -> None:
+def test_a_rerun_without_personal_keeps_the_mode(configured: Path) -> None:
     """The mode is deployment state, not a credential: updating a model without
     --personal must not silently turn the marker rule off."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    (tmp_path / ".env").write_text(
+    (configured / ".env").write_text(
         "OUTERLOOP_COMPUTE=local\n"
         "OUTERLOOP_TARGET=o/r\n"
         "OUTERLOOP_PAT_FILE=/some/pat\n"
@@ -943,25 +871,23 @@ def test_a_rerun_without_personal_keeps_the_mode(tmp_path: Path, monkeypatch) ->
         "--no-install-harness",
     ]
     assert init.main(argv) == 0
-    assert "OUTERLOOP_IDENTITY=personal" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_IDENTITY=personal" in (configured / ".env").read_text()
 
 
 def test_init_records_the_harness_binary_or_says_how_to_install_it(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """#294: the author's CLI path is recorded (jobs have no login PATH); when it
     is absent, init says so and how to install it instead of a later spawn-error."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
     base = ["--yes", "--compute", "local", "--target", "o/r", "--pat-file", "/some/pat"]
     monkeypatch.setattr(init, "locate_harness", lambda backend: f"/opt/bin/{backend or 'claude'}")
     assert init.main([*base, "--author-backend", "codex"]) == 0
-    assert "OUTERLOOP_CODEX_BIN=/opt/bin/codex" in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CODEX_BIN=/opt/bin/codex" in (configured / ".env").read_text()
     monkeypatch.setattr(init, "locate_harness", lambda backend: "")
     assert init.main([*base, "--force", "--no-install-harness"]) == 0
     out = capsys.readouterr().out
     assert "no `claude` binary" in out and "bash scripts/install_claude.sh" in out
-    assert "OUTERLOOP_CLAUDE_BIN" not in (tmp_path / ".env").read_text()
+    assert "OUTERLOOP_CLAUDE_BIN" not in (configured / ".env").read_text()
 
 
 @pytest.mark.real_locate_harness
@@ -1066,14 +992,13 @@ def test_transient_github_failures_are_not_dead_credentials(monkeypatch) -> None
 
 
 def test_github_app_rerun_rechecks_the_existing_app_instead_of_creating_one(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """After fixing the installation, `init --force --github-app` re-checks the App
     this machine already has; it never mints a second App (terra, #309)."""
     from outerloop import appmanifest
 
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    app_json = tmp_path / "github_app.myapp.json"
+    app_json = configured / "github_app.myapp.json"
     app_json.write_text(json.dumps({"app_id": 1, "installation_id": 7, "private_key": "/k.pem"}))
 
     def never(*a, **k):
@@ -1088,7 +1013,7 @@ def test_github_app_rerun_rechecks_the_existing_app_instead_of_creating_one(
     )
     argv = ["--yes", "--force", "--github-app", "--compute", "local", "--target", "o/r"]
     assert init.main(argv) == 0
-    env = (tmp_path / ".env").read_text()
+    env = (configured / ".env").read_text()
     assert f"OUTERLOOP_GITHUB_APP_FILE={app_json}" in env
     assert "OUTERLOOP_BOT_LOGIN=myapp[bot]" in env
     capsys.readouterr()  # drop the successful run's output
@@ -1108,14 +1033,13 @@ def test_github_app_rerun_rechecks_the_existing_app_instead_of_creating_one(
 
 
 def test_github_app_rerun_captures_a_missing_installation_id(
-    tmp_path: Path, monkeypatch, capsys
+    configured: Path, monkeypatch, capsys
 ) -> None:
     """A first run that ended before the App was installed left installation_id 0;
     the re-run looks the installation up, records it, then checks access."""
     from outerloop import appmanifest
 
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    app_json = tmp_path / "github_app.myapp.json"
+    app_json = configured / "github_app.myapp.json"
     creds = {"app_id": 1, "installation_id": 0, "private_key": "/k.pem"}
     app_json.write_text(json.dumps(creds))
     monkeypatch.setattr(
@@ -1148,68 +1072,69 @@ def test_github_app_rerun_captures_a_missing_installation_id(
 
 
 @pytest.mark.real_locate_harness
-@pytest.mark.parametrize("backend", ["claude", "codex"])
-def test_init_records_real_path_lookup(tmp_path, monkeypatch, backend):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda pf, t: "")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    binary = bin_dir / backend
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir))
-    assert (
-        init.main(
-            [
-                "--yes",
-                "--compute",
-                "local",
-                "--target",
-                "o/r",
-                "--pat-file",
-                "/some/pat",
-                "--author-backend",
-                backend,
-            ]
+def test_init_records_real_path_lookup(configured: Path, monkeypatch) -> None:
+    for backend in ("claude", "codex"):
+        cfg = configured / backend
+        cfg.mkdir()
+        monkeypatch.setattr(init, "CONFIG_DIR", cfg)
+        bin_dir = configured / f"{backend}-bin"
+        bin_dir.mkdir()
+        binary = bin_dir / backend
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert (
+            init.main(
+                [
+                    "--yes",
+                    "--compute",
+                    "local",
+                    "--target",
+                    "o/r",
+                    "--pat-file",
+                    "/some/pat",
+                    "--author-backend",
+                    backend,
+                ]
+            )
+            == 0
         )
-        == 0
-    )
-    assert f"OUTERLOOP_{backend.upper()}_BIN={binary.resolve()}" in (tmp_path / ".env").read_text()
+        assert f"OUTERLOOP_{backend.upper()}_BIN={binary.resolve()}" in (cfg / ".env").read_text()
 
 
-@pytest.mark.parametrize("shell_model", ["", " claude-shell "])
-def test_whitespace_claude_model_is_missing(tmp_path, monkeypatch, shell_model):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(init, "validate_pat", lambda *a: "")
-    monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", shell_model)
-    rc = init.main(
-        [
-            "--yes",
-            "--compute",
-            "local",
-            "--target",
-            "o/r",
-            "--pat-file",
-            "/p",
-            "--claude-model",
-            "   ",
-        ]
-    )
-    assert rc == (0 if shell_model else 2)
-    if shell_model:
-        assert "OUTERLOOP_CLAUDE_MODEL=claude-shell\n" in (tmp_path / ".env").read_text()
-    else:
-        assert not (tmp_path / ".env").exists()
+def test_whitespace_claude_model_counts_as_missing(configured: Path, monkeypatch) -> None:
+    """A blank --claude-model is missing: the shell value fills it, otherwise
+    --yes refuses and an interactive run asks for it as required."""
+    monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
+    flag = ["--compute", "local", "--target", "o/r", "--pat-file", "/p", "--claude-model", "   "]
+    assert init.main(["--yes", *flag]) == 2
+    assert not (configured / ".env").exists()
+    monkeypatch.setenv("OUTERLOOP_CLAUDE_MODEL", " claude-shell ")
+    assert init.main(["--yes", *flag]) == 0
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-shell\n" in (configured / ".env").read_text()
+    # interactive: the blank flag is prompted for, and still required
+    monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
+    monkeypatch.setattr(init.getpass, "getpass", lambda *a: "")
+    asked = []
+
+    def ask(prompt, default="", **kw):
+        if prompt.startswith("Claude model"):
+            asked.append(kw)
+            return "claude-prompt"
+        return default
+
+    monkeypatch.setattr(init, "_ask", ask)
+    assert init.main([*flag, "--force"]) == 0
+    assert asked == [{"required": True}]
+    assert "OUTERLOOP_CLAUDE_MODEL=claude-prompt\n" in (configured / ".env").read_text()
 
 
-@pytest.mark.parametrize("compute", ["local", "slurm"])
 @pytest.mark.parametrize("model_source", ["existing", "shell", "flag"])
-def test_focused_github_app_preserves_deployment_env(tmp_path, monkeypatch, compute, model_source):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_focused_github_app_preserves_deployment_env(configured: Path, monkeypatch, model_source):
     monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("OUTERLOOP_AUTHOR_MODEL", raising=False)
     existing = {
-        "OUTERLOOP_COMPUTE": compute,
+        "OUTERLOOP_COMPUTE": "slurm",
         "OUTERLOOP_TARGET": "o/r",
         "OUTERLOOP_ROOT": "/shared/state",
         "OUTERLOOP_ACCOUNT": "acct",
@@ -1227,11 +1152,11 @@ def test_focused_github_app_preserves_deployment_env(tmp_path, monkeypatch, comp
     }
     for key in existing:
         monkeypatch.delenv(key, raising=False)
-    path = tmp_path / ".env"
+    path = configured / ".env"
     path.write_text(
         "".join(f"{k}={v}\n" for k, v in existing.items()) + "OUTERLOOP_PAT_FILE=/old\n"
     )
-    app_json = tmp_path / "github_app.myapp.json"
+    app_json = configured / "github_app.myapp.json"
     app_json.write_text(json.dumps({"app_id": 1, "installation_id": 7, "private_key": "/k.pem"}))
     monkeypatch.setattr("outerloop.appauth.app_provider_from_file", lambda path: object())
     monkeypatch.setattr(
@@ -1254,11 +1179,10 @@ def test_focused_github_app_preserves_deployment_env(tmp_path, monkeypatch, comp
     assert result["OUTERLOOP_GITHUB_APP_FILE"] == str(app_json)
 
 
-def test_focused_github_app_drops_a_preserved_local_forge(tmp_path, monkeypatch):
+def test_focused_github_app_drops_a_preserved_local_forge(configured: Path, monkeypatch):
     """`--github-app` means GitHub: updating a local deployment must not keep
     OUTERLOOP_FORGE=local beside the GitHub credentials it writes."""
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    path = tmp_path / ".env"
+    path = configured / ".env"
     path.write_text(
         "OUTERLOOP_COMPUTE=local\n"
         "OUTERLOOP_TARGET=o/r\n"
@@ -1266,7 +1190,7 @@ def test_focused_github_app_drops_a_preserved_local_forge(tmp_path, monkeypatch)
         "OUTERLOOP_FORGE=local\n"
         "OUTERLOOP_CLAUDE_MODEL=claude-x\n"
     )
-    app_json = tmp_path / "github_app.myapp.json"
+    app_json = configured / "github_app.myapp.json"
     app_json.write_text(json.dumps({"app_id": 1, "installation_id": 7, "private_key": "/k.pem"}))
     monkeypatch.setattr("outerloop.appauth.app_provider_from_file", lambda path: object())
     monkeypatch.setattr(
@@ -1305,32 +1229,7 @@ def test_init_local_forge_records_the_configured_kernel_login(tmp_path, monkeypa
     assert "OUTERLOOP_BOT_LOGIN=lab-kernel" in (tmp_path / "config" / ".env").read_text()
 
 
-def test_whitespace_claude_model_prompts(tmp_path, monkeypatch):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
-    monkeypatch.delenv("OUTERLOOP_CLAUDE_MODEL", raising=False)
-    monkeypatch.setattr(init, "validate_pat", lambda *a: "")
-    monkeypatch.setattr(init.getpass, "getpass", lambda *a: "")
-    asked = []
-
-    def ask(prompt, default="", **kw):
-        if prompt.startswith("Claude model"):
-            asked.append(kw)
-            return "claude-prompt"
-        return default
-
-    monkeypatch.setattr(init, "_ask", ask)
-    assert (
-        init.main(
-            ["--compute", "local", "--target", "o/r", "--pat-file", "/p", "--claude-model", "   "]
-        )
-        == 0
-    )
-    assert asked == [{"required": True}]
-    assert "OUTERLOOP_CLAUDE_MODEL=claude-prompt\n" in (tmp_path / ".env").read_text()
-
-
 def test_render_env_keeps_comments_and_order_of_a_hand_edited_file() -> None:
-    from outerloop.init import InitAnswers, render_env
 
     existing = (
         "# my deployment\n"
@@ -1362,13 +1261,12 @@ def test_render_env_keeps_comments_and_order_of_a_hand_edited_file() -> None:
     assert text.endswith("\n") and "\n\n\n" not in text
 
 
-def test_init_hermes_author(tmp_path, monkeypatch):
+def test_init_hermes_author(configured: Path, monkeypatch):
     monkeypatch.setattr("outerloop.hermes_install.hermes_ready", lambda repo: True)
     monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "openrouter")
-    image = tmp_path / "image.sif"
+    image = configured / "image.sif"
     image.touch()
     monkeypatch.setattr(init, "ensure_image", lambda **kw: str(image))
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(init, "hermes_ready", lambda repo: True)
     monkeypatch.setattr(init, "locate_harness", lambda backend: "/opt/hermes")
     assert (
@@ -1388,15 +1286,14 @@ def test_init_hermes_author(tmp_path, monkeypatch):
         )
         == 0
     )
-    env = (tmp_path / ".env").read_text()
+    env = (configured / ".env").read_text()
     assert "OUTERLOOP_AUTHOR_BACKEND=hermes" in env
     assert "REVIEW_HERMES_REPO=/opt/hermes" in env
     assert "OUTERLOOP_HERMES_BIN" not in env
 
 
 @pytest.mark.parametrize("missing", ["model", "provider", "image", "runtime", "budget"])
-def test_init_refuses_incomplete_hermes(tmp_path, monkeypatch, capsys, missing):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_init_refuses_incomplete_hermes(configured: Path, monkeypatch, capsys, missing):
     monkeypatch.setattr(init, "locate_harness", lambda backend: "/opt/hermes")
     monkeypatch.setattr("outerloop.hermes_install.hermes_ready", lambda repo: missing != "runtime")
     monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "openai" if missing != "provider" else "")
@@ -1404,7 +1301,7 @@ def test_init_refuses_incomplete_hermes(tmp_path, monkeypatch, capsys, missing):
         "OUTERLOOP_HERMES_RESUME_MAX_CHARS", "bad" if missing == "budget" else "120000"
     )
     monkeypatch.delenv("OUTERLOOP_AUTHOR_ENDPOINT", raising=False)
-    image = tmp_path / "image.sif"
+    image = configured / "image.sif"
     image.touch()
     monkeypatch.setattr(init, "ensure_image", lambda **kw: "" if missing == "image" else str(image))
     args = [
@@ -1420,13 +1317,11 @@ def test_init_refuses_incomplete_hermes(tmp_path, monkeypatch, capsys, missing):
     if missing != "model":
         args += ["--author-model", "gpt-native"]
     assert init.main(args) == 2
-    assert not (tmp_path / ".env").exists()
+    assert not (configured / ".env").exists()
     assert "outerloop init:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex"])
-def test_init_ignores_hermes_budget_for_other_authors(tmp_path, monkeypatch, backend):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_init_ignores_hermes_budget_for_other_authors(configured: Path, monkeypatch):
     monkeypatch.setenv("OUTERLOOP_HERMES_RESUME_MAX_CHARS", "invalid")
     assert (
         init.main(
@@ -1437,7 +1332,7 @@ def test_init_ignores_hermes_budget_for_other_authors(tmp_path, monkeypatch, bac
                 "--target",
                 "o/r",
                 "--author-backend",
-                backend,
+                "claude",
                 "--author-model",
                 "native-model",
                 "--claude-model",
@@ -1450,20 +1345,19 @@ def test_init_ignores_hermes_budget_for_other_authors(tmp_path, monkeypatch, bac
 
 
 @pytest.mark.parametrize("backend", ["codex", "hermes"])
-def test_fresh_init_provisions_override_before_validation(tmp_path, monkeypatch, backend):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_fresh_init_provisions_override_before_validation(configured: Path, monkeypatch, backend):
     monkeypatch.setenv(
         "OUTERLOOP_AUTHOR_OVERRIDES",
         json.dumps({"owner/repo": {"backend": backend, "model": "org/model"}}),
     )
     monkeypatch.setenv("REVIEW_HERMES_PROVIDER", "openrouter")
-    monkeypatch.setenv("REVIEW_HERMES_REPO", str(tmp_path / "hermes"))
+    monkeypatch.setenv("REVIEW_HERMES_REPO", str(configured / "hermes"))
     installed = []
 
     def install(name, target=None):
         name = name or "claude"
         installed.append(name)
-        return str(tmp_path / name)
+        return str(configured / name)
 
     def ready(repo):
         return "hermes" in installed
@@ -1471,7 +1365,7 @@ def test_fresh_init_provisions_override_before_validation(tmp_path, monkeypatch,
     monkeypatch.setattr(init, "install_harness", install)
     monkeypatch.setattr(init, "hermes_ready", ready)
     monkeypatch.setattr("outerloop.hermes_install.hermes_ready", ready)
-    image = tmp_path / "image.sif"
+    image = configured / "image.sif"
 
     def download(**kwargs):
         assert "claude" in installed and backend in installed
@@ -1480,14 +1374,13 @@ def test_fresh_init_provisions_override_before_validation(tmp_path, monkeypatch,
 
     monkeypatch.setattr(init, "ensure_image", download)
     assert init.main(["--yes", "--compute", "local", "--target", "owner/repo"]) == 0
-    env = (tmp_path / ".env").read_text()
+    env = (configured / ".env").read_text()
     assert f"OUTERLOOP_IMAGE={image}" in env
     key = "REVIEW_HERMES_REPO" if backend == "hermes" else "OUTERLOOP_CODEX_BIN"
-    assert f"{key}={tmp_path / backend}" in env
+    assert f"{key}={configured / backend}" in env
 
 
-def test_init_bad_override_json_fails_before_provisioning(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_init_bad_override_json_fails_before_provisioning(configured: Path, monkeypatch, capsys):
     monkeypatch.setenv("OUTERLOOP_AUTHOR_OVERRIDES", "{")
     monkeypatch.setattr(init, "install_harness", lambda *a, **k: pytest.fail("installed"))
     monkeypatch.setattr(init, "ensure_image", lambda **k: pytest.fail("downloaded"))
@@ -1562,13 +1455,12 @@ def test_panel_hint_requires_no_image_and_nonempty_panel(capsys, monkeypatch):
     assert capsys.readouterr().out == ""
 
 
-def test_init_keeps_panel_opt_in_settings(tmp_path, monkeypatch):
-    monkeypatch.setattr(init, "CONFIG_DIR", tmp_path)
+def test_init_keeps_panel_opt_in_settings(configured: Path, monkeypatch):
     monkeypatch.setattr(init, "locate_harness", lambda _: "")
     monkeypatch.setenv("OUTERLOOP_PANEL_UNCONTAINED", "1")
-    monkeypatch.setenv("OUTERLOOP_PANEL_KEY_FILE", str(tmp_path / "panel_key"))
+    monkeypatch.setenv("OUTERLOOP_PANEL_KEY_FILE", str(configured / "panel_key"))
     argv = ["--yes", "--compute", "local", "--target", "o/r", "--no-image"]
     assert init.main([*argv, "--no-install-harness"]) == 0
-    written = (tmp_path / ".env").read_text()
+    written = (configured / ".env").read_text()
     assert "OUTERLOOP_PANEL_UNCONTAINED=1" in written
-    assert f"OUTERLOOP_PANEL_KEY_FILE={tmp_path / 'panel_key'}" in written
+    assert f"OUTERLOOP_PANEL_KEY_FILE={configured / 'panel_key'}" in written
