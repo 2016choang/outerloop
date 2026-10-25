@@ -647,6 +647,7 @@ def test_totals_ignore_forged_and_replaced_sidecars(tmp_path, contained):
     expected = {
         "session_cost_usd": 0.42,
         "known_session_cost_usd": 0.42,
+        "priced_sessions": 1,
         "unpriced_sessions": 0,
         "captured_sessions": 1,
         "verified": contained,

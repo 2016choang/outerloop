@@ -576,6 +576,8 @@ def session_totals(directory: Path) -> dict[str, Any]:
     return {
         "session_cost_usd": known if costs and not unknown else None,
         "known_session_cost_usd": known,
+        # A leg with no usage event is counted as unpriced, never as zero.
+        "priced_sessions": len(costs) - unknown,
         "unpriced_sessions": unknown,
         "captured_sessions": len(sessions),
         "verified": bool(sessions) and all(entry["verified"] for entry in sessions.values()),

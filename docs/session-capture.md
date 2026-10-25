@@ -67,9 +67,11 @@ persisted index, never from files the author could touch:
 my-run target=owner/repo ... session-cost=$1.2345 unpriced-sessions=0
 ```
 
-A run shows `unknown` cost while any captured session is unpriced, and
-counts those sessions separately. Totals carry a `verified` flag, true when
-every indexed session ran inside the session container. An uncontained
+Cost is `unknown` only when nothing is priced. When some legs are priced and
+others are unpriced (a wake killed mid-turn leaves no usage event), status
+shows the priced subtotal as a lower bound and counts the unpriced legs, for
+example `session-cost>=$1.2345 (1 unpriced)`. Totals carry a `verified` flag,
+true when every indexed session ran inside the session container. An uncontained
 session labels the totals `unverified`, and in local mode the author shares
 the operator's filesystem, so persisted totals are informational there.
 

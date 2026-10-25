@@ -105,10 +105,19 @@ def render_text(status: dict[str, Any]) -> str:
         if run.get("verification") == "self_report":
             line += " verification=self_report (self-reported)"
         cost = run.get("session_cost_usd")
-        line += f" session-cost={'$' + format(cost, '.4f') if cost is not None else 'unknown'}"
+        known = run.get("known_session_cost_usd")
+        unpriced = run.get("unpriced_sessions", 0)
+        if cost is not None:
+            line += " session-cost=$" + format(cost, ".4f")
+        elif known is not None and unpriced and run.get("priced_sessions", 0):
+            # Some legs have no usage event (a wake killed mid-turn), so only
+            # the priced part is known: show it as a lower bound.
+            line += " session-cost>=$" + format(known, ".4f") + f" ({unpriced} unpriced)"
+        else:
+            line += " session-cost=unknown"
         if not run.get("verified", False):
             line += " (unverified)"
-        line += f" unpriced-sessions={run.get('unpriced_sessions', 0)}"
+        line += f" unpriced-sessions={unpriced}"
         if wait := run["endpoint_wait"]:
             line += (
                 f" waiting for endpoint {wait.get('endpoint', '?')} "
