@@ -47,6 +47,7 @@ from typing import Any
 
 from outerloop.compute import GONE
 from outerloop.contract import Benchmark, Budgets
+from outerloop.syscall_cli import _rel_path_ok
 
 log = logging.getLogger(__name__)
 
@@ -252,15 +253,6 @@ def launch_task_ids(launches: Iterable[Launch], job_ids: list[str]) -> list[str]
     if len(job_ids) == sum(max(la.array, 1) for la in launches):
         return list(job_ids)
     return []
-
-
-def _rel_path_ok(path: str) -> bool:
-    """A declared artifact must stay inside the job's tree: repo-relative,
-    no traversal, no absolute paths. (Same stance as scope normalization.)"""
-    if not path or len(path) > 500 or path.startswith(("/", "~")) or "\\" in path:
-        return False
-    parts = path.split("/")
-    return all(p not in ("", ".", "..") for p in parts)
 
 
 def read_request(workspace: Path) -> SyscallRequest | None:
