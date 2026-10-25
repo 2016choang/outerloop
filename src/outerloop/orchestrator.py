@@ -2786,7 +2786,7 @@ def _ended(row: dict[str, Any]) -> str:
     return how
 
 
-def _experiments_section(rows: list[dict[str, Any]]) -> list[str]:
+def experiments_section(rows: list[dict[str, Any]]) -> list[str]:
     """The run's launches as the ledger recorded them: what ran, how each job
     ended, what it printed last. Empty when the run launched nothing."""
     if not rows:
@@ -2908,7 +2908,7 @@ def pr_body(
             "## Research report",
             "",
             *report_lines,
-            *_experiments_section(experiments or []),
+            *experiments_section(experiments or []),
             "",
             "## Measured",
             "",
@@ -2939,7 +2939,7 @@ def pr_body(
                 "## Research report",
                 "",
                 redact(result.submit_report, redact_secrets)[:MAX_REPORT_BODY],
-                *_experiments_section(experiments or []),
+                *experiments_section(experiments or []),
                 "",
                 "## Self-reported values",
                 "",
