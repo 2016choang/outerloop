@@ -26,12 +26,16 @@ def test_summarize() -> None:
         "decisions": 4,
         "refusals": 3,
         "refusals_by_verb": {"submit": 2, "message": 1},
+        "tool_calls": 0,
+        "tool_calls_by_tool": {},
         "authors": ["claude/model-x", "claude/model-y"],
     }
     assert trajectory.summarize([]) == {
         "decisions": 0,
         "refusals": 0,
         "refusals_by_verb": {},
+        "tool_calls": 0,
+        "tool_calls_by_tool": {},
         "authors": [],
     }
 
@@ -52,7 +56,8 @@ def test_cli_summary(tmp_path: Path, capsys) -> None:
     for flags in ([], ["--verify"]):
         assert main(args + flags) == 0
         assert capsys.readouterr().out.splitlines()[-1] == (
-            "refusals: 3 of 4 decisions (submit 2, message 1); author: claude/model-x"
+            "refusals: 3 of 4 decisions (submit 2, message 1); author: claude/model-x; "
+            "tool calls: 0"
         )
         assert main(args + flags + ["--json"]) == 0
         expected = trajectory.read(directory)

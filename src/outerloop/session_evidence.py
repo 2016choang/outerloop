@@ -23,6 +23,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from outerloop.tool_calls import record_tool_calls
 from outerloop.trajectory import session_event
 
 if TYPE_CHECKING:
@@ -320,6 +321,10 @@ def capture_session(
                     )
                 except Exception:
                     log.warning("could not retain session evidence", exc_info=True)
+                try:
+                    record_tool_calls(workspace, backend, result.session_record_path)
+                except Exception:
+                    log.warning("could not record session tool calls", exc_info=True)
                 session_event(
                     workspace, "session.end", backend, self.model, result.session_id, result=result
                 )

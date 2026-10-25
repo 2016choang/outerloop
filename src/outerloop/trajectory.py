@@ -119,10 +119,12 @@ def read(run_dir: Path) -> list[dict]:
 
 
 def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    """Count recorded syscall decisions and collect session authors in first-seen order."""
+    """Count recorded syscall decisions, tool calls and session authors in first-seen order."""
     decisions = 0
     refusals = 0
     by_verb: dict[str, int] = {}
+    tool_calls = 0
+    by_tool: dict[str, int] = {}
     authors: list[str] = []
     for event in events:
         data = event.get("data")
@@ -134,6 +136,12 @@ def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 refusals += 1
                 verb = data.get("verb") or "unknown"
                 by_verb[verb] = by_verb.get(verb, 0) + 1
+        elif event.get("type") == "tool.call":
+            tool_calls += 1
+            tool = data.get("tool")
+            if not isinstance(tool, str) or not tool:
+                tool = "unknown"
+            by_tool[tool] = by_tool.get(tool, 0) + 1
         elif event.get("type") == "session.start" and data.get("role") != "judge":
             author = f"{data.get('backend') or 'unknown'}/{data.get('model') or 'unknown'}"
             if author not in authors:
@@ -142,6 +150,8 @@ def summarize(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "decisions": decisions,
         "refusals": refusals,
         "refusals_by_verb": by_verb,
+        "tool_calls": tool_calls,
+        "tool_calls_by_tool": by_tool,
         "authors": authors,
     }
 

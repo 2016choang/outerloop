@@ -46,4 +46,10 @@ directory. Self-reported measures record the ruler alone: they have no
 evaluation image or result files. A pending submission does not yet name the
 trajectory head: kernels before this one reject unknown pending fields, so the
 pending reader now ignores them, and a later release can add the field without
-breaking this one. Tool calls and attestation are later steps.
+breaking this one. Session end also appends one `tool.call` event per tool call
+found in the retained, redacted native log: Claude project transcripts and Codex
+rollout JSONL are parsed host-side, bounded to 500 calls per session, and Hermes
+or unknown formats yield nothing. Each event carries the tool name, repo-relative
+files, a bounded shell command and, when the log has them, the exit code and
+outcome — never file contents or tool output. `outerloop trajectory` counts them
+by tool and the PR body summarizes the top tools. Attestation is a later step.

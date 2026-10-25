@@ -152,10 +152,20 @@ from outerloop.syscall import install_tool as syscall_install_tool
 from outerloop.syscall import refresh_tool as syscall_refresh_tool
 from outerloop.syscall import write_siblings as syscall_write_siblings
 from outerloop.trajectory import file_refs
+from outerloop.trajectory import read as read_trajectory
 from outerloop.trajectory import record as record_event
+from outerloop.trajectory import summarize as summarize_trajectory
 from outerloop.verifier import MAX_CLAIM_CHARS
 
 REPLY_MARKER = marker("followup")
+
+
+def tool_call_counts(run_dir: Path) -> dict[str, int]:
+    """The run's recorded tool calls by tool; an unreadable chain reads as none."""
+    try:
+        return summarize_trajectory(read_trajectory(run_dir))["tool_calls_by_tool"]
+    except OSError:
+        return {}
 
 
 def _pr_number(pr_url: str) -> int:
@@ -4724,6 +4734,7 @@ def publish(
                 display_digits=bench.display_digits,
                 experiments=experiments_rows(run_dir),
                 base_sha=base_sha,
+                tool_calls=tool_call_counts(run_dir),
             )
             body += f"\n\n{progress_link(config.target, github)}\n"
             if issue_number:

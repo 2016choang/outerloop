@@ -1360,9 +1360,16 @@ def main(argv: list[str] | None = None) -> int:
                     f"{verb} {count}" for verb, count in summary["refusals_by_verb"].items()
                 )
                 authors = ", ".join(summary["authors"]) or "unknown"
+                tools = ", ".join(
+                    f"{tool} {count}"
+                    for tool, count in sorted(
+                        summary["tool_calls_by_tool"].items(), key=lambda item: (-item[1], item[0])
+                    )
+                )
                 print(
                     f"refusals: {summary['refusals']} of {summary['decisions']} decisions"
-                    f"{f' ({verbs})' if verbs else ''}; author: {authors}"
+                    f"{f' ({verbs})' if verbs else ''}; author: {authors}; "
+                    f"tool calls: {summary['tool_calls']}{f' ({tools})' if tools else ''}"
                 )
         return 1 if problems and problems != ["no trajectory"] else 0
     if args.command == "status":
