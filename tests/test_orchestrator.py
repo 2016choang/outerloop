@@ -1807,21 +1807,28 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
     assert "Session prose" in plain and "## Experiments" not in plain
 
 
-def test_unmatched_numbers_ignores_years_seeds_and_measurable_values() -> None:
+def test_unmatched_numbers_skips_only_seeds_and_references() -> None:
     from outerloop.number_check import unmatched_numbers
 
+    # only the seed and the #12 reference are skipped; small numbers and years are checked
     report = (
-        "Baseline 0.512 in 2024, candidate 0.501 from seed 8271 at step 4. "
+        "Baseline 0.512 (see #12) in 2024, candidate 0.501 from seed 8271 at step 4. "
         "The sweep cell gave 3.28; the candidate curve peaked at 13.4."
     )
     assert unmatched_numbers(report, "mean_tour_length", [0.5123, 0.5014], ['{"val": 3.28}']) == [
-        "13.4"
+        "2024",
+        "4",
+        "13.4",
     ]
-    # a reported improvement is the gap between measurements, with either sign
-    gain = "Baseline 0.512, candidate 0.501: a gain of 0.011 (delta -0.011)."
-    assert unmatched_numbers(gain, "mean_tour_length", [0.5123, 0.5014], []) == []
-    # scientific notation, a spaced percentage, and a zero gap
-    sci = "Candidate loss 1.2e-3 vs baseline 1.20e-3; candidate 50 % faster; gap 0.0."
+    # an integer metric on a line naming seeds is still checked
+    steps = "Candidate steps_to_target with seeds 3, 4 and 5 was 1840; baseline 2176."
+    assert unmatched_numbers(steps, "steps_to_target", [2176, 1856], []) == ["1840"]
+    # a reported gain is the gap between measurements, with either sign; a
+    # percentage is the relative gap
+    gain = "Baseline 2176, candidate 1856: a gain of 320 (delta -320), 14.7 % fewer, not 30%."
+    assert unmatched_numbers(gain, "steps_to_target", [2176, 1856], []) == ["30"]
+    # scientific notation and a zero gap
+    sci = "Candidate loss 1.2e-3 vs baseline 1.20e-3; gap 0.0."
     assert unmatched_numbers(sci, "loss", [0.0012, 0.0012], []) == []
 
 
