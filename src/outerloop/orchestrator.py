@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from outerloop.containment import executable_roots, seatbelt_available, seatbelt_wrap
 from outerloop.image import apptainer_from_env
+from outerloop.number_check import unmatched_numbers
 from outerloop.trajectory import file_refs
 from outerloop.trajectory import record as record_event
 
@@ -2835,6 +2836,20 @@ def process_section(tool_calls: dict[str, int] | None) -> list[str]:
     return ["", "## Process", "", f"{total} tool {calls} from the run's trajectory: {top}."]
 
 
+def number_check_section(numbers: list[str]) -> list[str]:
+    """Report-only list of report values that match no recorded measurement."""
+    if not numbers:
+        return []
+    return [
+        "",
+        "## Number check",
+        "",
+        "These values in the report match no measurement recorded for this run: "
+        + ", ".join(numbers)
+        + ". Report-only; nothing was blocked.",
+    ]
+
+
 def pr_body(
     result: AttemptResult,
     config: RunConfig,
@@ -2844,6 +2859,8 @@ def pr_body(
     *,
     base_sha: str = "",
     tool_calls: dict[str, int] | None = None,
+    metric: str = "",
+    measured_values: Sequence[float] | None = None,
 ) -> str:
     """The PR body for an improved run: the author's report, the experiments
     the run actually ran (from the launch ledger), the measured table, and
@@ -2851,7 +2868,8 @@ def pr_body(
 
     Human surfaces render at the benchmark's conventional precision;
     full precision lives only in results/leader.json, and every
-    comparison runs on full floats.
+    comparison runs on full floats. When `measured_values` is given, a
+    report-only check lists report values that match no measurement.
     """
     from outerloop.progress import fmt_metric
 
@@ -2892,6 +2910,19 @@ def pr_body(
         if result.panel_transcript
         else []
     )
+    report_text = result.submit_report or (result.session.final_text if result.session else "")
+    number_lines = (
+        number_check_section(
+            unmatched_numbers(
+                report_text,
+                metric,
+                measured_values,
+                [str(row.get("result") or "") for row in experiments or []],
+            )
+        )
+        if measured_values is not None
+        else []
+    )
     if result.submit_report:
         report_lines = [
             "*Written by the author at submit, before the orchestrator measured; the "
@@ -2925,6 +2956,7 @@ def pr_body(
             *report_lines,
             *experiments_section(experiments or []),
             *process_section(tool_calls),
+            *number_lines,
             "",
             "## Measured",
             "",
@@ -2957,6 +2989,7 @@ def pr_body(
                 redact(result.submit_report, redact_secrets)[:MAX_REPORT_BODY],
                 *experiments_section(experiments or []),
                 *process_section(tool_calls),
+                *number_lines,
                 "",
                 "## Self-reported values",
                 "",

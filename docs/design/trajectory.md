@@ -52,4 +52,9 @@ rollout JSONL are parsed host-side, bounded to 500 calls per session, and Hermes
 or unknown formats yield nothing. Each event carries the tool name, repo-relative
 files, a bounded shell command and, when the log has them, the exit code and
 outcome — never file contents or tool output. `outerloop trajectory` counts them
-by tool and the PR body summarizes the top tools. Attestation is a later step.
+by tool and the PR body summarizes the top tools. The PR body also runs a
+report-only number check: numbers on report lines that mention the metric,
+baseline or candidate are compared with every `measure` event's values and the
+Experiments result cells, after rounding to the report's decimals, and the
+unmatched ones are listed under "## Number check". Nothing is blocked and no
+event is written for it. Attestation is a later step.

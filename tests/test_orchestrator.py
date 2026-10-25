@@ -1807,6 +1807,47 @@ def test_pr_body_leads_with_the_report_and_lists_the_experiments() -> None:
     assert "Session prose" in plain and "## Experiments" not in plain
 
 
+def test_unmatched_numbers_ignores_years_seeds_and_measurable_values() -> None:
+    from outerloop.number_check import unmatched_numbers
+
+    report = (
+        "Baseline 0.512 in 2024, candidate 0.501 from seed 8271 at step 4. "
+        "The sweep cell gave 3.28; the candidate curve peaked at 13.4."
+    )
+    assert unmatched_numbers(report, "mean_tour_length", [0.5123, 0.5014], ['{"val": 3.28}']) == [
+        "13.4"
+    ]
+    # a reported improvement is the gap between measurements, with either sign
+    gain = "Baseline 0.512, candidate 0.501: a gain of 0.011 (delta -0.011)."
+    assert unmatched_numbers(gain, "mean_tour_length", [0.5123, 0.5014], []) == []
+
+
+def test_pr_body_number_check_is_report_only() -> None:
+    from outerloop.orchestrator import AttemptResult
+
+    result = AttemptResult(
+        outcome="improved",
+        baseline=0.512,
+        candidate=0.501,
+        submit_report="Baseline 0.512, candidate 0.501; the curve peaked at 13.4.",
+    )
+    config = RunConfig(target="org/pilot", benchmark="tsp")
+    body = pr_body(result, config, (), metric="mean_tour_length", measured_values=[0.5123, 0.5014])
+    assert "## Number check" in body
+    assert (
+        "match no measurement recorded for this run: 13.4. "
+        "Report-only; nothing was blocked." in body
+    )
+    matched = pr_body(
+        result,
+        config,
+        (),
+        metric="mean_tour_length",
+        measured_values=[0.5123, 0.5014, 13.4],
+    )
+    assert "## Number check" not in matched
+
+
 def test_submit_without_report_is_accepted(tmp_path: Path) -> None:
     _write_syscall(tmp_path, {"launches": [], "submit": True})
     result, harness, _ = run_climb(

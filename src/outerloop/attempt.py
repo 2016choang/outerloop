@@ -94,6 +94,7 @@ from outerloop.ledger_events import (
 from outerloop.limits import bound_limits, capped_limits, clamp_bound_limits, effective_limits
 from outerloop.markers import has_marker, marker
 from outerloop.measure import DispatchedMeasurer, DispatchSettings, measured_image
+from outerloop.number_check import measured_values as measured_from_events
 from outerloop.orchestrator import (
     MAX_REPORT_BODY,
     AttemptResult,
@@ -166,6 +167,14 @@ def tool_call_counts(run_dir: Path) -> dict[str, int]:
         return summarize_trajectory(read_trajectory(run_dir))["tool_calls_by_tool"]
     except OSError:
         return {}
+
+
+def measure_values(run_dir: Path) -> list[float]:
+    """The run's recorded measure values; an unreadable chain reads as none."""
+    try:
+        return measured_from_events(read_trajectory(run_dir))
+    except OSError:
+        return []
 
 
 def _pr_number(pr_url: str) -> int:
@@ -4735,6 +4744,8 @@ def publish(
                 experiments=experiments_rows(run_dir),
                 base_sha=base_sha,
                 tool_calls=tool_call_counts(run_dir),
+                metric=bench.metric,
+                measured_values=measure_values(run_dir),
             )
             body += f"\n\n{progress_link(config.target, github)}\n"
             if issue_number:
