@@ -248,6 +248,23 @@ def test_legacy_and_unknown_totals(tmp_path):
     assert totals["priced_sessions"] == 1
 
 
+def test_cumulative_session_keeps_its_last_priced_total_as_a_lower_bound(tmp_path):
+    from outerloop.session_evidence import index_session
+
+    # a Codex session's first leg is priced; its resumed wake was killed mid-turn
+    for invocation, cost in (("first", 0.2), ("wake", None)):
+        index_session(
+            tmp_path,
+            invocation,
+            f"{invocation}.json",
+            {"cost_usd": cost, "verified": True, "backend": "codex", "session_id": "s"},
+        )
+    totals = session_totals(tmp_path)
+    assert totals["session_cost_usd"] is None
+    assert totals["known_session_cost_usd"] == pytest.approx(0.2)
+    assert totals["priced_sessions"] == 1 and totals["unpriced_sessions"] == 1
+
+
 def test_hermes_wrapper_keeps_reported_usage_and_full_messages(tmp_path, monkeypatch, capsys):
     import sys
     from types import ModuleType

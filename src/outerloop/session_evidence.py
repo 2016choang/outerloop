@@ -561,9 +561,13 @@ def session_totals(directory: Path) -> dict[str, Any]:
         )
 
     latest: dict[tuple[str, str], str] = {}
+    last_priced: dict[tuple[str, str], float] = {}
     for invocation, entry in sessions.items():
         if cumulative(entry):
-            latest[(entry["backend"], entry["session_id"])] = invocation
+            key = (entry["backend"], entry["session_id"])
+            latest[key] = invocation
+            if (cost := number(entry["cost_usd"])) is not None:
+                last_priced[key] = cost
     costs = tuple(
         number(entry["cost_usd"])
         for invocation, entry in sessions.items()
@@ -573,11 +577,19 @@ def session_totals(directory: Path) -> dict[str, Any]:
     )
     known = sum(cost for cost in costs if cost is not None)
     unknown = sum(cost is None for cost in costs)
+    # A cumulative session whose newest leg is unpriced (killed mid-turn) still
+    # has its last priced total as a lower bound.
+    floors = [
+        last_priced[key]
+        for key, invocation in latest.items()
+        if number(sessions[invocation]["cost_usd"]) is None and key in last_priced
+    ]
+    known += sum(floors)
     return {
         "session_cost_usd": known if costs and not unknown else None,
         "known_session_cost_usd": known,
         # A leg with no usage event is counted as unpriced, never as zero.
-        "priced_sessions": len(costs) - unknown,
+        "priced_sessions": len(costs) - unknown + len(floors),
         "unpriced_sessions": unknown,
         "captured_sessions": len(sessions),
         "verified": bool(sessions) and all(entry["verified"] for entry in sessions.values()),
