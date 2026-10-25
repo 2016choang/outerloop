@@ -82,9 +82,19 @@ def test_claude_calls() -> None:
         ]
     )
     assert tool_calls.extract("claude", log) == [
-        {"tool": "Bash", "files": [], "command": "uv run pytest -q", "exit": 1, "ok": False},
-        {"tool": "Edit", "files": ["src/bench.py"], "ok": True},
+        {
+            "tool": "Bash",
+            "files": [],
+            "command": "uv run pytest -q",
+            "id": "t1",
+            "exit": 1,
+            "ok": False,
+        },
+        {"tool": "Edit", "files": ["src/bench.py"], "id": "t2", "ok": True},
     ]
+    # a path outside the session's working directory is dropped, not recorded
+    assert tool_calls._relative("/etc/hosts", "/work") == ""
+    assert tool_calls._relative("../elsewhere/x.py", "/work") == ""
 
 
 def test_codex_calls() -> None:
@@ -160,12 +170,20 @@ def test_codex_calls() -> None:
         ]
     )
     assert tool_calls.extract("codex", log) == [
-        {"tool": "shell", "files": [], "command": "bash -lc uv run pytest", "exit": 2, "ok": False},
-        {"tool": "apply_patch", "files": ["src/bench.py"]},
+        {
+            "tool": "shell",
+            "files": [],
+            "command": "bash -lc uv run pytest",
+            "id": "c1",
+            "exit": 2,
+            "ok": False,
+        },
+        {"tool": "apply_patch", "files": ["src/bench.py"], "id": "c2"},
         {
             "tool": "exec",
             "files": [],
             "command": 'text(await shell("uv run pytest -q"))',
+            "id": "c3",
             "ok": True,
         },
     ]
@@ -233,8 +251,12 @@ def test_session_end_appends_tool_call_events(tmp_path: Path) -> None:
     events = trajectory.read(run)
     assert [event["type"] for event in events] == ["session.start", "tool.call", "session.end"]
     assert events[1]["actor"] == "author:agent-07"
-    assert events[1]["data"] == {"tool": "Bash", "files": [], "command": "ls", "ok": True}
+    call = {"tool": "Bash", "files": [], "command": "ls", "id": "t1", "ok": True}
+    assert events[1]["data"] == call
     assert events[1]["refs"] == []
+    # a resumed leg re-reads the whole session log; its earlier calls are not recorded again
+    Adapter().run("brief", ws)
+    assert [e["type"] for e in trajectory.read(run)].count("tool.call") == 1
 
 
 def test_pr_process_section_and_summary_line(tmp_path: Path, capsys) -> None:

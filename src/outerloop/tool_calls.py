@@ -12,14 +12,15 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from outerloop.trajectory import record
+from outerloop.trajectory import read, record
 
 MAX_CALLS = 500
 MAX_FILES = 20
 MAX_PATH = 200
 MAX_COMMAND = 200
 MAX_TOOL = 100
-MAX_LOG_BYTES = 8_000_000
+MAX_LOG_BYTES = 32 * 1024 * 1024  # session_evidence retains up to this much
+MAX_ID = 100
 
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _EXIT_CODE = re.compile(r"(?:Process exited with code|Exit code)\s*:?\s*(-?\d+)", re.IGNORECASE)
@@ -79,11 +80,14 @@ def _command(value: Any) -> str:
 
 
 def _relative(value: str, cwd: str) -> str:
-    """Strip the session's working directory so files read as repo-relative."""
+    """Strip the session's working directory so files read as repo-relative;
+    a path outside it reads as "" and is dropped."""
     text = value.strip()
     root = cwd.rstrip("/")
     if root and text.startswith(root + "/"):
         text = text[len(root) + 1 :]
+    if text.startswith(("/", "~")) or ".." in text.split("/"):
+        return ""
     return text[:MAX_PATH]
 
 
@@ -157,6 +161,7 @@ def claude_calls(text: str) -> Iterator[dict[str, Any]]:
                     call["command"] = command
                 call_id = part.get("id")
                 if isinstance(call_id, str):
+                    call["id"] = call_id[:MAX_ID]
                     by_id[call_id] = call
                 calls.append(call)
             elif part.get("type") == "tool_result":
@@ -213,12 +218,13 @@ def codex_calls(text: str) -> Iterator[dict[str, Any]]:
                 call["files"] = _patch_files(args["input"], cwd)
             if command := _command(args.get("command") or args.get("cmd")):
                 call["command"] = command
-            elif isinstance(patch, str) and not call["files"] and (command := _command(patch)):
-                # newer Codex runs commands through a script tool (`exec`)
-                # whose input is the script itself, not JSON arguments
+            elif name == "exec" and isinstance(patch, str) and (command := _command(patch)):
+                # newer Codex runs commands through a script tool whose input
+                # is the script itself, not JSON arguments
                 call["command"] = command
             call_id = payload.get("call_id")
             if isinstance(call_id, str):
+                call["id"] = call_id[:MAX_ID]
                 by_id[call_id] = call
             calls.append(call)
         elif kind in ("function_call_output", "custom_tool_call_output"):
@@ -278,5 +284,13 @@ def record_tool_calls(workspace: Path, backend: str, session_record_path: str) -
     if directory is None:
         return
     actor = _actor(directory, workspace)
+    # a resumed session's log repeats its earlier calls: record each id once
+    seen = {
+        event["data"].get("id")
+        for event in read(directory)
+        if event.get("type") == "tool.call" and isinstance(event.get("data"), dict)
+    }
     for call in calls:
+        if call.get("id") and call["id"] in seen:
+            continue
         record(directory, "tool.call", call, actor=actor)
