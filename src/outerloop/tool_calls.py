@@ -19,7 +19,6 @@ MAX_FILES = 20
 MAX_PATH = 200
 MAX_COMMAND = 200
 MAX_TOOL = 100
-MAX_LOG_BYTES = 32 * 1024 * 1024  # session_evidence retains up to this much
 MAX_ID = 100
 
 _AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -246,9 +245,10 @@ def extract(backend: str, text: str) -> list[dict[str, Any]]:
 
 
 def _read_retained(path: Path) -> str:
+    """The whole retained copy: session evidence already caps it at its
+    configured size (OUTERLOOP_NATIVE_LOG_MAX_BYTES)."""
     try:
-        with path.open("rb") as stream:
-            return stream.read(MAX_LOG_BYTES).decode("utf-8", errors="ignore")
+        return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError:
         return ""
 
