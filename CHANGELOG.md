@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- Session end records each tool call from the retained Claude or Codex log as a `tool.call` trajectory event, once per call even when a session resumes. `outerloop trajectory` and a new Process section in the PR body show counts by tool. Older kernels ignore these events.
 - `outerloop status` shows a run's priced session cost as a lower bound when some legs are unpriced (a wake killed mid-turn leaves no usage event), for example `session-cost>=$4.2000 (1 unpriced)`, instead of hiding the priced part behind `unknown`; the status row and JSON gain the priced-leg count (#516).
 - The pre-PR panel accepts a composite change — a PR that carries several changes — when the report gives each component's isolated measurement and the combination's under the same protocol and the combination is what the kernel measured. A bundle without those isolated measurements stays blocked (#489).
 - Claude sessions can use a subscription token from `claude setup-token` (`sk-ant-oat...`). The harness sends it as `CLAUDE_CODE_OAUTH_TOKEN`, not `ANTHROPIC_API_KEY`, and `init` accepts it. A panel judge on a token runs `claude --safe-mode`, because `--bare` cannot read OAuth tokens. Both modes ignore the checkout's CLAUDE.md, hooks, plugins and MCP servers. The pinned Claude Code release (2.1.285) has `--safe-mode`.

@@ -2821,6 +2821,20 @@ def experiments_section(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+MAX_PROCESS_TOOLS = 5
+
+
+def process_section(tool_calls: dict[str, int] | None) -> list[str]:
+    """Total and top tools from the run's trajectory; empty when there are none."""
+    total = sum((tool_calls or {}).values())
+    if not total:
+        return []
+    ranked = sorted((tool_calls or {}).items(), key=lambda item: (-item[1], item[0]))
+    top = ", ".join(f"{name} {count}" for name, count in ranked[:MAX_PROCESS_TOOLS])
+    calls = "call" if total == 1 else "calls"
+    return ["", "## Process", "", f"{total} tool {calls} from the run's trajectory: {top}."]
+
+
 def pr_body(
     result: AttemptResult,
     config: RunConfig,
@@ -2829,6 +2843,7 @@ def pr_body(
     experiments: list[dict[str, Any]] | None = None,
     *,
     base_sha: str = "",
+    tool_calls: dict[str, int] | None = None,
 ) -> str:
     """The PR body for an improved run: the author's report, the experiments
     the run actually ran (from the launch ledger), the measured table, and
@@ -2909,6 +2924,7 @@ def pr_body(
             "",
             *report_lines,
             *experiments_section(experiments or []),
+            *process_section(tool_calls),
             "",
             "## Measured",
             "",
@@ -2940,6 +2956,7 @@ def pr_body(
                 "",
                 redact(result.submit_report, redact_secrets)[:MAX_REPORT_BODY],
                 *experiments_section(experiments or []),
+                *process_section(tool_calls),
                 "",
                 "## Self-reported values",
                 "",
