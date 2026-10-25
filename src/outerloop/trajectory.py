@@ -179,6 +179,18 @@ def check_attest(run_dir: Path, run_id: str) -> bool | None:
     )
 
 
+def unattested_tail(run_dir: Path) -> int:
+    """Events after the last attest event: the attestation does not cover them.
+    The kernel may legitimately record a few after an ending (e.g. cancelled
+    launches), so this is reported, not treated as a mismatch."""
+    try:
+        events = read(run_dir)
+    except OSError:
+        return 0
+    last = max((i for i, e in enumerate(events) if e.get("type") == "attest"), default=None)
+    return 0 if last is None else len(events) - last - 1
+
+
 def _warn_cap(path: Path) -> None:
     if path not in _cap_warned:
         _cap_warned.add(path)

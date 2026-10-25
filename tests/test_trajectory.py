@@ -189,7 +189,12 @@ def test_verify_reports_attested_then_mismatch(tmp_path: Path, monkeypatch, caps
     assert main(args) == 0
     out = capsys.readouterr().out
     assert "chain intact" in out
-    assert "attested" in out
+    assert "attested\n" in out
+
+    # an event appended after the attestation is reported as not covered
+    trajectory.record(directory, "launch.result", {}, at=3)
+    assert main(args) == 0
+    assert "attested; 1 later event(s) not covered" in capsys.readouterr().out
 
     path = directory / trajectory.LEDGER
     lines = path.read_bytes().splitlines(keepends=True)

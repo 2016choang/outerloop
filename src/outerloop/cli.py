@@ -1319,7 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
         return pr(args)
     if args.command == "trajectory":
         from outerloop.runstate import run_dir
-        from outerloop.trajectory import check_attest, read, summarize, verify
+        from outerloop.trajectory import check_attest, read, summarize, unattested_tail, verify
 
         values = env_file_values(keys=("OUTERLOOP_ROOT",)) if not args.root else {}
         root = Path(
@@ -1360,7 +1360,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.verify:
                 print("; ".join(problems) if problems else "chain intact")
                 if attested and not problems:
-                    print("attested")
+                    tail = unattested_tail(directory)
+                    print(
+                        "attested"
+                        if not tail
+                        else f"attested; {tail} later event(s) not covered by the attestation"
+                    )
             if events:
                 summary = summarize(events)
                 verbs = ", ".join(
