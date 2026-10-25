@@ -105,6 +105,7 @@ from outerloop.orchestrator import (
     attempt_once,
     benchmark_floor,
     clears_min_delta,
+    experiments_section,
     out_of_scope,
     pr_body,
     resume_attempt,
@@ -3917,20 +3918,23 @@ def _panel_lenses_from_args(
     return tuple(lenses), tuple(dict.fromkeys(secrets))
 
 
-def _panel_claim_body(benchmark: str, baseline: float, candidate: float, report: str) -> str:
-    """The synthetic claim the panel judges: the kernel's measured claim plus
-    the author's report and nothing else — this repository's guidance travels
-    in the judges' own prompt (run_panel's `guidance`), never inside this
-    body, which every judge prompt fences as untrusted data. The report
-    budget subtracts the actual header so the body never outgrows the cap
-    the verify prompt fences it under."""
+def _panel_claim_body(
+    benchmark: str, baseline: float, candidate: float, report: str, experiments: str = ""
+) -> str:
+    """The synthetic claim the panel judges: the kernel's measured claim, the
+    run's launches from the kernel's ledger, and the author's report — this
+    repository's guidance travels in the judges' own prompt (run_panel's
+    `guidance`), never inside this body, which every judge prompt fences as
+    untrusted data. The report budget subtracts the header and the ledger
+    table so the body never outgrows the cap the verify prompt fences it under."""
     header = (
         f"Automated improvement claim (pre-PR): {benchmark} "
-        f"{baseline} -> {candidate}, measured by the orchestrator.\n\n"
+        f"{baseline} -> {candidate}, measured by the orchestrator.\n"
+        f"{experiments}\n\n"
         f"## Research report\n\n*Session prose, written before "
         f"the orchestrator measured.*\n\n"
     )
-    return f"{header}{report[: MAX_CLAIM_CHARS - len(header)]}"
+    return f"{header}{report[: max(0, MAX_CLAIM_CHARS - len(header))]}"
 
 
 def build_panel_runner(
@@ -3968,7 +3972,13 @@ def build_panel_runner(
     reads = {"n": start_round}
     render_claim = claim_body or (
         lambda baseline, candidate, report: _panel_claim_body(
-            benchmark, baseline, candidate, report
+            benchmark,
+            baseline,
+            candidate,
+            report,
+            # the run's own launches, recorded by the kernel: the evidence a
+            # composite change's component measurements must appear in
+            "\n".join(experiments_section(experiments_rows(run_dir))),
         )
     )
 

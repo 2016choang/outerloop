@@ -280,8 +280,9 @@ def test_verify_brief_accepts_a_measured_composite_but_blocks_a_bare_bundle() ->
     from outerloop.verifier import build_verify_agent_brief
 
     brief = " ".join(build_verify_agent_brief(make_pr(), "contract").split())
-    assert "each component's isolated measurement" in brief
+    assert "every component's isolated measurement" in brief
+    assert "the kernel's Experiments table (not only in the report's prose)" in brief
     assert "the combination is what the orchestrator measured" in brief
-    assert "A bundle that reports no isolated measurement for each component stays blocked" in brief
+    assert "does not show such a measurement for every component stays blocked" in brief
     # the author's guidance names the same route, beside the one-hypothesis rule
     assert "each part's isolated measurement and the combination's" in AUTHOR
