@@ -9,7 +9,7 @@ import re
 from collections.abc import Iterable
 
 # A number not embedded in a word or identifier, not part of a "#123" reference.
-_NUMBER = re.compile(r"(?<![#\w.])(-?\d+(?:\.\d+)?)")
+_NUMBER = re.compile(r"(?<![#\w.])(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)")
 
 
 def measured_values(events: Iterable[dict]) -> list[float]:
@@ -45,7 +45,7 @@ def unmatched_numbers(
     candidates in first-seen order.
     """
     values = list(measured)
-    known = values + [abs(a - b) for a in values for b in values if a != b]
+    known = values + [abs(a - b) for a in values for b in values]
     for cell in experiment_results:
         known.extend(float(m.group(1)) for m in _NUMBER.finditer(cell))
     metric_name = metric.strip().lower()
@@ -68,9 +68,9 @@ def unmatched_numbers(
 def _ignored(line: str, match: re.Match[str]) -> bool:
     """Whether a number is clearly not a reported metric value."""
     token = match.group(1)
-    if line[match.end() : match.end() + 1] == "%":
+    if line[match.end() :].lstrip(" ")[:1] == "%":
         return True
-    if "." in token:
+    if "." in token or "e" in token.lower():
         return False
     value = int(token)
     if value < 10 or 1900 <= value <= 2099:
@@ -81,5 +81,8 @@ def _ignored(line: str, match: re.Match[str]) -> bool:
 def _matches(token: str, known: Iterable[float]) -> bool:
     """Equality after rounding both sides to the report's decimals, ignoring sign."""
     token = token.lstrip("-")
-    decimals = len(token.split(".")[1]) if "." in token else 0
+    mantissa, _, exponent = token.lower().partition("e")
+    decimals = len(mantissa.split(".")[1]) if "." in mantissa else 0
+    if exponent:  # scientific notation: round to the mantissa's digits
+        return any(float(f"{abs(value):.{decimals}e}") == float(token) for value in known)
     return any(f"{abs(value):.{decimals}f}" == token for value in known)

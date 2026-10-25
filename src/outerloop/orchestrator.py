@@ -2836,17 +2836,21 @@ def process_section(tool_calls: dict[str, int] | None) -> list[str]:
     return ["", "## Process", "", f"{total} tool {calls} from the run's trajectory: {top}."]
 
 
+MAX_NUMBER_CHECK = 20
+
+
 def number_check_section(numbers: list[str]) -> list[str]:
     """Report-only list of report values that match no recorded measurement."""
     if not numbers:
         return []
+    shown = ", ".join(numbers[:MAX_NUMBER_CHECK])
+    more = f" and {len(numbers) - MAX_NUMBER_CHECK} more" if len(numbers) > MAX_NUMBER_CHECK else ""
     return [
         "",
         "## Number check",
         "",
         "These values in the report match no measurement recorded for this run: "
-        + ", ".join(numbers)
-        + ". Report-only; nothing was blocked.",
+        f"{shown}{more}. Report-only; nothing was blocked.",
     ]
 
 
@@ -2910,7 +2914,11 @@ def pr_body(
         if result.panel_transcript
         else []
     )
-    report_text = result.submit_report or (result.session.final_text if result.session else "")
+    # the same redacted, truncated text the body shows, never the raw report
+    report_text = redact(
+        result.submit_report or (result.session.final_text if result.session else ""),
+        redact_secrets,
+    )[:MAX_REPORT_BODY]
     number_lines = (
         number_check_section(
             unmatched_numbers(

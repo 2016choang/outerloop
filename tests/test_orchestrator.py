@@ -1820,6 +1820,9 @@ def test_unmatched_numbers_ignores_years_seeds_and_measurable_values() -> None:
     # a reported improvement is the gap between measurements, with either sign
     gain = "Baseline 0.512, candidate 0.501: a gain of 0.011 (delta -0.011)."
     assert unmatched_numbers(gain, "mean_tour_length", [0.5123, 0.5014], []) == []
+    # scientific notation, a spaced percentage, and a zero gap
+    sci = "Candidate loss 1.2e-3 vs baseline 1.20e-3; candidate 50 % faster; gap 0.0."
+    assert unmatched_numbers(sci, "loss", [0.0012, 0.0012], []) == []
 
 
 def test_pr_body_number_check_is_report_only() -> None:
@@ -1846,6 +1849,17 @@ def test_pr_body_number_check_is_report_only() -> None:
         measured_values=[0.5123, 0.5014, 13.4],
     )
     assert "## Number check" not in matched
+    # the check reads the redacted text the body shows: a secret's digits never surface
+    leaky = AttemptResult(
+        outcome="improved",
+        baseline=0.512,
+        candidate=0.501,
+        submit_report="Baseline 0.512 with run-77814, candidate 0.501.",
+    )
+    redacted = pr_body(
+        leaky, config, ("run-77814",), metric="mean_tour_length", measured_values=[0.5123, 0.5014]
+    )
+    assert "77814" not in redacted
 
 
 def test_submit_without_report_is_accepted(tmp_path: Path) -> None:
