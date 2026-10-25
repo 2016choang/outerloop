@@ -16,7 +16,9 @@ from outerloop.style import PLAIN_STYLE
 
 AUTHOR = (
     "Form ONE concrete hypothesis for why the benchmark underperforms "
-    "before you implement, and implement that one.\n\n"
+    "before you implement, and implement that one. A combination whose parts "
+    "each fall below the improvement floor may ship together if the PR "
+    "reports each part's isolated measurement and the combination's.\n\n"
     "Read past reports critically: a negative settles only what was actually "
     "run. One point in a parameter space, an eval that hit its walltime, or "
     "an infrastructure failure does not close an idea — vary what went "

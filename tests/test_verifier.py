@@ -270,3 +270,18 @@ def test_taste_categories_live_only_in_the_panel_pack() -> None:
     # the standards themselves are the pack's, carried as advisory guidance
     assert "documents each change's own effect" in PANEL
     assert "picture of the landscape" in PANEL
+
+
+def test_verify_brief_accepts_a_measured_composite_but_blocks_a_bare_bundle() -> None:
+    # Issue #489: the panel accepts a combination when each component was measured in
+    # isolation under the same protocol and the combination is what the
+    # orchestrator gated; a bundle without those measurements stays blocked.
+    from outerloop.guidance_pack import AUTHOR
+    from outerloop.verifier import build_verify_agent_brief
+
+    brief = " ".join(build_verify_agent_brief(make_pr(), "contract").split())
+    assert "each component's isolated measurement" in brief
+    assert "the combination is what the orchestrator measured" in brief
+    assert "A bundle that reports no isolated measurement for each component stays blocked" in brief
+    # the author's guidance names the same route, beside the one-hypothesis rule
+    assert "each part's isolated measurement and the combination's" in AUTHOR

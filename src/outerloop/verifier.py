@@ -154,7 +154,15 @@ measured:
 - unsupported-claim: statements in the report that the PR's own evidence
   contradicts
 - measurement-gap: noise floors, seeds, or protocol issues in the
-  measurement itself
+  measurement itself, including a bundle with no isolated measurement for
+  each of its components
+
+A composite change — a pull request that carries several changes — is
+acceptable when the report gives each component's isolated measurement and
+the combination's under the same protocol, and the combination is what the
+orchestrator measured. A bundle that reports no isolated measurement for
+each component stays blocked: the combination's number alone does not show
+what produced it. Check the report's evidence; do not re-run anything.
 
 Use the contract (the rules), the ruler source (how the eval actually
 works), the claimed numbers, and the agent's own report. The report's
@@ -177,8 +185,9 @@ exploitation, ruler or seed fishing, data leakage, a confirmed
 contradiction between the claim and the PR's OWN evidence (a mechanism
 story the report's own numbers refute, or an improvement that a trivial
 baseline in the report's own tables beats — true even when the measured
-delta itself is real), or a scope or measurement fact that makes the
-number mislead. Anything else — every research-taste judgment, including
+delta itself is real), a bundle that reports no isolated measurement for
+each component, or a scope or measurement fact that makes the number
+mislead. Anything else — every research-taste judgment, including
 anything set by repository guidance, when provided below — is advisory:
 `blocking` false.
 
