@@ -244,6 +244,8 @@ def test_legacy_and_unknown_totals(tmp_path):
     assert totals["session_cost_usd"] is None
     assert totals["known_session_cost_usd"] == 0.42
     assert totals["unpriced_sessions"] == 1
+    # a priced and an unpriced leg together: status can show the lower bound
+    assert totals["priced_sessions"] == 1
 
 
 def test_hermes_wrapper_keeps_reported_usage_and_full_messages(tmp_path, monkeypatch, capsys):
