@@ -1526,11 +1526,12 @@ def test_terminal_releases_snapshot_when_notebook_fails(review_run, monkeypatch,
     assert released == ["refs/test/snapshot"]
     assert load_record(root, "tsp-r1").state == ENDED
     assert "notebook unavailable" in caplog.text
-    from outerloop.trajectory import read, verify
+    from outerloop.trajectory import check_attest, read, verify
 
     directory = run_dir(root, record.run_id)
     events = read(directory)
-    assert [event["type"] for event in events] == ["ending"]
+    assert [event["type"] for event in events] == ["ending", "attest"]
+    assert check_attest(directory, record.run_id) is True
     assert events[0]["data"] == {"state": "merged", "reason": "PR merged"}
     assert events[0]["ts"] > NOW  # wall-clock time, not the caller's tick time
     assert events[0]["refs"][0]["path"] == "report.md"

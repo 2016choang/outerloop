@@ -57,4 +57,11 @@ report-only number check: numbers on report lines that mention the metric,
 baseline or candidate are compared with every `measure` event's values and the
 Experiments result cells, after rounding to the report's decimals, and the
 unmatched ones are listed under "## Number check". Nothing is blocked and no
-event is written for it. Attestation is a later step.
+event is written for it. At the end of a run the kernel appends one `attest`
+event carrying an HMAC-SHA256 over the run id and the chain head. Its 32-byte
+key is created owner-only beside the operator settings file
+(`trajectory_attest.key`). `--verify` reports `attested` when the last attest
+event matches that key and `attestation mismatch` otherwise, which shows the
+deployment's own chain was not altered after ending but is not a public proof:
+anyone holding the key can recompute it, and a missing event or key proves
+nothing.

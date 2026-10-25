@@ -152,7 +152,7 @@ from outerloop.syscall import ensure_excluded as syscall_excluded
 from outerloop.syscall import install_tool as syscall_install_tool
 from outerloop.syscall import refresh_tool as syscall_refresh_tool
 from outerloop.syscall import write_siblings as syscall_write_siblings
-from outerloop.trajectory import file_refs
+from outerloop.trajectory import attest, file_refs
 from outerloop.trajectory import read as read_trajectory
 from outerloop.trajectory import record as record_event
 from outerloop.trajectory import summarize as summarize_trajectory
@@ -6410,6 +6410,7 @@ def finish_run(
         {"state": ending, "reason": note},
         refs=file_refs(directory, report),
     )
+    attest(directory, record.run_id)
     ref = str(record.stage.get("candidate_ref") or "")
     if snapshot_attempted and not ref:
         ws = None
