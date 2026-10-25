@@ -76,11 +76,10 @@ class ToolError(Exception):
 
 
 def _rel_path_ok(path: str) -> bool:
-    """MUST match syscall._rel_path_ok exactly — the CLI's fast check has to
-    accept precisely what the kernel accepts, or the author burns a sleep on a
-    post-session validation error (the very thing the tool exists to prevent).
-    Rejects absolute/`~`, backslashes, over-long, and any empty/`.`/`..`
-    component (so ``, `.`, `out/./x`, `out//x` all fail here as they do there)."""
+    """The kernel's artifact-path rule; the CLI uses the same function for
+    early feedback. It rejects absolute and home paths, backslashes, paths
+    over 500 characters, and empty, `.` or `..` path parts. This module uses
+    only the standard library because it is copied into workspaces."""
     if not path or len(path) > 500 or path.startswith(("/", "~")) or "\\" in path:
         return False
     return all(p not in ("", ".", "..") for p in path.split("/"))

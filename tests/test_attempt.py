@@ -4970,6 +4970,9 @@ def test_guidance_layer_shapes_brief_and_claim(mode: str) -> None:
     )
     claim = _panel_claim_body("tsp", 13.8, 13.1, "report text")
     assert "measured by the orchestrator" in claim
+    # the kernel's launch ledger rides ahead of the author's prose (#489)
+    ledgered = _panel_claim_body("tsp", 13.8, 13.1, "report text", "## Experiments\n| row |")
+    assert ledgered.index("## Experiments") < ledgered.index("## Research report")
     # the header and wrapper are priced into the report budget, so a long
     # report cannot push the body past the fence the verify prompt caps
     long_claim = _panel_claim_body("tsp", 13.8, 13.1, "r" * (2 * MAX_CLAIM_CHARS))
