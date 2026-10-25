@@ -8,6 +8,7 @@ from outerloop.cli import main
 from outerloop.endpoint_wait import recovered, unavailable
 from outerloop.endpoints import EndpointUnavailable
 from outerloop.runstate import RunRecord, save_record
+from outerloop.status import render_text
 
 
 def test_status_wait_and_outage_read_only(tmp_path, capsys, monkeypatch):
@@ -75,6 +76,7 @@ roadmap: README.md
                 "author_overridden": True,
                 "session_cost_usd": None,
                 "known_session_cost_usd": 0.0,
+                "priced_sessions": 0,
                 "unpriced_sessions": 0,
                 "captured_sessions": 0,
                 "verified": False,
@@ -92,6 +94,40 @@ roadmap: README.md
     payload = json.loads(capsys.readouterr().out)
     assert payload["outages"] == []
     assert payload["runs"][0]["endpoint_wait"] is None
+
+
+@pytest.mark.parametrize(
+    ("cost", "known", "priced", "unpriced", "expected"),
+    [
+        # a wake killed mid-turn is unpriced; show the priced part as a floor
+        (None, 4.2, 2, 1, "session-cost>=$4.2000 (1 unpriced)"),
+        (4.2, 4.2, 3, 0, "session-cost=$4.2000"),
+        # nothing was priced: a floor of zero would hide that
+        (None, 0.0, 0, 1, "session-cost=unknown"),
+    ],
+)
+def test_status_cost_line(cost, known, priced, unpriced, expected):
+    run = {
+        "run_id": "one",
+        "target": "owner/repo",
+        "agent": "agent-01",
+        "state": "parked",
+        "phase": "",
+        "author_backend": "claude",
+        "author_model": None,
+        "author_overridden": False,
+        "gpu_hours_used": 0.0,
+        "gpu_hours_budget": None,
+        "session_cost_usd": cost,
+        "known_session_cost_usd": known,
+        "priced_sessions": priced,
+        "unpriced_sessions": unpriced,
+        "verified": True,
+        "endpoint_wait": None,
+    }
+    line = render_text({"runs": [run], "outages": []})
+    assert expected in line
+    assert f"unpriced-sessions={unpriced}" in line
 
 
 @pytest.mark.parametrize("exists", [True, False])
