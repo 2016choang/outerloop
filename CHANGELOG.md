@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- The PR body gains a report-only Number check that lists values in the author's report matching no `measure` event or Experiments result when rounded to the report's decimals; nothing is blocked and no trajectory event is added.
 - Session end records each tool call from the retained Claude or Codex log as a `tool.call` trajectory event, once per call even when a session resumes. `outerloop trajectory` and a new Process section in the PR body show counts by tool. Older kernels ignore these events.
 - `outerloop status` shows a run's priced session cost as a lower bound when some legs are unpriced (a wake killed mid-turn leaves no usage event), for example `session-cost>=$4.2000 (1 unpriced)`, instead of hiding the priced part behind `unknown`; the status row and JSON gain the priced-leg count (#516).
 - The pre-PR panel accepts a composite change — a PR that carries several changes — when the report gives each component's isolated measurement and the combination's under the same protocol and the combination is what the kernel measured. A bundle without those isolated measurements stays blocked (#489).
