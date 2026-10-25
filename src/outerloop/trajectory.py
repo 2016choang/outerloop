@@ -5,12 +5,16 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import json
 import logging
+import os
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from outerloop import paths
 
 if TYPE_CHECKING:
     from outerloop.harness import SessionResult
@@ -18,6 +22,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 LEDGER = "trajectory.jsonl"
 MAX_LEDGER_BYTES = 4_000_000
+ATTEST_KEY = "trajectory_attest.key"
+ATTEST_ALG = "hmac-sha256"
 _cap_warned: set[Path] = set()
 
 
@@ -45,6 +51,20 @@ def record(
     The directory name is the run id. The lock covers reading and appending;
     malformed lines remain visible to verify, including after recovery.
     """
+    _append(run_dir, type, data, actor=actor, refs=refs, at=at)
+
+
+def _append(
+    run_dir: Path,
+    type: str,
+    data: dict[str, Any] | Callable[[str], dict[str, Any]],
+    *,
+    actor: str = "kernel",
+    refs: Iterable[dict[str, str]] = (),
+    at: float | None = None,
+) -> None:
+    """Append one event under the exclusive lock, so `prev` and any data built
+    from it describe the chain as it is at the write."""
     try:
         path = run_dir / LEDGER
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +89,7 @@ def record(
                     ts=time.time() if at is None else float(at),
                     type=type,
                     actor=actor,
-                    data=data,
+                    data=data(prev) if callable(data) else data,
                     refs=list(refs),
                     prev=prev,
                 )
@@ -81,6 +101,94 @@ def record(
                 stream.write(encoded)
     except Exception as exc:
         log.warning("could not write trajectory in %s: %s", run_dir, exc)
+
+
+def _attestation_key(*, create: bool) -> bytes | None:
+    """The deployment's 32-byte key beside the operator settings file, created
+    owner-only on first use. Only `attest` creates it."""
+    try:
+        path = paths.env_file().parent / ATTEST_KEY
+        if create and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass  # another process created it first
+            else:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(os.urandom(32))
+        key = path.read_bytes()
+    except (OSError, ValueError) as exc:
+        log.warning("attestation key unavailable: %s", exc)
+        return None
+    if len(key) != 32:
+        log.warning("attestation key is not 32 bytes")
+        return None
+    return key
+
+
+def attest(run_dir: Path, run_id: str) -> None:
+    """Append one HMAC over the run id and the chain head; best effort."""
+    key = _attestation_key(create=True)
+    if key is None:
+        return
+
+    def data(head: str) -> dict[str, Any]:
+        mac = hmac.new(key, f"{run_id}\n{head}".encode(), hashlib.sha256).hexdigest()
+        return {"head": head, "alg": ATTEST_ALG, "mac": mac}
+
+    _append(run_dir, "attest", data)
+
+
+def check_attest(run_dir: Path, run_id: str) -> bool | None:
+    """Does the last attest event verify with this deployment's key?
+
+    None when the chain has no attest event or no key exists; True only when the
+    recorded head is the actual preceding line and the MAC matches it.
+    """
+    key = _attestation_key(create=False)
+    if key is None:
+        return None
+    try:
+        with (run_dir / LEDGER).open("rb") as stream:
+            raw = stream.read(MAX_LEDGER_BYTES + 1)
+    except OSError:
+        return None
+    found: tuple[dict[str, Any], str] | None = None
+    prev = hashlib.sha256(run_id.encode()).hexdigest()
+    for line in raw.splitlines(keepends=True):
+        if not line.endswith(b"\n"):
+            break
+        if (row := _event(line[:-1])) is None:
+            continue
+        if row.get("type") == "attest":
+            found = (row, prev)
+        prev = hashlib.sha256(line[:-1]).hexdigest()
+    if found is None:
+        return None
+    row, head = found
+    data = row.get("data")
+    if not isinstance(data, dict) or data.get("alg") != ATTEST_ALG:
+        return False
+    mac = hmac.new(key, f"{run_id}\n{head}".encode(), hashlib.sha256).hexdigest()
+    recorded = data.get("mac")
+    return (
+        data.get("head") == head
+        and isinstance(recorded, str)
+        and hmac.compare_digest(recorded, mac)
+    )
+
+
+def unattested_tail(run_dir: Path) -> int:
+    """Events after the last attest event: the attestation does not cover them.
+    The kernel may legitimately record a few after an ending (e.g. cancelled
+    launches), so this is reported, not treated as a mismatch."""
+    try:
+        events = read(run_dir)
+    except OSError:
+        return 0
+    last = max((i for i, e in enumerate(events) if e.get("type") == "attest"), default=None)
+    return 0 if last is None else len(events) - last - 1
 
 
 def _warn_cap(path: Path) -> None:

@@ -70,6 +70,17 @@ def _configured_claude_model(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _test_attestation_key():
+    """Run endings must not create a deployment key in the runner's home; the
+    trajectory tests put the real key in a temp config dir themselves. Its own
+    MonkeyPatch, so a test's `monkeypatch.undo()` cannot remove the guard."""
+    guard = pytest.MonkeyPatch()
+    guard.setattr("outerloop.trajectory._attestation_key", lambda *, create: b"k" * 32)
+    yield
+    guard.undo()
+
+
+@pytest.fixture(autouse=True)
 def _no_tick_lease_settle(monkeypatch):
     """The settle read-back after a fresh tick lease is a one-second sleep in
     production; tests that want it pass settle_s explicitly."""

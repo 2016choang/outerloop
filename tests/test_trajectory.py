@@ -6,6 +6,10 @@ import pytest
 
 from outerloop import trajectory
 
+# conftest stubs the key so unrelated run-ending tests touch no real config;
+# these tests exercise the file itself.
+REAL_ATTESTATION_KEY = trajectory._attestation_key
+
 
 def test_summarize() -> None:
     start = {"type": "session.start", "data": {"backend": "claude", "model": "model-x"}}
@@ -146,3 +150,73 @@ def test_non_serializable_data_is_best_effort(tmp_path: Path, caplog) -> None:
     assert trajectory.read(tmp_path) == []
     trajectory.record(tmp_path, "wake", {})
     assert trajectory.verify(tmp_path, tmp_path.name) == []
+
+
+def test_attest_round_trip(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(trajectory, "_attestation_key", REAL_ATTESTATION_KEY)
+    config = tmp_path / "config"
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(config / ".env"))
+    directory = tmp_path / "runs" / "sample"
+    trajectory.record(directory, "measure", {"value": 1}, at=1)
+
+    trajectory.attest(directory, "sample")
+
+    events = trajectory.read(directory)
+    assert [event["type"] for event in events] == ["measure", "attest"]
+    data = events[-1]["data"]
+    assert data["alg"] == "hmac-sha256"
+    assert data["head"] == events[-1]["prev"]
+    assert len(data["mac"]) == 64
+    assert trajectory.check_attest(directory, "sample") is True
+    assert trajectory.verify(directory, "sample") == []
+    key = config / trajectory.ATTEST_KEY
+    assert key.stat().st_mode & 0o777 == 0o600
+    assert key.read_bytes() != b""
+    assert not (directory / trajectory.ATTEST_KEY).exists()
+
+
+def test_verify_reports_attested_then_mismatch(tmp_path: Path, monkeypatch, capsys) -> None:
+    from outerloop.cli import main
+
+    monkeypatch.setattr(trajectory, "_attestation_key", REAL_ATTESTATION_KEY)
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(tmp_path / "config" / ".env"))
+    directory = tmp_path / "runs" / "sample"
+    trajectory.record(directory, "measure", {"value": 1}, at=1)
+    trajectory.record(directory, "ending", {}, at=2)
+    trajectory.attest(directory, "sample")
+    args = ["trajectory", "sample", "--root", str(tmp_path), "--verify"]
+
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "chain intact" in out
+    assert "attested\n" in out
+
+    # an event appended after the attestation is reported as not covered
+    trajectory.record(directory, "launch.result", {}, at=3)
+    assert main(args) == 0
+    assert "attested; 1 later event(s) not covered" in capsys.readouterr().out
+
+    path = directory / trajectory.LEDGER
+    lines = path.read_bytes().splitlines(keepends=True)
+    lines[1] = lines[1].replace(b'"data": {}', b'"data": {"x": 1}')
+    path.write_bytes(b"".join(lines))
+
+    assert main(args) == 1
+    out = capsys.readouterr().out
+    assert "attestation mismatch" in out
+
+
+def test_attest_without_a_key_skips_the_event(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(trajectory, "_attestation_key", REAL_ATTESTATION_KEY)
+    config = tmp_path / "config"
+    config.write_text("")  # a file where the config dir should be
+    monkeypatch.setenv("OUTERLOOP_ENV_FILE", str(config / ".env"))
+    directory = tmp_path / "runs" / "sample"
+    trajectory.record(directory, "measure", {"value": 1}, at=1)
+
+    with caplog.at_level("WARNING"):
+        trajectory.attest(directory, "sample")
+
+    assert [event["type"] for event in trajectory.read(directory)] == ["measure"]
+    assert trajectory.check_attest(directory, "sample") is None
+    assert "attestation key unavailable" in caplog.text
