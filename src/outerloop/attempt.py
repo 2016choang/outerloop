@@ -259,11 +259,10 @@ def author_config_error(
     env = os.environ if environ is None else environ
     if backend not in ("claude", "codex", "hermes"):
         return f"unknown author backend {backend!r} (expected 'claude', 'codex' or 'hermes')"
-    if backend == "claude":
-        try:
-            author_effort(env)
-        except ValueError as exc:
-            return str(exc)
+    try:
+        author_effort(env)
+    except ValueError as exc:
+        return str(exc)
     if backend == "hermes":
         from outerloop.harness import hermes_resume_max_chars
         from outerloop.hermes_install import hermes_ready
@@ -6053,9 +6052,7 @@ def main() -> int:
                 hermes_repo=Path(os.environ["REVIEW_HERMES_REPO"])
                 if wake_backend == "hermes"
                 else None,
-                effort=author_effort()
-                if wake_backend == "claude" and role_spec is author_spec
-                else "",
+                effort=author_effort() if role_spec is author_spec else "",
             )
         wake_secrets = tuple(k for k in (*forge.secrets(), *wake_panel_secrets, wake_api_key) if k)
         if end_requested(Path(args.run_root), args.resume):
@@ -6208,7 +6205,7 @@ def main() -> int:
                     hermes_repo=Path(os.environ["REVIEW_HERMES_REPO"])
                     if args.author_backend == "hermes"
                     else None,
-                    effort=author_effort() if args.author_backend == "claude" else "",
+                    effort=author_effort(),
                 ),
                 spec=spec,
                 panel_lenses=panel_lenses,

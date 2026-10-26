@@ -1114,15 +1114,16 @@ def test_codex_author_config_error() -> None:
     assert "unknown author backend" in codex_author_config_error("typo", "m", "img.sif")
 
 
-def test_author_config_error_checks_the_claude_effort() -> None:
+@pytest.mark.parametrize(
+    "backend, model, image", [("claude", "claude-x", ""), ("codex", "gpt-5.6-terra", "img.sif")]
+)
+def test_author_config_error_checks_the_effort(backend: str, model: str, image: str) -> None:
     from outerloop.attempt import author_config_error
 
-    bad = {"OUTERLOOP_AUTHOR_EFFORT": "minimal"}
-    assert "OUTERLOOP_AUTHOR_EFFORT" in author_config_error("claude", "claude-x", "", environ=bad)
+    bad = {"OUTERLOOP_AUTHOR_EFFORT": "minimal"}  # Codex knows it; not every backend does
+    assert "OUTERLOOP_AUTHOR_EFFORT" in author_config_error(backend, model, image, environ=bad)
     good = {"OUTERLOOP_AUTHOR_EFFORT": "low"}
-    assert author_config_error("claude", "claude-x", "", environ=good) == ""
-    # other backends never read it
-    assert author_config_error("codex", "gpt-5.6-terra", "img.sif", environ=bad) == ""
+    assert author_config_error(backend, model, image, environ=good) == ""
 
 
 def test_resolve_author_key_file(monkeypatch, tmp_path) -> None:

@@ -109,7 +109,6 @@ def build_harness(
       untrusted checkout, so judges (specs with an `output_schema`) run `--bare`
       — never loading the tree's CLAUDE.md / hooks as instructions. Editors keep
       instruction discovery (the target repo's guidance is legitimate for them).
-      `effort` becomes `--effort`; the other backends ignore it.
     - codex: `danger-full-access` uniformly — codex's own sandbox needs
       bubblewrap (absent in the image, unreliable nested in apptainer), so the
       boundary is the deployment's container or ephemeral runner, exactly as it
@@ -120,7 +119,9 @@ def build_harness(
     Containment is NOT decided here: pass `container_image` where the
     deployment has a jail (the cluster), pass none where the runner itself is
     the ephemeral boundary (CI). The tokenless split keeps credentials out of
-    the session either way."""
+    the session either way. `effort` is each backend's own reasoning-effort
+    setting (`--effort`, `model_reasoning_effort`, `agent.reasoning_effort`);
+    callers pass it for the author only."""
     model, profile = resolve_endpoint(model or "", backend, endpoint)
     if profile:
         api_key = profile.key()
@@ -137,6 +138,7 @@ def build_harness(
             timeout_s=spec.budget.walltime_s,
             container_image=container_image,
             extra_args=(*codex_extra_args, *web),
+            effort=effort,
         )
     if backend == "hermes":
         if hermes_repo is None:
@@ -167,6 +169,7 @@ def build_harness(
             enabled_toolsets=enabled,
             disabled_toolsets=tuple(t for t in _HERMES_TOOLSETS if t not in enabled),
             container_image=container_image,
+            effort=effort,
         )
     if backend != "claude":
         raise ValueError(f"unknown backend: {backend!r}")

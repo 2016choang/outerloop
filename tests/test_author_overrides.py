@@ -263,7 +263,7 @@ def test_binding_survives_setting_change(deployment, monkeypatch, backend, queue
     )
     assert attempt.main() == 0
     assert (seen["backend"], seen["model"]) == (backend, "served-model[endpoint=onprem]")
-    assert seen["effort"] == ("low" if backend == "claude" else "")
+    assert seen["effort"] == "low"
     record = load_record(deployment.run_root, seen["record"].run_id)
     assert record.author_overridden
     if long_session:
@@ -303,7 +303,7 @@ def test_binding_survives_setting_change(deployment, monkeypatch, backend, queue
     monkeypatch.setenv("OUTERLOOP_AUTHOR_EFFORT", "high")
     assert attempt.main() == 0
     assert (seen["backend"], seen["model"]) == (backend, "served-model[endpoint=onprem]")
-    assert seen["effort"] == ("high" if backend == "claude" else "")
+    assert seen["effort"] == "high"
 
     if long_session:
         assert seen["spec"].budget.walltime_s == 180 * 60
