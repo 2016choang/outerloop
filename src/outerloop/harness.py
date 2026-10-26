@@ -90,6 +90,24 @@ def default_claude_model() -> str:
     return model
 
 
+# The levels Claude Code's `--effort` accepts.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def author_effort(env: Mapping[str, str] | None = None) -> str:
+    """The Claude author's effort level from OUTERLOOP_AUTHOR_EFFORT, passed to
+    Claude Code as `--effort`. Unset or blank keeps Claude Code's own default.
+    Raises ValueError for a value outside EFFORT_LEVELS. Judges, the steward and
+    other backends never read it."""
+    value = (os.environ if env is None else env).get("OUTERLOOP_AUTHOR_EFFORT", "")
+    value = value.strip().lower()
+    if value and value not in EFFORT_LEVELS:
+        raise ValueError(
+            f"OUTERLOOP_AUTHOR_EFFORT must be one of {', '.join(EFFORT_LEVELS)} (got {value!r})"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class SessionResult:
     """What happened in one session — everything the orchestrator needs to
@@ -657,6 +675,9 @@ class ClaudeCodeHarness:
     # ignored when set. Contained sessions get the ADC file bind-mounted.
     vertex: VertexConfig | None = None
     endpoint: EndpointProfile | None = None
+    # `--effort` level; "" keeps Claude Code's default. Only the author sets it
+    # (OUTERLOOP_AUTHOR_EFFORT), so judges keep their default depth.
+    effort: str = ""
 
     CONTAINER_CLAUDE = "/opt/agent/claude"
     CONTAINER_ADC = "/opt/agent/adc.json"
@@ -706,6 +727,7 @@ class ClaudeCodeHarness:
             "--permission-mode",
             permission_mode,
             *([("--safe-mode" if oauth else "--bare")] if self.bare else []),
+            *(["--effort", self.effort] if self.effort else []),
             *self.extra_args,
         ]
         if resume_session_id:

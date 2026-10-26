@@ -6,6 +6,7 @@ Versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+- `OUTERLOOP_AUTHOR_EFFORT` sets a Claude author's effort level (`low`, `medium`, `high`, `xhigh` or `max`), passed to Claude Code as `--effort`; the pinned release (2.1.285) has the flag. Unset keeps Claude Code's default. Panel judges, the steward, and Codex or Hermes authors ignore it, so a cheaper author does not change how its work is reviewed. Start, the tick and each wake refuse an unknown level. The setting is read when each session starts and is not stored in run records.
 - Run endings append one `attest` trajectory event: an HMAC-SHA256 over the run id and chain head with a deployment key created owner-only beside the operator settings file, and `outerloop trajectory --verify` reports `attested` or `attestation mismatch`. Older kernels ignore the event; no ledger or PR-body change.
 - The PR body gains a report-only Number check that lists values in the author's report matching no `measure` event or Experiments result when rounded to the report's decimals; nothing is blocked and no trajectory event is added.
 - Session end records each tool call from the retained Claude or Codex log as a `tool.call` trajectory event, once per call even when a session resumes. `outerloop trajectory` and a new Process section in the PR body show counts by tool. Older kernels ignore these events.

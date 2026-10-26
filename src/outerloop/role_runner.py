@@ -98,6 +98,7 @@ def build_harness(
     hermes_repo: Path | None = None,
     hermes_provider: str = "",
     endpoint: str = "",
+    effort: str = "",
 ) -> Harness:
     """Construct the harness for any role on any backend — the ONE deployment
     wiring (`spec.tools` → native flags, `spec.budget` → turns/walltime,
@@ -108,6 +109,7 @@ def build_harness(
       untrusted checkout, so judges (specs with an `output_schema`) run `--bare`
       — never loading the tree's CLAUDE.md / hooks as instructions. Editors keep
       instruction discovery (the target repo's guidance is legitimate for them).
+      `effort` becomes `--effort`; the other backends ignore it.
     - codex: `danger-full-access` uniformly — codex's own sandbox needs
       bubblewrap (absent in the image, unreliable nested in apptainer), so the
       boundary is the deployment's container or ephemeral runner, exactly as it
@@ -185,6 +187,7 @@ def build_harness(
         # role on every CLI flips together and the API key stays the fallback
         vertex=None if profile else vertex_from_env(),
         endpoint=profile,
+        effort=effort,
     )
 
 

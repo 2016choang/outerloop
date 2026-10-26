@@ -1114,6 +1114,17 @@ def test_codex_author_config_error() -> None:
     assert "unknown author backend" in codex_author_config_error("typo", "m", "img.sif")
 
 
+def test_author_config_error_checks_the_claude_effort() -> None:
+    from outerloop.attempt import author_config_error
+
+    bad = {"OUTERLOOP_AUTHOR_EFFORT": "minimal"}
+    assert "OUTERLOOP_AUTHOR_EFFORT" in author_config_error("claude", "claude-x", "", environ=bad)
+    good = {"OUTERLOOP_AUTHOR_EFFORT": "low"}
+    assert author_config_error("claude", "claude-x", "", environ=good) == ""
+    # other backends never read it
+    assert author_config_error("codex", "gpt-5.6-terra", "img.sif", environ=bad) == ""
+
+
 def test_resolve_author_key_file(monkeypatch, tmp_path) -> None:
     """Per-backend author keys COEXIST and are selected by backend; an explicit
     path wins, else the per-backend env var, else the default file."""
@@ -1890,6 +1901,9 @@ def test_harness_is_built_from_the_spec() -> None:
     assert harness.timeout_s == 120
     assert harness.container_image == "img.sif"
     assert harness.bare is False  # an editor keeps the target repo's guidance
+    assert harness.effort == ""  # Claude Code's default unless the author sets one
+    lowered = build_harness("sk-key", spec, effort="low")
+    assert isinstance(lowered, ClaudeCodeHarness) and lowered.effort == "low"
 
     spec = author_spec(max_turns=9, walltime_s=300)
     harness = build_harness(
